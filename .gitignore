@@ -1,0 +1,136 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+*.pid
+*.seed
+*.pid.lock
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+Icon?
+.idea/
+.vscode/
+*.swp
+.swo
+
+# Node.js
+node_modules/
+package-lock.json
+yarn.lock
+.pnpm-debug.log
+.npm/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+dist/
+build/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.env
+.env.*
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+*.javadoc
+
+# macOS
+*.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.class
+.settings/
+bin/
+target/
+
+# JavaScript/React
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+.env
+
+# PHP
+vendor/
+*.phpunit.result.cache
+
+# Java
+*.class
+*.log
+*.war
+*.ear
+target/
+
+# C++
+*.obj
+*.o
+*.so
+*.exe
+*.dll
+
+# Ruby
+*.gem
+.bundle/
+log/
+tmp/
+vendor/bundle/
+
+# Images
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+*.ico
+
+# Filesystem images
+Thumbs.db
+Desktop.ini
+Icon?
+
+# Environment
+*.env
+.env.*
+.venv.*
+*.venv
+
+config.txt
+
+# ignore files
+aggdata_*
+yearly_data*
+monthly_data*
+
+.vscode
+AutogluonModels
+chronos-forecasting
