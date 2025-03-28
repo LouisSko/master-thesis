@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from autogluon.timeseries import TimeSeriesDataFrame
 import math
 
+
 class PredictionLeadTime(BaseModel):
     """
     A class for handling probabilistic forecasts at multiple quantiles.
@@ -161,20 +162,6 @@ class PredictionLeadTime(BaseModel):
         plt.show()
 
 
-# class PredictionLeadTimes(BaseModel):
-#     """
-#     A container class for multiple PredictionLeadTime instances.
-
-#     Attributes:
-#         results (Dict[int, PredictionLeadTime]): Dictionary mapping lead times to PredictionLeadTime instances.
-#     """
-
-#     results: Dict[int, PredictionLeadTime]
-
-#     class Config:
-#         arbitrary_types_allowed = True
-
-
 class PredictionLeadTimes(BaseModel):
     """
     A container class for multiple PredictionLeadTime instances, providing aggregate metrics and plots.
@@ -206,7 +193,7 @@ class PredictionLeadTimes(BaseModel):
     def get_pit_histogram(self, lead_times: Optional[List[int]] = None, overlay: bool = False) -> None:
         """Plots PIT histograms for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        
+
         if overlay:
             plt.figure(figsize=(10, 6))
             bins = len(next(iter(self.results.values())).quantiles)
@@ -241,7 +228,6 @@ class PredictionLeadTimes(BaseModel):
             plt.tight_layout()
             plt.show()
 
-
     def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes empirical coverage rates for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
@@ -268,7 +254,7 @@ class PredictionLeadTimes(BaseModel):
             plt.grid(True)
             plt.show()
 
-        else: 
+        else:
             num_plots = len(lead_times)
             cols = math.ceil(np.sqrt(num_plots))
             rows = (num_plots + cols - 1) // cols
