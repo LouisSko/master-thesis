@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple, Union
 import pandas as pd
 import torch
 import numpy as np
@@ -8,6 +8,63 @@ from scipy.interpolate import interp1d
 from pydantic import BaseModel, Field
 from autogluon.timeseries import TimeSeriesDataFrame
 import math
+
+ITEMID = "item_id"
+TIMESTAMP = "timestamp"
+TARGET = "target"
+
+
+class TabularDataFrame(pd.DataFrame):
+    def __init__(self, data: pd.DataFrame, *args, **kwargs):
+
+        self._validate_multi_index_data_frame(data)
+        self._validate_columns(data)
+        super().__init__(data=data, *args, **kwargs)
+
+    @classmethod
+    def _validate_multi_index_data_frame(cls, data: pd.DataFrame):
+        """Validate a multi-index pd.DataFrame can be converted to TabularDataFrame"""
+
+        if not isinstance(data, pd.DataFrame):
+            raise ValueError(f"data must be a pd.DataFrame, got {type(data)}")
+        if not isinstance(data.index, pd.MultiIndex):
+            raise ValueError(f"data must have pd.MultiIndex, got {type(data.index)}")
+        if not pd.api.types.is_datetime64_dtype(data.index.dtypes[TIMESTAMP]):
+            raise ValueError(f"for {TIMESTAMP}, the only pandas dtype allowed is `datetime64`.")
+        if not data.index.names == (f"{ITEMID}", f"{TIMESTAMP}"):
+            raise ValueError(f"data must have index names as ('{ITEMID}', '{TIMESTAMP}'), got {data.index.names}")
+        item_id_index = data.index.get_level_values(level=ITEMID)
+        if not (pd.api.types.is_integer_dtype(item_id_index) or pd.api.types.is_string_dtype(item_id_index)):
+            raise ValueError(f"all entries in index `{ITEMID}` must be of integer or string dtype")
+
+    @classmethod
+    def _validate_columns(cls, data: pd.DataFrame):
+
+        if "target" not in data.columns:
+            raise ValueError(f"data must contain a column '{TARGET}'")
+
+    def split_by_time(self, cutoff_time: pd.Timestamp) -> Tuple["TabularDataFrame", "TabularDataFrame"]:
+        """Split dataframe to two different ``TabularDataFrame`` s before and after a certain ``cutoff_time``.
+
+        Parameters
+        ----------
+        cutoff_time: pd.Timestamp
+            The time to split the current data frame into two data frames.
+
+        Returns
+        -------
+        data_before: TabularDataFrame
+            Data frame containing time series before the ``cutoff_time`` (exclude ``cutoff_time``).
+        data_after: TabularDataFrame
+            Data frame containing time series after the ``cutoff_time`` (include ``cutoff_time``).
+        """
+
+        nanosecond_before_cutoff = cutoff_time - pd.Timedelta(nanoseconds=1)
+        data_before = self.loc[(slice(None), slice(None, nanosecond_before_cutoff)), :]
+        data_after = self.loc[(slice(None), slice(cutoff_time, None)), :]
+        before = TabularDataFrame(data_before)
+        after = TabularDataFrame(data_after)
+        return before, after
 
 
 class PredictionLeadTime(BaseModel):
@@ -29,7 +86,7 @@ class PredictionLeadTime(BaseModel):
     quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
     freq: pd.Timedelta
     target: Optional[torch.Tensor] = None
-    data: TimeSeriesDataFrame
+    data: Union[TimeSeriesDataFrame, TabularDataFrame]
 
     class Config:
         arbitrary_types_allowed = True
@@ -52,16 +109,24 @@ class PredictionLeadTime(BaseModel):
         result_reset = result.reset_index()
         data_reset = self.data.reset_index()
 
-        # Perform the merge
-        merged = result_reset.merge(
-            data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"]  # From result  # From preds.data
-        )
+        # add the target information.
+        if isinstance(self.data, TimeSeriesDataFrame):
+            merged = result_reset.merge(
+                data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"]  # From result  # From preds.data
+            )
 
-        merged = merged.drop(columns=["timestamp_remove"])
+        # add the target information. For tabular data frame, the target is already aligned
+        elif isinstance(self.data, TabularDataFrame):
+            merged = result_reset.merge(
+                data_reset, left_on=["item_id", "timestamp"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"]  # From result  # From preds.data
+            )
 
+        # remove unused columns
+        merged = merged.drop(columns=[col for col in merged.columns if "_remove" in str(col) or "feature" in str(col)], errors="ignore")
+
+        # restore original multi index
         merged.set_index(result.index.names, inplace=True)
 
-        # Restore the original MultiIndex
         return merged
 
     def get_crps(self) -> float:
