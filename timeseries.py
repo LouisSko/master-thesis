@@ -8,6 +8,7 @@ from scipy.interpolate import interp1d
 from pydantic import BaseModel, Field
 from autogluon.timeseries import TimeSeriesDataFrame
 import math
+import matplotlib.dates as mdates
 
 ITEMID = "item_id"
 TIMESTAMP = "timestamp"
@@ -224,6 +225,48 @@ class PredictionLeadTime(BaseModel):
         plt.title("Reliability Diagram for Quantile Forecasts")
         plt.legend()
         plt.grid(True)
+        plt.show()
+
+    def get_random_plot(self, item_id: int = 0, q_lower: float = 0.1, q_upper: float = 0.9, ts_length: int = 100) -> None:
+        """Randomly plot data"""
+
+        pred_df = self.to_dataframe()
+        subset = pred_df.xs(item_id, level="item_id")
+        rand_start_idx = np.random.randint(0, (len(subset) - ts_length))
+        subset = subset.iloc[rand_start_idx : rand_start_idx + ts_length]
+
+        # Plot settings
+        plt.figure(figsize=(15, 5))
+
+        # Plot median prediction
+        plt.plot(subset.index, subset[0.5], label="Median (50%)", color="C1", linestyle="-", linewidth=2)
+
+        # Plot confidence intervals as shaded regions
+        plt.fill_between(
+            subset.index,
+            subset[q_lower],
+            subset[q_upper],
+            color="C1",
+            alpha=0.2,
+            label=f"{(q_upper-q_lower) * 100:.0f}% Prediction Interval ({q_upper*100:.0f}%-{q_lower*100:.0f}%)",
+        )
+
+        # Plot target values
+        plt.plot(subset.index, subset["target"], label="Actual Target", color="C0", linestyle="-", linewidth=2)
+
+        # Formatting
+        plt.xlabel("Time", fontsize=14)
+        plt.ylabel("Value", fontsize=14)
+        plt.title(f"Prediction Intervals – item_id: {item_id} and lead time: {self.lead_time}", fontsize=16)
+        plt.legend(fontsize=8)
+
+        # Improve x-axis tick formatting
+        ax = plt.gca()
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())  # Automatically space ticks
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))  # Format as 'YYYY-MM-DD HH:MM'
+
+        plt.grid(True, which="both", linestyle="--", linewidth=0.5)  # Optional: Light grid
+
         plt.show()
 
 
