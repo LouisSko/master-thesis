@@ -3,3 +3,5 @@ openpyxl
 pandas
 scoringrules
 matplotlib
+statsmodels
+chronos-forecasting
