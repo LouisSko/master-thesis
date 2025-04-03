@@ -4,8 +4,9 @@ import statsmodels.api as sm
 import scipy.stats as stats
 from postprocessing import neg_log_likelihood
 from scipy.optimize import minimize
-from timeseries import PredictionLeadTimes, PredictionLeadTime
+from timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 import torch
+from tqdm import tqdm
 
 
 def neg_log_likelihood(params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarray):
@@ -24,7 +25,7 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
     lead_time = list(predictions_train.results.keys())
     results_nrml = {}
 
-    for lt in lead_time:
+    for lt in tqdm(lead_time):
         # Process training data
         predictions_train_lt = predictions_train.results[lt]
         quantile_levels = predictions_train_lt.quantiles
@@ -87,3 +88,53 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
         )
 
     return PredictionLeadTimes(results=results_nrml)
+
+
+def postprocess_quantreg(predictions_train: PredictionLeadTimes, predictions_test: PredictionLeadTimes) -> PredictionLeadTimes:
+    """Postprocess predictions using quantile regression"""
+
+    lead_time = list(predictions_test.results.keys())
+    results_qr = {}
+
+    for lt in tqdm(lead_time):
+
+        quantiles = predictions_test.results[lt].quantiles
+        freq = predictions_test.results[lt].freq
+
+        # prepare predictions for postprocessing
+        predictions_test_df = predictions_test.results[lt].to_dataframe().dropna()
+        predictions_train_df = predictions_train.results[lt].to_dataframe().dropna()
+        cols_rename = {q: f"feature_{q}" for q in quantiles}
+        predictions_test_df = predictions_test_df.rename(columns=cols_rename)
+        predictions_train_df = predictions_train_df.rename(columns=cols_rename)
+        cols_to_keep = list(cols_rename.values()) + ["target"]
+        test_data = TabularDataFrame(predictions_test_df[cols_to_keep])
+        train_data = TabularDataFrame(predictions_train_df[cols_to_keep])
+
+        # store results
+        qr_models = {}
+        test_results = {}
+
+        # fit a quantile regression for each quantile and make predictions on test dataset
+        for q in quantiles:
+
+            x_train = np.log(train_data[f"feature_{q}"].values.reshape(-1, 1))
+            y_train = np.log(train_data["target"].values)
+            x_test = np.log(test_data[f"feature_{q}"].values.reshape(-1, 1))
+            y_test = np.log(test_data["target"].values)
+
+            # Add constant for intercept
+            x_train = sm.add_constant(x_train)
+            x_test = sm.add_constant(x_test)
+
+            # Fit quantile regression model
+            model = sm.QuantReg(y_train, x_train)
+            qr_models[q] = model.fit(q=q, max_iter=2000)
+
+            # Predict on test data
+            predictions = qr_models[q].predict(x_test)
+            test_results[q] = np.exp(predictions)
+
+        results_qr[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(np.array(list(test_results.values())).T), freq=freq, data=test_data)
+
+    return PredictionLeadTimes(results=results_qr)
