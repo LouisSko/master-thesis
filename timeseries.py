@@ -359,6 +359,7 @@ class PredictionLeadTimes(BaseModel):
                 plt.plot(quantile_levels, empirical_coverages, "o-", label=f"Lead time {lt}")
 
             plt.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
+            plt.xticks(quantile_levels)
             plt.xlabel("Nominal Quantile Level")
             plt.ylabel("Empirical Coverage")
             plt.title("Reliability Diagram for Quantile Forecasts")
@@ -381,6 +382,7 @@ class PredictionLeadTimes(BaseModel):
                 ax.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
                 ax.set_xlabel("Nominal Quantile Level")
                 ax.set_ylabel("Empirical Coverage")
+                ax.set_xticks(quantile_levels)
                 ax.set_title("Reliability Diagram for Quantile Forecasts")
                 ax.legend()
             plt.tight_layout()
