@@ -283,10 +283,14 @@ class PredictionLeadTimes(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def get_crps(self, lead_times: Optional[List[int]] = None) -> Dict[int, float]:
+    def get_crps(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> Dict[int, float]:
         """Computes CRPS for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        return {lt: self.results[lt].get_crps() for lt in lead_times}
+        crps_scores = {lt: self.results[lt].get_crps() for lt in lead_times}
+        if mean:
+            return np.mean(list(crps_scores.values()))
+        else:
+            return crps_scores
 
     def get_quantile_scores(self, lead_times: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes quantile scores for selected lead times."""
