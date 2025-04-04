@@ -1,9 +1,14 @@
-from timeseries import PredictionLeadTimes, PredictionLeadTime
+from timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
 from typing import Tuple, Dict
 import torch
+from fastai.tabular.core import add_datepart
+from tqdm import tqdm
+import statsmodels.api as sm
+
+############# Nearest Neighbour #############
 
 
 def forecast_from_weekday_hour_patterns(
@@ -80,3 +85,139 @@ def initialize_weekday_hour_dict() -> Dict[str, np.ndarray]:
     weekdays = 7
     weekday_hour_dict = {f"{weekday}_{hour}": np.array([]) for weekday in range(weekdays) for hour in range(hours)}
     return weekday_hour_dict
+
+
+############# Quantile Regression #############
+
+
+def add_cyclic_encoding(data: pd.DataFrame, colname: str, period: int, drop: bool = False):
+    """Adds sine and cosine encoding for a cyclical feature."""
+    data[f"sin_{colname}"] = np.sin(2 * np.pi * data[colname] / period)
+    data[f"cos_{colname}"] = np.cos(2 * np.pi * data[colname] / period)
+
+    if drop:
+        data = data.drop(columns=[colname])
+
+
+def create_cyclic_features(data: TimeSeriesDataFrame, lead_time: int = 1) -> TabularDataFrame:
+    """Creates multiple time series related features, including relative time deltas for linear models."""
+
+    freq = pd.Timedelta("1h")
+
+    # Shift target to reflect prediction lead time
+    data = data.reset_index(level=0)
+    data["target"] = data["target"].shift(periods=-lead_time, freq=freq)
+    data = data.reset_index()
+
+    # === Features from CURRENT timestamp ===
+    add_datepart(data, "timestamp", prefix="timestamp_", drop=False)
+    data["timestamp_Hour"] = data["timestamp"].dt.hour
+    add_cyclic_encoding(data, "timestamp_Dayofweek", 7)
+    add_cyclic_encoding(data, "timestamp_Week", 52)
+    add_cyclic_encoding(data, "timestamp_Month", 12)
+    add_cyclic_encoding(data, "timestamp_Hour", 24)
+
+    # === Features from PREDICTION date ===
+    data["prediction_date"] = data["timestamp"] + lead_time * freq
+    add_datepart(data, "prediction_date", prefix="prediction_date_", drop=False)
+    data["prediction_date_Hour"] = data["prediction_date"].dt.hour
+    add_cyclic_encoding(data, "prediction_date_Dayofweek", 7)
+    add_cyclic_encoding(data, "prediction_date_Week", 52)
+    add_cyclic_encoding(data, "prediction_date_Month", 12)
+    add_cyclic_encoding(data, "prediction_date_Hour", 24)
+
+    # === Relative delta features (trig deltas and their encodings) ===
+    data["hours_ahead"] = lead_time
+    data["delta_Hour"] = data["prediction_date_Hour"] - data["timestamp_Hour"]
+    data["delta_Dayofweek"] = data["prediction_date_Dayofweek"] - data["timestamp_Dayofweek"]
+    data["delta_Week"] = data["prediction_date_Week"] - data["timestamp_Week"]
+    data["delta_Month"] = data["prediction_date_Month"] - data["timestamp_Month"]
+
+    add_cyclic_encoding(data, "delta_Hour", 24, True)
+    add_cyclic_encoding(data, "delta_Dayofweek", 7, True)
+    add_cyclic_encoding(data, "delta_Week", 52, True)
+    add_cyclic_encoding(data, "delta_Month", 12, True)
+
+    # Drop unused prediction_date fields
+    data = data.drop(
+        columns=[
+            "prediction_date_Elapsed",
+            "prediction_date_Year",
+            "prediction_date_Month",
+            "prediction_date_Week",
+            "prediction_date_Day",
+            "prediction_date_Hour",
+            "prediction_date_Dayofyear",
+            "prediction_date_Dayofweek",
+            "prediction_date",
+            "prediction_date_Is_month_end",
+            "prediction_date_Is_month_start",
+            "prediction_date_Is_quarter_end",
+            "prediction_date_Is_quarter_start",
+            "prediction_date_Is_year_end",
+            "prediction_date_Is_year_start",
+        ]
+    )
+
+    # Drop unused timestamp fields
+    data = data.drop(
+        columns=[
+            "timestamp_Elapsed",
+            "timestamp_Year",
+            "timestamp_Month",
+            "timestamp_Week",
+            "timestamp_Day",
+            "timestamp_Hour",
+            "timestamp_Dayofyear",
+            "timestamp_Dayofweek",
+            "timestamp_Is_month_end",
+            "timestamp_Is_month_start",
+            "timestamp_Is_quarter_end",
+            "timestamp_Is_quarter_start",
+            "timestamp_Is_year_end",
+            "timestamp_Is_year_start",
+        ]
+    )
+
+    # Final prep
+    data = data.set_index(["item_id", "timestamp"])
+    data = data.dropna()
+
+    return TabularDataFrame(data)
+
+
+def quantile_regression(data_train: TimeSeriesDataFrame, data_test: TimeSeriesDataFrame, quantiles: np.ndarray, lead_times: np.ndarray, freq: pd.Timedelta) -> PredictionLeadTimes:
+
+    results_benchmark = {}
+
+    for lt in tqdm(lead_times):
+
+        data_train_lt = create_cyclic_features(data_train, lt)
+        data_test_lt = create_cyclic_features(data_test, lt)
+
+        # store results
+        qr_models = {}
+        test_results = {}
+
+        # fit a quantile regression for each quantile and make predictions on test dataset
+        for q in quantiles:
+
+            x_train = data_train_lt.drop(columns="target").astype(float).to_numpy()
+            y_train = np.log(data_train_lt["target"].values)
+            x_test = data_test_lt.drop(columns="target").astype(float).to_numpy()
+            y_test = np.log(data_test_lt["target"].values)
+
+            # Add constant for intercept
+            x_train = sm.add_constant(x_train)
+            x_test = sm.add_constant(x_test)
+
+            # Fit quantile regression model
+            model = sm.QuantReg(y_train, x_train)
+            qr_models[q] = model.fit(q=q, max_iter=2000)
+
+            predictions = qr_models[q].predict(x_test)
+            test_results[q] = np.exp(predictions)
+
+        results_benchmark[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(np.array(list(test_results.values())).T), freq=freq, data=data_test_lt)
+
+    return PredictionLeadTimes(results=results_benchmark)
