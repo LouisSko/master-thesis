@@ -2,7 +2,6 @@ import scipy.stats as stats
 import numpy as np
 import statsmodels.api as sm
 import scipy.stats as stats
-from postprocessing import neg_log_likelihood
 from scipy.optimize import minimize
 from timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 import torch
@@ -25,14 +24,16 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
     lead_time = list(predictions_train.results.keys())
     results_nrml = {}
 
+    ignore_first_n_train_entries = 500
+
     for lt in tqdm(lead_time):
         # Process training data
-        predictions_train_lt = predictions_train.results[lt]
-        quantile_levels = predictions_train_lt.quantiles
+        quantiles = predictions_test.results[lt].quantiles
+        freq = predictions_test.results[lt].freq
 
-        # TODO: get rid of the first 100 entries, improve this.
-        df_train = predictions_train_lt.to_dataframe().dropna().iloc[100:].copy()
-        log_df_train = np.log(df_train[quantile_levels + ["target"]])
+        # TODO: might want handle ignore_first_n_train_entries differently
+        predictions_train_df = predictions_train.results[lt].to_dataframe().iloc[ignore_first_n_train_entries:].dropna()
+        log_df_train = np.log(predictions_train_df[quantiles + ["target"]])
 
         # Prepare data for MLE
         M_train = log_df_train[0.5].values  # Model's median prediction
@@ -62,9 +63,8 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
         a, b, c, d = result.x
 
         # Prepare test data
-        prediction_test_lt = predictions_test.results[lt]
-        df_test = prediction_test_lt.to_dataframe().iloc[100:].copy()
-        log_df_test = np.log(df_test[quantile_levels + ["target"]])
+        predictions_test_df = predictions_test.results[lt].to_dataframe()
+        log_df_test = np.log(predictions_test_df[quantiles])
 
         # Predict mean and std for test data
         M_test = log_df_test[0.5].values
@@ -75,17 +75,16 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
 
         # Generate predicted quantiles
         log_predictions = stats.norm.ppf(
-            np.array(quantile_levels).reshape(-1, 1),
+            np.array(quantiles).reshape(-1, 1),
             loc=mu_test,
             scale=sigma_test,
         ).T
 
-        predictions = np.exp(log_predictions)  # Convert back to original scale
+        # Convert back to original scale
+        predictions = np.exp(log_predictions)
 
         # Store results
-        results_nrml[lt] = PredictionLeadTime(
-            lead_time=lt, predictions=torch.tensor(predictions), quantiles=quantile_levels, freq=prediction_test_lt.freq, data=prediction_test_lt.data.iloc[100:]
-        )
+        results_nrml[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(predictions), quantiles=quantiles, freq=freq, data=predictions_test.results[lt].data)
 
     return PredictionLeadTimes(results=results_nrml)
 
@@ -96,14 +95,16 @@ def postprocess_quantreg(predictions_train: PredictionLeadTimes, predictions_tes
     lead_time = list(predictions_test.results.keys())
     results_qr = {}
 
+    ignore_first_n_train_entries = 500
+
     for lt in tqdm(lead_time):
 
         quantiles = predictions_test.results[lt].quantiles
         freq = predictions_test.results[lt].freq
 
         # prepare predictions for postprocessing
-        predictions_test_df = predictions_test.results[lt].to_dataframe().dropna()
-        predictions_train_df = predictions_train.results[lt].to_dataframe().dropna()
+        predictions_train_df = predictions_train.results[lt].to_dataframe().iloc[ignore_first_n_train_entries:].dropna()
+        predictions_test_df = predictions_test.results[lt].to_dataframe()
         cols_rename = {q: f"feature_{q}" for q in quantiles}
         predictions_test_df = predictions_test_df.rename(columns=cols_rename)
         predictions_train_df = predictions_train_df.rename(columns=cols_rename)
@@ -121,7 +122,6 @@ def postprocess_quantreg(predictions_train: PredictionLeadTimes, predictions_tes
             x_train = np.log(train_data[f"feature_{q}"].values.reshape(-1, 1))
             y_train = np.log(train_data["target"].values)
             x_test = np.log(test_data[f"feature_{q}"].values.reshape(-1, 1))
-            y_test = np.log(test_data["target"].values)
 
             # Add constant for intercept
             x_train = sm.add_constant(x_train)
