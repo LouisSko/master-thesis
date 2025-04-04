@@ -2,7 +2,7 @@ from timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 import torch
 from fastai.tabular.core import add_datepart
 from tqdm import tqdm
@@ -12,7 +12,12 @@ import statsmodels.api as sm
 
 
 def forecast_from_weekday_hour_patterns(
-    data: TimeSeriesDataFrame, weekday_hour_value_dict: Dict[str, np.ndarray], lead_times: np.ndarray, percentiles: np.ndarray, freq: pd.Timedelta = pd.Timedelta("1h")
+    data: TimeSeriesDataFrame,
+    weekday_hour_value_dict: Dict[str, np.ndarray],
+    lead_times: np.ndarray,
+    percentiles: np.ndarray,
+    freq: pd.Timedelta = pd.Timedelta("1h"),
+    last_n_samples: Optional[int] = None,
 ) -> Tuple[PredictionLeadTimes, dict]:
     """Generates percentile-based forecasts for multiple lead times based on historical patterns
     observed at the same weekday and hour.
@@ -35,6 +40,8 @@ def forecast_from_weekday_hour_patterns(
         Percentile values (between 0 and 100) to compute for the forecast at each lead time.
     freq : pd.Timedelta, optional
         Frequency of the time series data (default is 1 hour).
+    last_n_samples: int, optional
+        Number of most recent similar samples to consider when calculating empirical quantiles
 
     Returns:
     -------
@@ -58,7 +65,10 @@ def forecast_from_weekday_hour_patterns(
             prediction_timestamp_id = f"{prediction_timestamp.weekday()}_{prediction_timestamp.hour}"
 
             try:
-                forecast = np.percentile(weekday_hour_value_dict[prediction_timestamp_id], q=percentiles)
+                if last_n_samples:
+                    forecast = np.percentile(weekday_hour_value_dict[prediction_timestamp_id][-last_n_samples:], q=percentiles)
+                else:
+                    forecast = np.percentile(weekday_hour_value_dict[prediction_timestamp_id], q=percentiles)
             except:
                 # If no data is available for the future time slot, use zeros
                 forecast = np.zeros(len(percentiles))
