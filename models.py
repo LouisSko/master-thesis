@@ -154,7 +154,7 @@ def predict_chronos(
         # Ensure only relevant context is included and item_ids match
         previous_context_data = previous_context_data.loc[data.item_ids]
         previous_context_data = previous_context_data.groupby("item_id").tail(context_length)
-        data_merged = pd.concat([previous_context_data, data])
+        data_merged = pd.concat([previous_context_data, data]).sort_index()
     else:
         data_merged = data
 
