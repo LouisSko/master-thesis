@@ -6,10 +6,31 @@ from scipy.optimize import minimize
 from timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 import torch
 from tqdm import tqdm
+from typing import Tuple
 
 
 def neg_log_likelihood(params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarray):
-    """Define negative log-likelihood function for maximum likelihood estimation"""
+    """Computes the negative log-likelihood for a normal distribution, parameterized
+    by median (M) and interquartile range (IQR), used for maximum likelihood estimation.
+
+    Parameters
+    ----------
+    params : list
+        List of parameters [a, b, c, d] where:
+        - mu = a + b * M
+        - sigma = c + d * IQR
+    M : np.ndarray
+        Median predictions.
+    IQR : np.ndarray
+        Interquartile ranges of predictions (e.g., 0.9 quantile - 0.1 quantile).
+    y : np.ndarray
+        Observed target values.
+
+    Returns
+    -------
+    float
+        Negative log-likelihood value.
+    """
 
     a, b, c, d = params
     mu = a + b * M
@@ -18,11 +39,58 @@ def neg_log_likelihood(params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarr
     return nll
 
 
+def estimate_init_params(m: np.ndarray, iqr: np.ndarray, y_mu: np.ndarray, y_sigma: np.ndarray) -> Tuple[float, float, float, float]:
+    """Estimates initial parameters [a, b, c, d] using linear regression for mean and std.
+
+    Parameters
+    ----------
+    m : np.ndarray
+        Median values.
+    iqr : np.ndarray
+        Interquartile ranges.
+    y_mu : np.ndarray
+        Observed means (log target).
+    y_sigma : np.ndarray
+        Observed standard deviations of log target.
+
+    Returns
+    -------
+    Tuple[float, float, float, float]
+        Initial parameter estimates [a, b, c, d] for mu and sigma formulas.
+    """
+
+    # mean = a + b * Median
+    x_mu = sm.add_constant(m)
+    model_mu = sm.OLS(y_mu, x_mu).fit()
+    a_init, b_init = model_mu.params
+
+    # std = c + d * IQR
+    x_sigma = sm.add_constant(iqr)
+    model_sigma = sm.OLS(y_sigma, x_sigma).fit()
+    c_init, d_init = model_sigma.params
+
+    return a_init, b_init, c_init, d_init
+
+
 def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: PredictionLeadTimes) -> PredictionLeadTimes:
-    """Postprocessing of predictions by estimating the normal distribution."""
+    """Applies Maximum Likelihood Estimation (MLE) to postprocess quantile predictions.
+    Fits a normal distribution in log space using median and IQR-based modeling.
+
+    Parameters
+    ----------
+    predictions_train : PredictionLeadTimes
+        Training predictions used to estimate parameters for each item time series.
+    predictions_test : PredictionLeadTimes
+        Test predictions for which the distribution is fitted and quantiles are predicted.
+
+    Returns
+    -------
+    PredictionLeadTimes
+        Updated predictions for the test set with quantiles generated via MLE.
+    """
 
     lead_time = list(predictions_train.results.keys())
-    results_nrml = {}
+    postprocessing_results = {}
 
     ignore_first_n_train_entries = 500
 
@@ -31,69 +99,76 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
         quantiles = predictions_test.results[lt].quantiles
         freq = predictions_test.results[lt].freq
 
-        # TODO: might want handle ignore_first_n_train_entries differently
-        predictions_train_df = predictions_train.results[lt].to_dataframe().iloc[ignore_first_n_train_entries:].dropna()
-        log_df_train = np.log(predictions_train_df[quantiles + ["target"]])
+        predictions_item_ids = []
 
-        # Prepare data for MLE
-        M_train = log_df_train[0.5].values  # Model's median prediction
-        IQR_train = (log_df_train[0.9] - log_df_train[0.1]).values  # Model's IQR
-        y_train = log_df_train["target"].values  # Observed log Y
+        # Postprocess each time series separately
+        for item_id in predictions_test.results[lt].data.item_ids:
+            # Get train and test data
+            predictions_train_df = predictions_train.results[lt].to_dataframe(item_id=item_id).iloc[ignore_first_n_train_entries:].dropna()
+            predictions_test_df = predictions_test.results[lt].to_dataframe(item_id=item_id)
 
-        # estimate initial parameters with linear regresssion
-        # mean=a+b*Median
-        x_mu = sm.add_constant(M_train)
-        model_mu = sm.OLS(y_train, x_mu).fit()
-        a_init, b_init = model_mu.params
-        # std=c+d*IQR
-        log_df_train["std_target"] = log_df_train["target"].groupby("item_id").rolling(20, min_periods=20, center=True).std().droplevel(0)
-        log_df_train = log_df_train.dropna()
-        iqr = log_df_train[0.9] - log_df_train[0.1]
-        x_sigma = sm.add_constant(iqr)
-        y_sigma = log_df_train["std_target"]
-        model_sigma = sm.OLS(y_sigma, x_sigma).fit()
-        c_init, d_init = model_sigma.params
+            # Calculate log and avoid negative values by adding a constant - tried out multiple options here
+         
+            # this does not work well because there might still be negative values in the test set
+            # min_val = predictions_train_df[quantiles + ["target"]].min().min()
+            # epsilon = max(1, -min_val + 1)
 
-        initial_params = [a_init, b_init, c_init, d_init]
-        result = minimize(fun=neg_log_likelihood, args=(M_train, IQR_train, y_train), x0=initial_params, method="Nelder-Mead", options={"maxiter": 10000})
+            # works better
+            # min_val = predictions_train_df[quantiles + ["target"]].max().max()
+            # epsilon = max(1, min_val)
+            epsilon = 100_0000
 
-        if not result.success:
-            raise ValueError("Optimization failed for lead time {}".format(lt))
+            log_df_train = np.log(predictions_train_df[quantiles + ["target"]] + epsilon)
+            log_df_test = np.log(predictions_test_df[quantiles] + epsilon)
 
-        a, b, c, d = result.x
+            # Prepare data for MLE
+            log_df_train["std_target"] = log_df_train["target"].rolling(20, min_periods=20, center=True).std()
+            log_df_train = log_df_train.dropna()
+            M_train = log_df_train[0.5].values  # Median prediction
+            M_test = log_df_test[0.5].values
+            y_mu_train = log_df_train["target"].values
+            y_sigma_train = log_df_train["std_target"].values
+            IQR_test = (log_df_test[0.9] - log_df_test[0.1]).values
+            IQR_train = (log_df_train[0.9] - log_df_train[0.1]).values  # IQR
 
-        # Prepare test data
-        predictions_test_df = predictions_test.results[lt].to_dataframe()
-        log_df_test = np.log(predictions_test_df[quantiles])
+            # Estimate initial parameters
+            initial_params = estimate_init_params(M_train, IQR_train, y_mu_train, y_sigma_train)
 
-        # Predict mean and std for test data
-        M_test = log_df_test[0.5].values
-        IQR_test = (log_df_test[0.9] - log_df_test[0.1]).values
+            # Minimize negative log-likelihood
+            result = minimize(fun=neg_log_likelihood, args=(M_train, IQR_train, y_mu_train), x0=initial_params, method="Nelder-Mead", options={"maxiter": 10000})
 
-        mu_test = a + b * M_test
-        sigma_test = c + d * IQR_test
+            if not result.success:
+                raise ValueError(f"Optimization failed for lead time {lt}")
 
-        # Generate predicted quantiles
-        log_predictions = stats.norm.ppf(
-            np.array(quantiles).reshape(-1, 1),
-            loc=mu_test,
-            scale=sigma_test,
-        ).T
+            # Extract results
+            a, b, c, d = result.x
 
-        # Convert back to original scale
-        predictions = np.exp(log_predictions)
+            # Predict mean and std for test data
+            mu_test = a + b * M_test
+            sigma_test = c + d * IQR_test
+
+            # Generate predicted quantiles in log space
+            log_predictions = stats.norm.ppf(np.array(quantiles).reshape(-1, 1), loc=mu_test, scale=sigma_test).T
+
+            # Convert back to original scale and store results
+            predictions_item_ids.append(np.exp(log_predictions) - epsilon)
+
+        # Create numpy array
+        predictions_item_ids = np.vstack(predictions_item_ids)
 
         # Store results
-        results_nrml[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(predictions), quantiles=quantiles, freq=freq, data=predictions_test.results[lt].data)
+        postprocessing_results[lt] = PredictionLeadTime(
+            lead_time=lt, predictions=torch.tensor(predictions_item_ids), quantiles=quantiles, freq=freq, data=predictions_test.results[lt].data
+        )
 
-    return PredictionLeadTimes(results=results_nrml)
+    return PredictionLeadTimes(results=postprocessing_results)
 
 
 def postprocess_quantreg(predictions_train: PredictionLeadTimes, predictions_test: PredictionLeadTimes) -> PredictionLeadTimes:
     """Postprocess predictions using quantile regression"""
 
     lead_time = list(predictions_test.results.keys())
-    results_qr = {}
+    postprocessing_results = {}
 
     ignore_first_n_train_entries = 500
 
@@ -135,6 +210,6 @@ def postprocess_quantreg(predictions_train: PredictionLeadTimes, predictions_tes
             predictions = qr_models[q].predict(x_test)
             test_results[q] = np.exp(predictions)
 
-        results_qr[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(np.array(list(test_results.values())).T), freq=freq, data=test_data)
+        postprocessing_results[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(np.array(list(test_results.values())).T), freq=freq, data=test_data)
 
-    return PredictionLeadTimes(results=results_qr)
+    return PredictionLeadTimes(results=postprocessing_results)
