@@ -7,6 +7,7 @@ from timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 import torch
 from tqdm import tqdm
 from typing import Tuple
+import pandas as pd
 
 
 def neg_log_likelihood(params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarray):
@@ -108,7 +109,7 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
             predictions_test_df = predictions_test.results[lt].to_dataframe(item_id=item_id)
 
             # Calculate log and avoid negative values by adding a constant - tried out multiple options here
-         
+
             # this does not work well because there might still be negative values in the test set
             # min_val = predictions_train_df[quantiles + ["target"]].min().min()
             # epsilon = max(1, -min_val + 1)
@@ -165,7 +166,21 @@ def postprocess_mle(predictions_train: PredictionLeadTimes, predictions_test: Pr
 
 
 def postprocess_quantreg(predictions_train: PredictionLeadTimes, predictions_test: PredictionLeadTimes) -> PredictionLeadTimes:
-    """Postprocess predictions using quantile regression"""
+    """Applies Quantile Regression to postprocess quantile predictions.
+    Fits separate linear quantile regression models in log space for each quantile.
+
+    Parameters
+    ----------
+    predictions_train : PredictionLeadTimes
+        Training predictions used to fit quantile regression models for each item time series.
+    predictions_test : PredictionLeadTimes
+        Test predictions for which the quantile models are applied to generate postprocessed outputs.
+
+    Returns
+    -------
+    PredictionLeadTimes
+        Updated predictions for the test set with quantiles generated via quantile regression.
+    """
 
     lead_time = list(predictions_test.results.keys())
     postprocessing_results = {}
@@ -177,39 +192,65 @@ def postprocess_quantreg(predictions_train: PredictionLeadTimes, predictions_tes
         quantiles = predictions_test.results[lt].quantiles
         freq = predictions_test.results[lt].freq
 
-        # prepare predictions for postprocessing
-        predictions_train_df = predictions_train.results[lt].to_dataframe().iloc[ignore_first_n_train_entries:].dropna()
-        predictions_test_df = predictions_test.results[lt].to_dataframe()
-        cols_rename = {q: f"feature_{q}" for q in quantiles}
-        predictions_test_df = predictions_test_df.rename(columns=cols_rename)
-        predictions_train_df = predictions_train_df.rename(columns=cols_rename)
-        cols_to_keep = list(cols_rename.values()) + ["target"]
-        test_data = TabularDataFrame(predictions_test_df[cols_to_keep])
-        train_data = TabularDataFrame(predictions_train_df[cols_to_keep])
+        predictions_item_ids = []
+        test_data_item_ids = []
 
-        # store results
-        qr_models = {}
-        test_results = {}
+        # Postprocess each time series separately
+        for item_id in predictions_test.results[lt].data.item_ids:
 
-        # fit a quantile regression for each quantile and make predictions on test dataset
-        for q in quantiles:
+            # Get train and test data
+            predictions_train_df = predictions_train.results[lt].to_dataframe(item_id=item_id).iloc[ignore_first_n_train_entries:].dropna()
+            predictions_test_df = predictions_test.results[lt].to_dataframe(item_id=item_id)
 
-            x_train = np.log(train_data[f"feature_{q}"].values.reshape(-1, 1))
-            y_train = np.log(train_data["target"].values)
-            x_test = np.log(test_data[f"feature_{q}"].values.reshape(-1, 1))
+            cols_rename = {q: f"feature_{q}" for q in quantiles}
+            predictions_test_df = predictions_test_df.rename(columns=cols_rename)
+            predictions_train_df = predictions_train_df.rename(columns=cols_rename)
+            cols_to_keep = list(cols_rename.values()) + ["target"]
 
-            # Add constant for intercept
-            x_train = sm.add_constant(x_train)
-            x_test = sm.add_constant(x_test)
+            # add multi index back
+            predictions_train_df.index = pd.MultiIndex.from_arrays(
+                [[item_id] * len(predictions_train_df), predictions_train_df.index], names=["item_id", predictions_train_df.index.name]
+            )
+            predictions_test_df.index = pd.MultiIndex.from_arrays(
+                [[item_id] * len(predictions_test_df), predictions_test_df.index], names=["item_id", predictions_test_df.index.name]
+            )
 
-            # Fit quantile regression model
-            model = sm.QuantReg(y_train, x_train)
-            qr_models[q] = model.fit(q=q, max_iter=2000)
+            test_data = TabularDataFrame(predictions_test_df[cols_to_keep])
+            train_data = TabularDataFrame(predictions_train_df[cols_to_keep])
 
-            # Predict on test data
-            predictions = qr_models[q].predict(x_test)
-            test_results[q] = np.exp(predictions)
+            # store results
+            qr_models = {}
+            test_results = {}
 
-        postprocessing_results[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(np.array(list(test_results.values())).T), freq=freq, data=test_data)
+            # fit a quantile regression for each quantile and make predictions on test dataset
+            for q in quantiles:
+
+                epsilon = 100_000
+                x_train = np.log(train_data[f"feature_{q}"].values.reshape(-1, 1) + epsilon)
+                y_train = np.log(train_data["target"].values + epsilon)
+                x_test = np.log(test_data[f"feature_{q}"].values.reshape(-1, 1) + epsilon)
+
+                # Add constant for intercept
+                x_train = sm.add_constant(x_train)
+                x_test = sm.add_constant(x_test)
+
+                # Fit quantile regression model
+                model = sm.QuantReg(y_train, x_train)
+                qr_models[q] = model.fit(q=q, max_iter=2000)
+
+                # Predict on test data
+                predictions = qr_models[q].predict(x_test)
+                test_results[q] = np.exp(predictions) - epsilon
+
+            predictions = np.array(list(test_results.values())).T
+
+            predictions_item_ids.append(predictions)
+            test_data_item_ids.append(test_data)
+
+        # merge data from different item ids
+        predictions_item_ids = np.vstack(predictions_item_ids)
+        test_data_item_ids = TabularDataFrame(pd.concat(test_data_item_ids))
+
+        postprocessing_results[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(predictions_item_ids), freq=freq, data=test_data_item_ids)
 
     return PredictionLeadTimes(results=postprocessing_results)
