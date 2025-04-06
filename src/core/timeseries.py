@@ -154,7 +154,7 @@ class PredictionLeadTime(BaseModel):
         crps = sr.crps_quantile(data["target"].to_numpy(), data[self.quantiles].to_numpy(), self.quantiles)
         return crps[~np.isnan(crps)].mean()
 
-    def get_quantile_score(self) -> pd.DataFrame:
+    def get_quantile_score(self) -> pd.Series:
         """
         Computes the average quantile score (pinball loss) for the forecast.
 
@@ -162,7 +162,7 @@ class PredictionLeadTime(BaseModel):
             data (pd.DataFrame): DataFrame containing actual target values.
 
         Returns:
-            pd.DataFrame: A DataFrame with the mean pinball loss for each quantile.
+            pd.Series: A Series with the mean pinball loss for each quantile.
         """
         data = self.to_dataframe()
         quantile_scores = np.column_stack([sr.quantile_score(data["target"].to_numpy(), data[q].to_numpy(), q) for q in self.quantiles])
@@ -293,19 +293,48 @@ class PredictionLeadTimes(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def get_crps(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> Dict[int, float]:
+    def get_crps(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> Union[pd.DataFrame, Dict[str, float]]:
         """Computes CRPS for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        crps_scores = {lt: self.results[lt].get_crps() for lt in lead_times}
+        crps_scores = {lt: np.round(self.results[lt].get_crps(), 2) for lt in lead_times}
+        crps_scores = pd.DataFrame({"Mean CRPS": crps_scores.values()}, index=crps_scores.keys())
+        crps_scores.index.name = "lead time"
+
         if mean:
-            return np.mean(list(crps_scores.values()))
+            return {"Mean CRPS Score": crps_scores.mean().round(2).item()}
         else:
             return crps_scores
 
-    def get_quantile_scores(self, lead_times: Optional[List[int]] = None) -> pd.DataFrame:
+    def get_quantile_scores(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> pd.DataFrame:
         """Computes quantile scores for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        return pd.DataFrame({lt: self.results[lt].get_quantile_score() for lt in lead_times})
+        quantile_scores = {lt: self.results[lt].get_quantile_score() for lt in lead_times}
+
+        quantile_scores = pd.DataFrame(quantile_scores)
+        if mean:
+            mean_scores = pd.DataFrame(quantile_scores).mean(axis=1)
+            quantile_scores = pd.DataFrame(mean_scores, columns=["QS averaged over all lead times"])
+        else:
+            quantile_scores.loc[:, "QS averaged over all lead times"] = quantile_scores.mean(axis=1)
+
+        quantile_scores.loc["Mean (CRPS)", :] = quantile_scores.mean()
+        quantile_scores.index.name = "quantile"
+        return quantile_scores.round(2)
+
+    def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> pd.DataFrame:
+        """Computes empirical coverage rates for selected lead times."""
+        lead_times = lead_times or list(self.results.keys())
+
+        coverage_rates = pd.DataFrame({lt: self.results[lt].get_empirical_coverage_rates() for lt in lead_times})
+
+        if mean:
+            coverage_rates = pd.DataFrame(coverage_rates).mean(axis=1)
+            coverage_rates = pd.DataFrame(coverage_rates, columns=["Empirical coverage rates averaged over all lead times"])
+        else:
+            coverage_rates.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_rates.mean(axis=1)
+
+        coverage_rates.index.name = "quantile"
+        return coverage_rates.round(2)
 
     def get_pit_values(self, lead_times: Optional[List[int]] = None) -> Dict[int, np.ndarray]:
         """Computes PIT values for selected lead times."""
@@ -350,11 +379,6 @@ class PredictionLeadTimes(BaseModel):
             plt.tight_layout()
             plt.show()
 
-    def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None) -> pd.DataFrame:
-        """Computes empirical coverage rates for selected lead times."""
-        lead_times = lead_times or list(self.results.keys())
-        return pd.DataFrame({lt: self.results[lt].get_empirical_coverage_rates() for lt in lead_times})
-
     def get_reliability_diagram(self, lead_times: Optional[List[int]] = None, overlay: bool = False) -> None:
         """Plots reliability diagrams for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
@@ -397,3 +421,19 @@ class PredictionLeadTimes(BaseModel):
                 ax.legend()
             plt.tight_layout()
             plt.show()
+
+
+def get_quantile_scores(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None) -> pd.DataFrame:
+    """Quantile scores averaged across the specified lead times"""
+    scores = pd.concat([pred.get_quantile_scores(lead_times=lead_times, mean=True) for pred in predictions.values()], axis=1)
+    scores.columns = [key for key in predictions.keys()]
+
+    return scores
+
+
+def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None) -> pd.DataFrame:
+    """Empirical coverage rates averaged across the specified lead times"""
+    scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean=True) for pred in predictions.values()], axis=1)
+    scores.columns = [key for key in predictions.keys()]
+
+    return scores
