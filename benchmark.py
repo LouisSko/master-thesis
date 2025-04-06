@@ -2,7 +2,7 @@ from timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, Any
 import torch
 from fastai.tabular.core import add_datepart
 from tqdm import tqdm
@@ -13,7 +13,7 @@ import statsmodels.api as sm
 
 def forecast_from_weekday_hour_patterns(
     data: TimeSeriesDataFrame,
-    weekday_hour_value_dict: Dict[str, np.ndarray],
+    weekday_hour_value_dict: Dict[Any, Dict[str, np.ndarray]],
     lead_times: np.ndarray,
     quantiles: np.ndarray,
     freq: pd.Timedelta = pd.Timedelta("1h"),
@@ -51,15 +51,16 @@ def forecast_from_weekday_hour_patterns(
         - dict: Updated `weekday_hour_value_dict` with appended observations.
     """
 
+
     forecasts = {lt: [] for lt in lead_times}
     results = {lt: {} for lt in lead_times}
 
-    percentiles = (quantiles*100).astype(int) # convert to percentiles
-    
-    for (_, timestamp), target in data.iterrows():
+    percentiles = (quantiles * 100).astype(int)  # convert to percentiles
+
+    for (item_id, timestamp), target in tqdm(data.iterrows(), total=len(data)):
         # Add the current observation to the weekday-hour bucket
         current_timestamp_id = f"{timestamp.weekday()}_{timestamp.hour}"
-        weekday_hour_value_dict[current_timestamp_id] = np.append(weekday_hour_value_dict[current_timestamp_id], target.item())
+        weekday_hour_value_dict[item_id][current_timestamp_id] = np.append(weekday_hour_value_dict[item_id][current_timestamp_id], target.item())
 
         # Forecast for each lead time using the appropriate future weekday-hour bucket
         for lt in forecasts.keys():
@@ -68,12 +69,12 @@ def forecast_from_weekday_hour_patterns(
 
             try:
                 if last_n_samples:
-                    forecast = np.percentile(weekday_hour_value_dict[prediction_timestamp_id][-last_n_samples:], q=percentiles)
+                    forecast = np.percentile(weekday_hour_value_dict[item_id][prediction_timestamp_id][-last_n_samples:], q=percentiles)
                 else:
-                    forecast = np.percentile(weekday_hour_value_dict[prediction_timestamp_id], q=percentiles)
+                    forecast = np.percentile(weekday_hour_value_dict[item_id][prediction_timestamp_id], q=percentiles)
             except:
-                # If no data is available for the future time slot, use zeros
-                forecast = np.zeros(len(percentiles))
+               # If no data is available for the future time slot, use zeros
+               forecast = np.zeros(len(percentiles))
 
             forecasts[lt].append(forecast)
 
@@ -83,7 +84,7 @@ def forecast_from_weekday_hour_patterns(
     return PredictionLeadTimes(results=results), weekday_hour_value_dict
 
 
-def initialize_weekday_hour_dict() -> Dict[str, np.ndarray]:
+def initialize_weekday_hour_dict(item_ids: list) -> Dict[str, np.ndarray]:
     """Initializes a dictionary with keys for each weekday-hour combination (e.g., "0_0" to "6_23"),
     mapping to empty numpy arrays for accumulating historical values.
 
@@ -95,7 +96,9 @@ def initialize_weekday_hour_dict() -> Dict[str, np.ndarray]:
 
     hours = 24
     weekdays = 7
-    weekday_hour_dict = {f"{weekday}_{hour}": np.array([]) for weekday in range(weekdays) for hour in range(hours)}
+    weekday_hour_dict = {item_id: None for item_id in item_ids}
+    for item_id in item_ids:
+        weekday_hour_dict[item_id] = {f"{weekday}_{hour}": np.array([]) for weekday in range(weekdays) for hour in range(hours)}
     return weekday_hour_dict
 
 
@@ -279,8 +282,8 @@ def quantile_regression(data_train: TimeSeriesDataFrame, data_test: TimeSeriesDa
             data_test_lt_item = data_test_lt.loc[[item_id]]
 
             # retrieve constant to add
-            #epsilon = -data_train_lt_item["target"].min() + 1
-            epsilon = data_train_lt_item["target"].max()*5
+            # epsilon = -data_train_lt_item["target"].min() + 1
+            epsilon = data_train_lt_item["target"].max() * 5
             epsilon = 100_000
             # fit a quantile regression for each quantile and make predictions on test dataset
             for q in quantiles:
