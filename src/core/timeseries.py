@@ -1,3 +1,5 @@
+"""This Module provides utilities for probabilistic time series forecasting, including data structures, evaluation, and visualization tools."""
+
 from typing import List, Optional, Dict, Tuple, Union
 import pandas as pd
 import torch
@@ -25,7 +27,7 @@ class TabularDataFrame(pd.DataFrame):
     @property
     def item_ids(self) -> pd.Index:
         return self.index.unique(level=ITEMID)
-    
+
     @classmethod
     def _validate_multi_index_data_frame(cls, data: pd.DataFrame):
         """Validate a multi-index pd.DataFrame can be converted to TabularDataFrame"""
