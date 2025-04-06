@@ -22,6 +22,10 @@ class TabularDataFrame(pd.DataFrame):
         self._validate_columns(data)
         super().__init__(data=data, *args, **kwargs)
 
+    @property
+    def item_ids(self) -> pd.Index:
+        return self.index.unique(level=ITEMID)
+    
     @classmethod
     def _validate_multi_index_data_frame(cls, data: pd.DataFrame):
         """Validate a multi-index pd.DataFrame can be converted to TabularDataFrame"""
@@ -92,12 +96,12 @@ class PredictionLeadTime(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self, item_id: Optional[int] = None) -> pd.DataFrame:
         """
         Converts the prediction data into a Pandas DataFrame and merges it with the actual target values.
 
         Args:
-            data (pd.DataFrame): DataFrame containing actual target values.
+            item_id (Optional[int]): dataframe of the item id to retrieve.
 
         Returns:
             pd.DataFrame: DataFrame with timestamps, predicted quantiles, and corresponding target values.
@@ -127,6 +131,10 @@ class PredictionLeadTime(BaseModel):
 
         # restore original multi index
         merged.set_index(result.index.names, inplace=True)
+
+        # get only the specified item id
+        if item_id is not None:
+            merged = merged.loc[item_id].copy()
 
         return merged
 
