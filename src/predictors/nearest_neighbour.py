@@ -1,11 +1,10 @@
-from core.timeseries import PredictionLeadTimes, PredictionLeadTime
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
 from typing import Tuple, Dict, Any, List
 import torch
-
 from tqdm import tqdm
+from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime
 from src.core.base import AbstractPredictor
 
 

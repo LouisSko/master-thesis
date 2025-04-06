@@ -1,10 +1,10 @@
 import numpy as np
 import statsmodels.api as sm
-from core.timeseries import PredictionLeadTimes, PredictionLeadTime
+from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime
 import torch
 from tqdm import tqdm
-from core.base import AbstractPostprocessor
-from core.timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
+from src.core.base import AbstractPostprocessor
+from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 import pandas as pd
 
 

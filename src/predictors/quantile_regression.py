@@ -4,8 +4,8 @@ from autogluon.timeseries import TimeSeriesDataFrame
 from typing import List
 import pandas as pd
 import numpy as np
-from core.base import AbstractPredictor
-from core.timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
+from src.core.base import AbstractPredictor
+from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 from fastai.tabular.core import add_datepart
 import statsmodels.api as sm
 
@@ -142,22 +142,18 @@ class QuantileRegression(AbstractPredictor):
             data_subset["prediction_date"] = data_subset["timestamp"] + lead_time * freq
             add_datepart(data_subset, "prediction_date", prefix="prediction_date_", drop=False)
             data_subset["prediction_date_Hour"] = data_subset["prediction_date"].dt.hour
+            self._add_cyclic_encoding(data_subset, "prediction_date_Hour", 24)
             self._add_cyclic_encoding(data_subset, "prediction_date_Dayofweek", 7)
             self._add_cyclic_encoding(data_subset, "prediction_date_Week", 52)
             self._add_cyclic_encoding(data_subset, "prediction_date_Month", 12)
-            self._add_cyclic_encoding(data_subset, "prediction_date_Hour", 24)
 
             # === Relative delta features (trig deltas and their encodings) ===
             data_subset["hours_ahead"] = lead_time
             data_subset["delta_Hour"] = data_subset["prediction_date_Hour"] - data_subset["timestamp_Hour"]
             data_subset["delta_Dayofweek"] = data_subset["prediction_date_Dayofweek"] - data_subset["timestamp_Dayofweek"]
-            data_subset["delta_Week"] = data_subset["prediction_date_Week"] - data_subset["timestamp_Week"]
-            data_subset["delta_Month"] = data_subset["prediction_date_Month"] - data_subset["timestamp_Month"]
 
             self._add_cyclic_encoding(data_subset, "delta_Hour", 24, True)
             self._add_cyclic_encoding(data_subset, "delta_Dayofweek", 7, True)
-            self._add_cyclic_encoding(data_subset, "delta_Week", 52, True)
-            self._add_cyclic_encoding(data_subset, "delta_Month", 12, True)
 
             # Drop unused prediction_date fields
             data_subset = data_subset.drop(
