@@ -98,12 +98,12 @@ class PredictionLeadTime(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def to_dataframe(self, item_id: Optional[int] = None) -> pd.DataFrame:
+    def to_dataframe(self, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """
         Converts the prediction data into a Pandas DataFrame and merges it with the actual target values.
 
         Args:
-            item_id (Optional[int]): dataframe of the item id to retrieve.
+            item_ids (Optional[List[int]]): dataframe of the item ids to retrieve.
 
         Returns:
             pd.DataFrame: DataFrame with timestamps, predicted quantiles, and corresponding target values.
@@ -135,12 +135,12 @@ class PredictionLeadTime(BaseModel):
         merged.set_index(result.index.names, inplace=True)
 
         # get only the specified item id
-        if item_id is not None:
-            merged = merged.loc[item_id].copy()
+        if item_ids is not None:
+            merged = merged.loc[item_ids].copy()
 
         return merged
 
-    def get_crps(self) -> float:
+    def get_crps(self, item_ids: Optional[List[int]] = None) -> float:
         """
         Computes the Continuous Ranked Probability Score (CRPS) for the forecast.
 
@@ -150,11 +150,11 @@ class PredictionLeadTime(BaseModel):
         Returns:
             float: The mean CRPS score across all samples.
         """
-        data = self.to_dataframe()
+        data = self.to_dataframe(item_ids=item_ids)
         crps = sr.crps_quantile(data["target"].to_numpy(), data[self.quantiles].to_numpy(), self.quantiles)
         return crps[~np.isnan(crps)].mean()
 
-    def get_quantile_score(self) -> pd.Series:
+    def get_quantile_score(self, item_ids: Optional[List[int]] = None) -> pd.Series:
         """
         Computes the average quantile score (pinball loss) for the forecast.
 
@@ -164,12 +164,12 @@ class PredictionLeadTime(BaseModel):
         Returns:
             pd.Series: A Series with the mean pinball loss for each quantile.
         """
-        data = self.to_dataframe()
+        data = self.to_dataframe(item_ids=item_ids)
         quantile_scores = np.column_stack([sr.quantile_score(data["target"].to_numpy(), data[q].to_numpy(), q) for q in self.quantiles])
 
         return pd.DataFrame(quantile_scores, columns=self.quantiles).mean()
 
-    def get_pit_values(self) -> np.ndarray:
+    def get_pit_values(self, item_ids: Optional[List[int]] = None) -> np.ndarray:
         """
         Computes the Probability Integral Transform (PIT) values for calibration analysis.
 
@@ -181,7 +181,7 @@ class PredictionLeadTime(BaseModel):
         Returns:
             np.ndarray: Array of PIT values, where PIT values should follow a uniform [0,1] distribution.
         """
-        targets = self.to_dataframe()["target"].to_numpy()  # Shape [num_samples]
+        targets = self.to_dataframe(item_ids=item_ids)["target"].to_numpy()  # Shape [num_samples]
 
         # Compute PIT values for each target
         pit_values = []
@@ -191,7 +191,7 @@ class PredictionLeadTime(BaseModel):
 
         return np.array(pit_values)
 
-    def get_pit_histogram(self) -> None:
+    def get_pit_histogram(self, item_ids: Optional[List[int]] = None) -> None:
         """
         Plots a histogram of Probability Integral Transform (PIT) values to assess forecast calibration.
 
@@ -201,7 +201,7 @@ class PredictionLeadTime(BaseModel):
         Returns:
             None: Displays the histogram plot.
         """
-        pit_values = self.get_pit_values()
+        pit_values = self.get_pit_values(item_ids=item_ids)
         bins = len(self.quantiles)
 
         plt.hist(pit_values, bins=bins, range=(0, 1), density=False, alpha=0.7, edgecolor="black")
@@ -212,16 +212,16 @@ class PredictionLeadTime(BaseModel):
         plt.legend()
         plt.show()
 
-    def get_empirical_coverage_rates(self) -> Dict[float, float]:
+    def get_empirical_coverage_rates(self, item_ids: Optional[List[int]] = None) -> Dict[float, float]:
 
-        results = self.to_dataframe()
+        results = self.to_dataframe(item_ids=item_ids)
         empirical_coverage_rates = {q: (results[q] >= results["target"]).mean() for q in self.quantiles}
 
         return empirical_coverage_rates
 
-    def get_reliability_diagram(self) -> None:
+    def get_reliability_diagram(self, item_ids: Optional[List[int]] = None) -> None:
 
-        empirical_coverage_rates = self.get_empirical_coverage_rates()
+        empirical_coverage_rates = self.get_empirical_coverage_rates(item_ids=item_ids)
 
         quantile_levels = sorted(empirical_coverage_rates.keys())
         empirical_coverages = [empirical_coverage_rates[q] for q in quantile_levels]
@@ -240,8 +240,8 @@ class PredictionLeadTime(BaseModel):
     def get_random_plot(self, item_id: int = 0, q_lower: float = 0.1, q_upper: float = 0.9, ts_length: int = 100) -> None:
         """Randomly plot data"""
 
-        pred_df = self.to_dataframe()
-        subset = pred_df.xs(item_id, level="item_id")
+        subset = self.to_dataframe(item_ids=[item_id])
+        #subset = pred_df.xs(item_id, level="item_id")
         rand_start_idx = np.random.randint(0, (len(subset) - ts_length))
         subset = subset.iloc[rand_start_idx : rand_start_idx + ts_length]
 
@@ -293,10 +293,10 @@ class PredictionLeadTimes(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def get_crps(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> Union[pd.DataFrame, Dict[str, float]]:
+    def get_crps(self, lead_times: Optional[List[int]] = None, mean: bool = False, item_ids: Optional[List[int]] = None) -> Union[pd.DataFrame, Dict[str, float]]:
         """Computes CRPS for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        crps_scores = {lt: np.round(self.results[lt].get_crps(), 2) for lt in lead_times}
+        crps_scores = {lt: np.round(self.results[lt].get_crps(item_ids), 2) for lt in lead_times}
         crps_scores = pd.DataFrame({"Mean CRPS": crps_scores.values()}, index=crps_scores.keys())
         crps_scores.index.name = "lead time"
 
@@ -305,10 +305,10 @@ class PredictionLeadTimes(BaseModel):
         else:
             return crps_scores
 
-    def get_quantile_scores(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> pd.DataFrame:
+    def get_quantile_scores(self, lead_times: Optional[List[int]] = None, mean: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes quantile scores for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        quantile_scores = {lt: self.results[lt].get_quantile_score() for lt in lead_times}
+        quantile_scores = {lt: self.results[lt].get_quantile_score(item_ids) for lt in lead_times}
 
         quantile_scores = pd.DataFrame(quantile_scores)
         if mean:
@@ -321,11 +321,11 @@ class PredictionLeadTimes(BaseModel):
         quantile_scores.index.name = "quantile"
         return quantile_scores.round(2)
 
-    def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None, mean: bool = False) -> pd.DataFrame:
+    def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None, mean: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes empirical coverage rates for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
 
-        coverage_rates = pd.DataFrame({lt: self.results[lt].get_empirical_coverage_rates() for lt in lead_times})
+        coverage_rates = pd.DataFrame({lt: self.results[lt].get_empirical_coverage_rates(item_ids) for lt in lead_times})
 
         if mean:
             coverage_rates = pd.DataFrame(coverage_rates).mean(axis=1)
@@ -336,12 +336,12 @@ class PredictionLeadTimes(BaseModel):
         coverage_rates.index.name = "quantile"
         return coverage_rates.round(2)
 
-    def get_pit_values(self, lead_times: Optional[List[int]] = None) -> Dict[int, np.ndarray]:
+    def get_pit_values(self, lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> Dict[int, np.ndarray]:
         """Computes PIT values for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        return {lt: self.results[lt].get_pit_values() for lt in lead_times}
+        return {lt: self.results[lt].get_pit_values(item_ids) for lt in lead_times}
 
-    def get_pit_histogram(self, lead_times: Optional[List[int]] = None, overlay: bool = False) -> None:
+    def get_pit_histogram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
         """Plots PIT histograms for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
 
@@ -350,7 +350,7 @@ class PredictionLeadTimes(BaseModel):
             bins = len(next(iter(self.results.values())).quantiles)
 
             for lt in lead_times:
-                pit_values = self.results[lt].get_pit_values()
+                pit_values = self.results[lt].get_pit_values(item_ids)
                 plt.hist(pit_values, bins=bins, alpha=0.5, label=f"Lead time {lt}")
 
             plt.axhline(len(pit_values) / bins, color="red", linestyle="dashed", label="Uniform(0,1) reference")
@@ -379,7 +379,7 @@ class PredictionLeadTimes(BaseModel):
             plt.tight_layout()
             plt.show()
 
-    def get_reliability_diagram(self, lead_times: Optional[List[int]] = None, overlay: bool = False) -> None:
+    def get_reliability_diagram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
         """Plots reliability diagrams for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
         plt.figure(figsize=(8, 8))
@@ -387,7 +387,7 @@ class PredictionLeadTimes(BaseModel):
         if overlay:
             for lt in lead_times:
                 pred = self.results[lt]
-                empirical_coverage_rates = pred.get_empirical_coverage_rates()
+                empirical_coverage_rates = pred.get_empirical_coverage_rates(item_ids)
                 quantile_levels = sorted(empirical_coverage_rates.keys())
                 empirical_coverages = [empirical_coverage_rates[q] for q in quantile_levels]
                 plt.plot(quantile_levels, empirical_coverages, "o-", label=f"Lead time {lt}")
@@ -409,7 +409,7 @@ class PredictionLeadTimes(BaseModel):
             axes = axes.flatten() if num_plots > 1 else [axes]
             for ax, lt in zip(axes, lead_times):
                 pred = self.results[lt]
-                empirical_coverage_rates = pred.get_empirical_coverage_rates()
+                empirical_coverage_rates = pred.get_empirical_coverage_rates(item_ids)
                 quantile_levels = sorted(empirical_coverage_rates.keys())
                 empirical_coverages = [empirical_coverage_rates[q] for q in quantile_levels]
                 ax.plot(quantile_levels, empirical_coverages, "o-", label=f"Lead time {lt}")
@@ -423,17 +423,17 @@ class PredictionLeadTimes(BaseModel):
             plt.show()
 
 
-def get_quantile_scores(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None) -> pd.DataFrame:
+def get_quantile_scores(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
     """Quantile scores averaged across the specified lead times"""
-    scores = pd.concat([pred.get_quantile_scores(lead_times=lead_times, mean=True) for pred in predictions.values()], axis=1)
+    scores = pd.concat([pred.get_quantile_scores(lead_times=lead_times, mean=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
     scores.columns = [key for key in predictions.keys()]
 
     return scores
 
 
-def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None) -> pd.DataFrame:
+def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
     """Empirical coverage rates averaged across the specified lead times"""
-    scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean=True) for pred in predictions.values()], axis=1)
+    scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
     scores.columns = [key for key in predictions.keys()]
 
     return scores
