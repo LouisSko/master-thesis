@@ -140,7 +140,7 @@ class PredictionLeadTime(BaseModel):
 
         return merged
 
-    def get_crps(self, item_ids: Optional[List[int]] = None) -> float:
+    def get_crps(self, item_ids: Optional[List[int]] = None, mean_time: bool = True) -> np.ndarray:
         """
         Computes the Continuous Ranked Probability Score (CRPS) for the forecast.
 
@@ -152,9 +152,13 @@ class PredictionLeadTime(BaseModel):
         """
         data = self.to_dataframe(item_ids=item_ids)
         crps = sr.crps_quantile(data["target"].to_numpy(), data[self.quantiles].to_numpy(), self.quantiles)
-        return crps[~np.isnan(crps)].mean()
 
-    def get_quantile_score(self, item_ids: Optional[List[int]] = None) -> pd.Series:
+        if mean_time:
+            return np.array([crps[~np.isnan(crps)].mean()])
+        else:
+            return crps
+
+    def get_quantile_score(self, item_ids: Optional[List[int]] = None, mean_time: bool = True) -> Union[pd.DataFrame, pd.Series]:
         """
         Computes the average quantile score (pinball loss) for the forecast.
 
@@ -167,7 +171,13 @@ class PredictionLeadTime(BaseModel):
         data = self.to_dataframe(item_ids=item_ids)
         quantile_scores = np.column_stack([sr.quantile_score(data["target"].to_numpy(), data[q].to_numpy(), q) for q in self.quantiles])
 
-        return pd.DataFrame(quantile_scores, columns=self.quantiles).mean()
+        quantile_scores = pd.DataFrame(quantile_scores, columns=self.quantiles, index=data.index)
+        if mean_time:
+            # quantile_scores = pd.DataFrame(quantile_scores.mean(), columns=["Mean QS"])
+            # quantile_scores.index.name = "quantile"
+            return quantile_scores.mean()
+        else:
+            return quantile_scores
 
     def get_pit_values(self, item_ids: Optional[List[int]] = None) -> np.ndarray:
         """
@@ -241,7 +251,7 @@ class PredictionLeadTime(BaseModel):
         """Randomly plot data"""
 
         subset = self.to_dataframe(item_ids=[item_id])
-        #subset = pred_df.xs(item_id, level="item_id")
+        # subset = pred_df.xs(item_id, level="item_id")
         rand_start_idx = np.random.randint(0, (len(subset) - ts_length))
         subset = subset.iloc[rand_start_idx : rand_start_idx + ts_length]
 
@@ -293,41 +303,41 @@ class PredictionLeadTimes(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-    def get_crps(self, lead_times: Optional[List[int]] = None, mean: bool = False, item_ids: Optional[List[int]] = None) -> Union[pd.DataFrame, Dict[str, float]]:
+    def get_crps(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, mean_time: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes CRPS for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        crps_scores = {lt: np.round(self.results[lt].get_crps(item_ids), 2) for lt in lead_times}
-        crps_scores = pd.DataFrame({"Mean CRPS": crps_scores.values()}, index=crps_scores.keys())
-        crps_scores.index.name = "lead time"
+        crps_scores = {lt: self.results[lt].get_crps(item_ids, mean_time=mean_time) for lt in lead_times}
+        crps_scores = pd.DataFrame(data=crps_scores, index=["mean"] if mean_time else self.results[lead_times[0]].to_dataframe(item_ids=item_ids).index)  # TODO: make this nicer
 
-        if mean:
-            return {"Mean CRPS Score": crps_scores.mean().round(2).item()}
-        else:
-            return crps_scores
+        if mean_lead_times:
+            crps_scores = pd.DataFrame(crps_scores.mean(axis=1), columns=["Mean CRPS"])
 
-    def get_quantile_scores(self, lead_times: Optional[List[int]] = None, mean: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
+        return crps_scores.round(2)
+
+    def get_quantile_scores(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes quantile scores for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
-        quantile_scores = {lt: self.results[lt].get_quantile_score(item_ids) for lt in lead_times}
+        quantile_scores = {lt: self.results[lt].get_quantile_score(item_ids, mean_time=True) for lt in lead_times}
 
         quantile_scores = pd.DataFrame(quantile_scores)
-        if mean:
-            mean_scores = pd.DataFrame(quantile_scores).mean(axis=1)
+        mean_scores = quantile_scores.mean(axis=1)
+
+        if mean_lead_times:
             quantile_scores = pd.DataFrame(mean_scores, columns=["QS averaged over all lead times"])
         else:
-            quantile_scores.loc[:, "QS averaged over all lead times"] = quantile_scores.mean(axis=1)
+            quantile_scores.loc[:, "QS averaged over all lead times"] = mean_scores
 
-        quantile_scores.loc["Mean (CRPS)", :] = quantile_scores.mean()
+        quantile_scores.loc["Mean (CRPS/2)", :] = quantile_scores.mean()
         quantile_scores.index.name = "quantile"
         return quantile_scores.round(2)
 
-    def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None, mean: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
+    def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes empirical coverage rates for selected lead times."""
         lead_times = lead_times or list(self.results.keys())
 
         coverage_rates = pd.DataFrame({lt: self.results[lt].get_empirical_coverage_rates(item_ids) for lt in lead_times})
 
-        if mean:
+        if mean_lead_times:
             coverage_rates = pd.DataFrame(coverage_rates).mean(axis=1)
             coverage_rates = pd.DataFrame(coverage_rates, columns=["Empirical coverage rates averaged over all lead times"])
         else:
@@ -425,7 +435,7 @@ class PredictionLeadTimes(BaseModel):
 
 def get_quantile_scores(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
     """Quantile scores averaged across the specified lead times"""
-    scores = pd.concat([pred.get_quantile_scores(lead_times=lead_times, mean=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    scores = pd.concat([pred.get_quantile_scores(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
     scores.columns = [key for key in predictions.keys()]
 
     return scores
@@ -437,3 +447,86 @@ def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], le
     scores.columns = [key for key in predictions.keys()]
 
     return scores
+
+
+def get_crps_scores(
+    predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, item_ids: Optional[List[int]] = None
+) -> pd.DataFrame:
+    """crps scores averaged across the specified lead times"""
+    scores = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, item_ids=item_ids) for pred in predictions.values()], axis=0).T
+    scores.columns = [key for key in predictions.keys()]
+    scores.index.name = "lead times"
+    return scores
+
+
+def plot_crps(
+    predictions: Dict[str, PredictionLeadTimes],
+    lead_times: Optional[List[int]] = None,
+    item_ids: Optional[List[int]] = None,
+    rolling_window: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Computes mean CRPS scores before/after specific pd.Timestamp dates
+    Parameters:
+    -----------
+    - df: MultiIndex DataFrame with ['item_id', 'timestamp'] as index.
+    - date_splits: List of pd.Timestamp for splitting data into before/after segments.
+
+    Returns:
+    -------
+    - A DataFrame with mean CRPS scores for each period.
+    """
+
+    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    df.columns = [key for key in predictions.keys()]
+
+    df = df.reset_index(level=0, drop=True).groupby("timestamp").mean()
+
+    if rolling_window:
+        df.rolling(window=rolling_window).mean().plot()
+    else:
+        df.plot()
+
+
+def get_crps_by_period(
+    predictions: Dict[str, PredictionLeadTimes],
+    lead_times: Optional[List[int]] = None,
+    item_ids: Optional[List[int]] = None,
+    date_splits: Optional[List[pd.Timestamp]] = None,
+) -> pd.DataFrame:
+    """
+    Computes mean CRPS scores before/after specific pd.Timestamp dates
+    Parameters:
+    -----------
+    - df: MultiIndex DataFrame with ['item_id', 'timestamp'] as index.
+    - date_splits: List of pd.Timestamp for splitting data into before/after segments.
+
+    Returns:
+    -------
+    - A DataFrame with mean CRPS scores for each period.
+    """
+
+    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    df.columns = [key for key in predictions.keys()]
+
+    df = df.reset_index()
+
+    results: dict[str, pd.Series] = {}
+
+    date_splits = sorted(date_splits)
+
+    first_date = df["timestamp"].min()
+    last_date = df["timestamp"].max()
+    date_splits.append(last_date)
+
+    for d in date_splits:
+        if not isinstance(d, pd.Timestamp):
+            raise TypeError(f"All date_splits must be pd.Timestamp, got {type(d)}")
+
+        subset_df = df[(df["timestamp"] > first_date) & (df["timestamp"] <= d)]
+
+        # after = df[df["timestamp"] >= d]
+        results[f"{first_date}_to_{d}"] = subset_df.drop(columns=["item_id", "timestamp"]).mean()
+        first_date = d
+
+    return pd.DataFrame(results).T
