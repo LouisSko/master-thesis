@@ -13,6 +13,7 @@ class PostprocessorMLE(AbstractPostprocessor):
     def __init__(self) -> None:
         super().__init__()
         self.params = {}  # Store {lead_time: {item_id: (a, b, c, d)}}
+        self.epsilon = 100_000
 
     def fit(self, data: PredictionLeadTimes) -> None:
         self.params = {}
@@ -23,11 +24,10 @@ class PostprocessorMLE(AbstractPostprocessor):
         for lt in tqdm(lead_times):
             self.params[lt] = {}
             for item_id in data.results[lt].data.item_ids:
-                df = data.results[lt].to_dataframe(item_id=item_id).iloc[ignore_first_n:].dropna()
+                df = data.results[lt].to_dataframe(item_ids=[item_id]).iloc[ignore_first_n:].dropna()
                 quantiles = data.results[lt].quantiles
 
-                epsilon = 100_0000
-                log_df = np.log(df[quantiles + ["target"]] + epsilon)
+                log_df = np.log(df[quantiles + ["target"]] + self.epsilon)
                 log_df["std_target"] = log_df["target"].rolling(20, min_periods=20, center=True).std()
                 log_df = log_df.dropna()
 
@@ -55,9 +55,9 @@ class PostprocessorMLE(AbstractPostprocessor):
             all_preds = []
 
             for item_id in data.results[lt].data.item_ids:
-                df = data.results[lt].to_dataframe(item_id=item_id)
-                epsilon = 100_0000
-                log_df = np.log(df[quantiles] + epsilon)
+                df = data.results[lt].to_dataframe(item_ids=[item_id])
+
+                log_df = np.log(df[quantiles] + self.epsilon)
 
                 M = log_df[0.5].values
                 IQR = (log_df[0.9] - log_df[0.1]).values
@@ -66,7 +66,7 @@ class PostprocessorMLE(AbstractPostprocessor):
                 mu = a + b * M
                 sigma = c + d * IQR
                 log_predictions = stats.norm.ppf(np.array(quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
-                all_preds.append(np.exp(log_predictions) - epsilon)
+                all_preds.append(np.exp(log_predictions) - self.epsilon)
 
             preds_np = np.vstack(all_preds)
             results[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(preds_np), quantiles=quantiles, freq=freq, data=data.results[lt].data)
@@ -99,7 +99,13 @@ class PostprocessorMLE(AbstractPostprocessor):
         a, b, c, d = params
         mu = a + b * M
         sigma = c + d * IQR
+
+        # penalize negative standard deviation
+        if any(sigma <= 0):
+            return np.inf
+
         nll = -np.sum(stats.norm.logpdf(y, loc=mu, scale=sigma))
+
         return nll
 
     def _estimate_init_params(self, m: np.ndarray, iqr: np.ndarray, y_mu: np.ndarray, y_sigma: np.ndarray) -> Tuple[float, float, float, float]:
