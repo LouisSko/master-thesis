@@ -27,7 +27,7 @@ class QuantileRegression(AbstractPredictor):
 
         for lt in tqdm(self.lead_times):
 
-            data_lt = self._create_cyclic_features(data, lt)
+            data_lt = self._create_cyclic_features(data, lt, dropna=True)
 
             # Postprocess each time series separately
             for item_id in data_lt.item_ids:
@@ -53,7 +53,7 @@ class QuantileRegression(AbstractPredictor):
 
         for lt in tqdm(self.lead_times):
 
-            data_lt = self._create_cyclic_features(data, lt)
+            data_lt = self._create_cyclic_features(data, lt, dropna=False)
 
             # store results
             test_results = {}
@@ -104,7 +104,7 @@ class QuantileRegression(AbstractPredictor):
         if drop:
             data = data.drop(columns=[colname])
 
-    def _create_cyclic_features(self, data: TimeSeriesDataFrame, lead_time: int = 1, freq: pd.Timedelta = pd.Timedelta("1h")) -> TabularDataFrame:
+    def _create_cyclic_features(self, data: TimeSeriesDataFrame, lead_time: int = 1, freq: pd.Timedelta = pd.Timedelta("1h"), dropna: bool = True) -> TabularDataFrame:
         """Generates timestamp-based and relative time delta features for prediction tasks.
 
         Parameters:
@@ -196,9 +196,10 @@ class QuantileRegression(AbstractPredictor):
                 ]
             )
 
-            # Final prep
             data_subset = data_subset.set_index(["item_id", "timestamp"])
-            data_subset = data_subset.dropna()
+
+            if dropna:
+                data_subset = data_subset.dropna()
 
             data_w_features.append(data_subset)
 
