@@ -7,8 +7,8 @@ from typing import List, Optional
 import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
-from core.base import AbstractPredictor
-from core.timeseries import PredictionLeadTimes, PredictionLeadTime
+from src.core.base import AbstractPredictor
+from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime
 
 
 class ChronosInferenceDataset(Dataset):
