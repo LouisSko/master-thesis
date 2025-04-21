@@ -5,3 +5,4 @@ scoringrules
 matplotlib
 statsmodels
 chronos-forecasting
+tensorboard
