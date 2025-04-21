@@ -9,6 +9,9 @@ from torch.utils.data import Dataset
 import numpy as np
 from src.core.base import AbstractPredictor
 from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime
+from optuna.trial import Trial
+from pathlib import Path
+from transformers.trainer import TrainingArguments
 
 
 class ChronosInferenceDataset(Dataset):
@@ -133,7 +136,7 @@ class Chronos(AbstractPredictor):
         if self.prediction_length > 64:
             raise ValueError("Maximum supported lead time is 64 currently.")
 
-        self.pipeline = BaseChronosPipeline.from_pretrained(
+        self.pipeline: BaseChronosPipeline = BaseChronosPipeline.from_pretrained(
             model_name,
             device_map=device_map,
         )
@@ -236,3 +239,103 @@ class Chronos(AbstractPredictor):
             results[lt] = PredictionLeadTime(lead_time=lt, predictions=forecasts[..., lt - 1], freq=self.freq, data=data)
 
         return PredictionLeadTimes(results=results)
+
+
+# Define search space for hyperparameter search
+def hp_space_optuna(trial: Trial):
+    return {
+        "learning_rate": trial.suggest_float("learning_rate", 1e-9, 1e-3, log=True),
+        "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32, 64, 128]),
+        "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.3),
+        "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
+        "max_steps": trial.suggest_int("max_steps", 10, 1000),
+    }
+
+
+############## Functions for Hyperparameter tuning ##############
+
+
+def compute_objective(metrics):
+    """Objective to minimize"""
+
+    return metrics["eval_loss"]
+
+
+def model_init_full_tuning():
+    """Initialize a fresh Chronos model"""
+
+    chronos_fresh = Chronos(model_name="amazon/chronos-bolt-tiny", device_map="mps", lead_times=np.arange(1, 65), freq=pd.Timedelta("1h"))
+
+    return chronos_fresh.pipeline.inner_model
+
+
+def model_init_last_layer_tuning():
+    """Initialize a fresh Chronos model where only last layer is tuned."""
+
+    chronos_fresh = Chronos(model_name="amazon/chronos-bolt-tiny", device_map="mps", lead_times=np.arange(1, 65), freq=pd.Timedelta("1h"))
+
+    # whether to only tune the last layer
+    for param in chronos_fresh.pipeline.inner_model.parameters():
+        param.requires_grad = False
+
+    # train only last residual block (incl. output layer)
+    for param in chronos_fresh.pipeline.inner_model.output_patch_embedding.parameters():
+        param.requires_grad = True
+
+    return chronos_fresh.pipeline.inner_model
+
+
+def create_trainer_kwargs(path: str = Path("./models/test/"), eval_during_fine_tune: bool = True, save_checkpoints: bool = True):
+    """Define the training arguments"""
+
+    log_save_eval_steps = 10
+    target_column = "target"
+    dir = "transformers_logs"
+
+    # create TrainingArguments
+    fine_tune_trainer_kwargs = {
+        "output_dir": path / dir,
+        "overwrite_output_dir": False,
+        "per_device_train_batch_size": 32,
+        "per_device_eval_batch_size": 32,
+        "learning_rate": 1e-05,
+        "lr_scheduler_type": "linear",
+        "warmup_ratio": 0.0,
+        "weight_decay": 0.0,
+        "optim": "adamw_torch_fused",
+        "logging_dir": Path(path) / dir,
+        "logging_strategy": "steps",
+        "logging_steps": log_save_eval_steps,
+        "disable_tqdm": False,
+        "max_steps": 500,
+        # 'num_train_epochs': 1,
+        "gradient_accumulation_steps": 1,
+        "dataloader_num_workers": 0,
+        "tf32": False,
+        "report_to": "tensorboard",
+        "prediction_loss_only": True,
+        "save_strategy": "steps" if save_checkpoints else "no",
+        "save_steps": log_save_eval_steps if save_checkpoints else None,
+        "save_only_model": True,
+        "save_total_limit": 5,
+        "evaluation_strategy": "steps" if eval_during_fine_tune else "no",
+        "eval_steps": log_save_eval_steps if eval_during_fine_tune else None,
+        "eval_on_start": True if eval_during_fine_tune else False,
+        "load_best_model_at_end": True if eval_during_fine_tune else False,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+        "use_cpu": False,
+        "label_names": [target_column],
+    }
+
+    return TrainingArguments(**fine_tune_trainer_kwargs)
+
+
+def check_model_parameters(chronos: Chronos, model_name: str = "amazon/chronos-bolt-tiny"):
+    """Helper function to verify, if weights have changed."""
+
+    chronos_copy = Chronos(model_name=model_name, device_map="mps", lead_times=np.arange(1, 65), freq=pd.Timedelta("1h"))
+
+    for (name1, p1), (name2, p2) in zip(chronos_copy.pipeline.inner_model.named_parameters(), chronos.pipeline.inner_model.named_parameters()):
+        if not torch.equal(p1, p2):
+            print(f"Parameter {name1} has changed!")
