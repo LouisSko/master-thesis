@@ -30,12 +30,13 @@ class PostprocessorQR(AbstractPostprocessor):
             for item_id in item_ids:
                 for q in quantiles:
                     # Prepare the training data
-                    df_train = data.results[lt].to_dataframe(item_id=item_id).iloc[self.ignore_first_n_train_entries :].dropna()
+                    df_train = data.results[lt].to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].dropna()
+                    df_train = df_train.dropna()
                     cols_rename = {q: f"feature_{q}" for q in quantiles}
                     df_train = df_train.rename(columns=cols_rename)
                     cols_to_keep = list(cols_rename.values()) + ["target"]
                     df_train = df_train[cols_to_keep]
-                    df_train.index = pd.MultiIndex.from_arrays([[item_id] * len(df_train), df_train.index], names=["item_id", df_train.index.name])
+                    # df_train.index = pd.MultiIndex.from_arrays([[item_id] * len(df_train), df_train.index], names=["item_id", df_train.index.name])
                     train_data = TabularDataFrame(df_train)
 
                     x_train = np.log(train_data[f"feature_{q}"].values.reshape(-1, 1) + self.epsilon)
@@ -65,11 +66,11 @@ class PostprocessorQR(AbstractPostprocessor):
 
             for item_id in item_ids:
                 # prepare the test data
-                df_test = data.results[lt].to_dataframe(item_id=item_id)
+                df_test = data.results[lt].to_dataframe(item_ids=[item_id])
                 cols_rename = {q: f"feature_{q}" for q in quantiles}
                 df_test = df_test.rename(columns=cols_rename)
                 cols_to_keep = list(cols_rename.values()) + ["target"]
-                df_test.index = pd.MultiIndex.from_arrays([[item_id] * len(df_test), df_test.index], names=["item_id", df_test.index.name])
+                # df_test.index = pd.MultiIndex.from_arrays([[item_id] * len(df_test), df_test.index], names=["item_id", df_test.index.name])
                 test_data = TabularDataFrame(df_test[cols_to_keep])
 
                 test_results = {}
