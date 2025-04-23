@@ -541,7 +541,7 @@ def model_init_last_layer_tuning() -> PreTrainedModel:
     return chronos_fresh.pipeline.inner_model
 
 
-def model_init_lora(print_params: bool = True) -> PreTrainedModel:
+def model_init_lora() -> PreTrainedModel:
     """Initialize a fresh Chronos model with LoRA"""
 
     # Initialize the Chronos model
