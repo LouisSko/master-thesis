@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 from autogluon.timeseries import TimeSeriesDataFrame
 import math
 import matplotlib.dates as mdates
+from pathlib import Path
+import joblib
 
 ITEMID = "item_id"
 TIMESTAMP = "timestamp"
@@ -302,6 +304,11 @@ class PredictionLeadTimes(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+    def save(self, file_path: Path) -> None:
+        """Save predictions to files"""
+        joblib.dump(self, file_path)
+        print(f"Saved files to {file_path}")
 
     def get_crps(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, mean_time: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes CRPS for selected lead times."""
