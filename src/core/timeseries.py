@@ -450,7 +450,7 @@ def get_quantile_scores(predictions: Dict[str, PredictionLeadTimes], lead_times:
 
 def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
     """Empirical coverage rates averaged across the specified lead times"""
-    scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
     scores.columns = [key for key in predictions.keys()]
 
     return scores
