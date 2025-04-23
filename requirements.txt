@@ -6,3 +6,4 @@ matplotlib
 statsmodels
 chronos-forecasting
 tensorboard
+peft
