@@ -13,6 +13,7 @@ import math
 import matplotlib.dates as mdates
 from pathlib import Path
 import joblib
+import os
 
 ITEMID = "item_id"
 TIMESTAMP = "timestamp"
@@ -187,7 +188,7 @@ class PredictionLeadTime(BaseModel):
 
         PIT = F(y), where F(y) is the interp_func, which is the CDF approximated based on the quantiles.
 
-        Args:
+        Parameters:
             data (pd.DataFrame): DataFrame containing actual target values.
 
         Returns:
@@ -207,7 +208,7 @@ class PredictionLeadTime(BaseModel):
         """
         Plots a histogram of Probability Integral Transform (PIT) values to assess forecast calibration.
 
-        Args:
+        Parameters:
             data (pd.DataFrame): DataFrame containing actual target values.
 
         Returns:
@@ -537,3 +538,28 @@ def get_crps_by_period(
         first_date = d
 
     return pd.DataFrame(results).T
+
+
+def load_predictions(prediction_dir: str = "data/predictions/realisierter_stromverbrauch") -> Dict[str, PredictionLeadTimes]:
+    """
+    Load all saved prediction files from a directory.
+
+    Parameters:
+    ----------
+    - prediction_dir: str
+        The path to the directory containing saved prediction files.
+        Defaults to "data/predictions/realisierter_stromverbrauch".
+
+    Returns:
+    -------
+    Dict[str, PredictionLeadTimes]
+        A dictionary mapping filenames (without extension) to loaded PredictionLeadTimes objects.
+    """
+
+    all_predictions = {}
+    for filename in os.listdir(prediction_dir):
+        filepath = os.path.join(prediction_dir, filename)
+        if os.path.isfile(filepath) and filepath.endswith(".joblib"):
+            all_predictions[filepath.split("/")[-1].split(".")[0]] = joblib.load(filepath)
+
+    return all_predictions
