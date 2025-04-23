@@ -259,11 +259,11 @@ class PredictionLeadTime(BaseModel):
         plt.figure(figsize=(15, 5))
 
         # Plot median prediction
-        plt.plot(subset.index, subset[0.5], label="Median (50%)", color="C1", linestyle="-", linewidth=2)
+        plt.plot(subset.index.get_level_values("timestamp"), subset[0.5], label="Median (50%)", color="C1", linestyle="-", linewidth=2)
 
         # Plot confidence intervals as shaded regions
         plt.fill_between(
-            subset.index,
+            subset.index.get_level_values("timestamp"),
             subset[q_lower],
             subset[q_upper],
             color="C1",
@@ -272,7 +272,7 @@ class PredictionLeadTime(BaseModel):
         )
 
         # Plot target values
-        plt.plot(subset.index, subset["target"], label="Actual Target", color="C0", linestyle="-", linewidth=2)
+        plt.plot(subset.index.get_level_values("timestamp"), subset["target"], label="Actual Target", color="C0", linestyle="-", linewidth=2)
 
         # Formatting
         plt.xlabel("Time", fontsize=14)
