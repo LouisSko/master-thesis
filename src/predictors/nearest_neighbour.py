@@ -4,7 +4,7 @@ import pandas as pd
 from typing import Tuple, Dict, Any, List
 import torch
 from tqdm import tqdm
-from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime
+from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 from src.core.base import AbstractPredictor
 
 

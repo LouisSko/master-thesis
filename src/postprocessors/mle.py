@@ -3,7 +3,7 @@ import statsmodels.api as sm
 import scipy.stats as stats
 from scipy.optimize import minimize
 from src.core.base import AbstractPostprocessor
-from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime
+from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 import torch
 from tqdm import tqdm
 from typing import Tuple

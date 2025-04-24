@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List
 import pandas as pd
-from src.core.timeseries import PredictionLeadTimes
+from src.core.timeseries_evaluation import PredictionLeadTimes
 from autogluon.timeseries import TimeSeriesDataFrame
 
 

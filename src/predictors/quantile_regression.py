@@ -5,7 +5,7 @@ from typing import List
 import pandas as pd
 import numpy as np
 from src.core.base import AbstractPredictor
-from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
+from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 from fastai.tabular.core import add_datepart
 import statsmodels.api as sm
 

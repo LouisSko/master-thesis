@@ -8,7 +8,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
 from src.core.base import AbstractPredictor
-from src.core.timeseries import PredictionLeadTimes, PredictionLeadTime
+from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 from optuna.trial import Trial
 from pathlib import Path
 from transformers.trainer import TrainingArguments
@@ -602,7 +602,7 @@ def create_trainer_kwargs(path: str = Path("./models/test/"), eval_during_fine_t
         "logging_steps": logging_steps,
         "disable_tqdm": True,
         # "max_steps": 500,
-        'num_train_epochs': 1,
+        "num_train_epochs": 1,
         "gradient_accumulation_steps": 1,
         "dataloader_num_workers": 0,
         "tf32": False,
