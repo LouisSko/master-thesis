@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 import pandas as pd
 from src.core.timeseries_evaluation import PredictionLeadTimes
 from autogluon.timeseries import TimeSeriesDataFrame
@@ -16,7 +16,7 @@ class AbstractPredictor(ABC):
         pass
 
     @abstractmethod
-    def predict(self, data: TimeSeriesDataFrame, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
         pass
 
 

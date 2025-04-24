@@ -1,7 +1,7 @@
 from tqdm import tqdm
 import torch
 from autogluon.timeseries import TimeSeriesDataFrame
-from typing import List
+from typing import List, Optional
 import pandas as pd
 import numpy as np
 from src.core.base import AbstractPredictor
@@ -44,7 +44,7 @@ class QuantileRegression(AbstractPredictor):
                     model = sm.QuantReg(y_train, x_train)
                     self.models_qr[(lt, item_id, q)] = model.fit(q=q)
 
-    def predict(self, data: PredictionLeadTimes, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
+    def predict(self, data: PredictionLeadTimes, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
 
         if self.models_qr is None:
             raise ValueError("Need to fit models first")

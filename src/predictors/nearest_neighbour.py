@@ -1,7 +1,7 @@
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 import torch
 from tqdm import tqdm
 from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
@@ -67,7 +67,7 @@ class NNPredictor(AbstractPredictor):
         self.weekday_hour_value_dict = self._initialize_weekday_hour_dict(data.item_ids)
         _, self.weekday_hour_value_dict = self._forecast_from_weekday_hour_patterns(data, self.weekday_hour_value_dict)
 
-    def predict(self, data: TimeSeriesDataFrame, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
         """Generates predictions for the specified future lead times using historical weekday-hour patterns.
 
         Parameters
