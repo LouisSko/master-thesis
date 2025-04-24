@@ -441,16 +441,67 @@ class PredictionLeadTimes(BaseModel):
             plt.show()
 
 
-def get_quantile_scores(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
-    """Quantile scores averaged across the specified lead times"""
+def get_quantile_scores(
+    predictions: Dict[str, PredictionLeadTimes],
+    lead_times: Optional[List[int]] = None,
+    item_ids: Optional[List[int]] = None,
+    reference_predictions: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Computes quantile scores for different prediction sources,
+    averaged across the specified lead times, and optionally normalizes them
+    using a reference prediction.
+
+    Parameters
+    -----------
+    predictions : Dict[str, PredictionLeadTimes]
+        Dictionary of prediction objects, where each value provides a `get_crps` method
+        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    lead_times : Optional[List[int]], default=None
+        List of lead times to filter CRPS scores. If None, all lead times are used.
+    item_ids : Optional[List[int]], default=None
+        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+    reference_predictions : Optional[str], default=None
+        Key of a prediction set to be used as a reference for normalization.
+        If provided, all CRPS values will be divided by the CRPS values from this prediction.
+
+    Returns
+    --------
+    pd.DataFrame
+        A DataFrame where columns represent different prediction sources and rows represent
+        quantile score values averaged across the selected lead times. If normalization is applied,
+        the scores are expressed as a ratio to the reference prediction.
+    """
+
     scores = pd.concat([pred.get_quantile_scores(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
     scores.columns = [key for key in predictions.keys()]
 
+    if reference_predictions:
+        scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
     return scores
 
 
 def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
-    """Empirical coverage rates averaged across the specified lead times"""
+    """Computes empirical coverage rates for different prediction sources,
+    averaged across the specified lead times.
+
+    Parameters
+    -----------
+    predictions : Dict[str, PredictionLeadTimes]
+        Dictionary of prediction objects, where each value provides a `get_crps` method
+        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    lead_times : Optional[List[int]], default=None
+        List of lead times to filter CRPS scores. If None, all lead times are used.
+    item_ids : Optional[List[int]], default=None
+        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+
+    Returns
+    --------
+    pd.DataFrame
+        A DataFrame where each column corresponds to a prediction source,
+        and values represent the empirical coverage rates averaged over the specified lead times.
+    """
+
     scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
     scores.columns = [key for key in predictions.keys()]
 
@@ -458,12 +509,40 @@ def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], le
 
 
 def get_crps_scores(
-    predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, item_ids: Optional[List[int]] = None
+    predictions: Dict[str, PredictionLeadTimes],
+    lead_times: Optional[List[int]] = None,
+    mean_lead_times: bool = False,
+    item_ids: Optional[List[int]] = None,
+    reference_predictions: Optional[str] = None,
 ) -> pd.DataFrame:
-    """crps scores averaged across the specified lead times"""
+    """Computes and returns CRPS (Continuous Ranked Probability Score) values
+    averaged across specified lead times and optionally normalized by a reference prediction.
+
+    Parameters
+    -----------
+    predictions : Dict[str, PredictionLeadTimes]
+        Dictionary of prediction objects, where each value provides a `get_crps` method
+        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    lead_times : Optional[List[int]], default=None
+        List of lead times to filter CRPS scores. If None, all lead times are used.
+    item_ids : Optional[List[int]], default=None
+        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+    reference_predictions : Optional[str], default=None
+        Key of a prediction set to be used as a reference for normalization.
+        If provided, all CRPS values will be divided by the CRPS values from this prediction.
+
+    Returns
+    --------
+    pd.DataFrame
+        A DataFrame with CRPS values (or normalized CRPS) for each prediction source.
+        Rows represent lead times (or a single row if mean_lead_times=True), and columns represent prediction sources.
+    """
+
     scores = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, item_ids=item_ids) for pred in predictions.values()], axis=0).T
     scores.columns = [key for key in predictions.keys()]
     scores.index.name = "lead times"
+    if reference_predictions:
+        scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
     return scores
 
 
@@ -472,50 +551,99 @@ def plot_crps(
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     rolling_window: Optional[int] = None,
-) -> pd.DataFrame:
-    """
-    Computes mean CRPS scores before/after specific pd.Timestamp dates
-    Parameters:
+    reference_predictions: Optional[str] = None,
+) -> None:
+    """Plots the mean CRPS (Continuous Ranked Probability Score) over time for different prediction sources.
+
+    Parameters
     -----------
-    - df: MultiIndex DataFrame with ['item_id', 'timestamp'] as index.
-    - date_splits: List of pd.Timestamp for splitting data into before/after segments.
+    predictions : Dict[str, PredictionLeadTimes]
+        Dictionary of prediction objects, where each value provides a `get_crps` method
+        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    lead_times : Optional[List[int]], default=None
+        List of lead times to filter CRPS scores. If None, all lead times are used.
+    item_ids : Optional[List[int]], default=None
+        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+    rolling_window : Optional[int], default=None
+        Window size for computing the rolling mean of CRPS scores. If None, no smoothing is applied.
+    reference_predictions : Optional[str], default=None
+        Key of a prediction set to be used as a reference for normalization.
+        If provided, all CRPS values will be divided by the CRPS values from this prediction.
 
-    Returns:
-    -------
-    - A DataFrame with mean CRPS scores for each period.
+    Returns
+    --------
+    None
     """
 
+    # Compute CRPS DataFrame
     df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
-    df.columns = [key for key in predictions.keys()]
+
+    df.columns = list(predictions.keys())
+
+    if reference_predictions:
+        df = df.apply(lambda x: x / x[reference_predictions], axis=1)
 
     df = df.reset_index(level=0, drop=True).groupby("timestamp").mean()
 
     if rolling_window:
-        df.rolling(window=rolling_window).mean().plot()
-    else:
-        df.plot()
+        df = df.rolling(window=rolling_window).mean()
+
+    # Plotting with matplotlib
+    plt.figure(figsize=(12, 6))
+    for col in df.columns:
+        plt.plot(df.index, df[col], label=col, linewidth=2)
+
+    plt.title("Mean CRPS Over Time", fontsize=16)
+    plt.xlabel("Timestamp", fontsize=12)
+    plt.ylabel("CRPS" if not reference_predictions else "Relative CRPS", fontsize=12)
+    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+    plt.legend(title="Prediction Source", fontsize=10)
+    plt.tight_layout()
+    plt.xticks(rotation=45)
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())
+
+    plt.show()
 
 
 def get_crps_by_period(
     predictions: Dict[str, PredictionLeadTimes],
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
+    reference_predictions: Optional[str] = None,
     date_splits: Optional[List[pd.Timestamp]] = None,
 ) -> pd.DataFrame:
-    """
-    Computes mean CRPS scores before/after specific pd.Timestamp dates
-    Parameters:
-    -----------
-    - df: MultiIndex DataFrame with ['item_id', 'timestamp'] as index.
-    - date_splits: List of pd.Timestamp for splitting data into before/after segments.
+    """Computes the mean CRPS (Continuous Ranked Probability Score) over time periods
+    defined by timestamp splits for different prediction sources.
 
-    Returns:
-    -------
-    - A DataFrame with mean CRPS scores for each period.
+    Parameters
+    -----------
+    predictions : Dict[str, PredictionLeadTimes]
+        Dictionary of prediction objects, where each value provides a `get_crps` method
+        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    lead_times : Optional[List[int]], default=None
+        List of lead times to filter CRPS scores. If None, all lead times are used.
+    item_ids : Optional[List[int]], default=None
+        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+    reference_predictions : Optional[str], default=None
+        Key of a prediction set to be used as a reference for normalization.
+        If provided, all CRPS values will be divided by the CRPS values from this prediction.
+    date_splits : Optional[List[pd.Timestamp]], default=None
+        List of timestamps to split the CRPS data into time-based segments.
+        The function calculates mean CRPS in each period between these dates.
+
+    Returns
+    --------
+    pd.DataFrame
+        A DataFrame with the mean CRPS values for each time segment (e.g., "2023-01-01_to_2023-06-01"),
+        optionally normalized by a reference prediction. Each column corresponds to a prediction key.
     """
 
     df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
     df.columns = [key for key in predictions.keys()]
+
+    if reference_predictions:
+        df = df.apply(lambda x: x / x[reference_predictions], axis=1)
 
     df = df.reset_index()
 
@@ -544,13 +672,13 @@ def load_predictions(prediction_dir: str = "data/predictions/realisierter_stromv
     """
     Load all saved prediction files from a directory.
 
-    Parameters:
+    Parameters
     ----------
     - prediction_dir: str
         The path to the directory containing saved prediction files.
         Defaults to "data/predictions/realisierter_stromverbrauch".
 
-    Returns:
+    Returns
     -------
     Dict[str, PredictionLeadTimes]
         A dictionary mapping filenames (without extension) to loaded PredictionLeadTimes objects.
@@ -561,5 +689,9 @@ def load_predictions(prediction_dir: str = "data/predictions/realisierter_stromv
         filepath = os.path.join(prediction_dir, filename)
         if os.path.isfile(filepath) and filepath.endswith(".joblib"):
             all_predictions[filepath.split("/")[-1].split(".")[0]] = joblib.load(filepath)
+
+    print("Loaded the following predictions:")
+    print(30*"-")
+    print("\n".join([key for key in all_predictions.keys()]))
 
     return all_predictions
