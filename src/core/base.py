@@ -12,7 +12,7 @@ class AbstractPredictor(ABC):
         self.freq = freq
 
     @abstractmethod
-    def fit(self, data: TimeSeriesDataFrame) -> None:
+    def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
         pass
 
     @abstractmethod
