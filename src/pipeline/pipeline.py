@@ -2,9 +2,15 @@ import torch
 from typing import Dict, Any, List, Optional, Type, Union, Literal
 from src.core.timeseries_evaluation import PredictionLeadTime, PredictionLeadTimes, TabularDataFrame
 from src.core.base import AbstractPostprocessor, AbstractPredictor
+from src.core.utils import CustomJSONEncoder
 from autogluon.timeseries import TimeSeriesDataFrame
 import pandas as pd
 from src.core.base import AbstractPipeline
+from pathlib import Path
+import json
+import os
+
+PATH_PREDICTIONS = Path("./data/predictions/")
 
 
 class ForecastingPipeline(AbstractPipeline):
@@ -21,12 +27,13 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         test_start_date: pd.Timestamp,
         end_date: Optional[pd.Timestamp] = None,
-        rolling_window: bool = False,
+        rolling_window_eval: bool = False,
         train_window_size: Optional[pd.DateOffset] = None,
         val_window_size: Optional[pd.DateOffset] = None,
         test_window_size: Optional[pd.DateOffset] = None,
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
+        output_dir: Optional[Path] = None,
     ) -> PredictionLeadTimes:
 
         def train_predict_postprocess():
@@ -82,7 +89,7 @@ class ForecastingPipeline(AbstractPipeline):
         if end_date is None:
             end_date = self.data.index.get_level_values("timestamp").max()
 
-        if rolling_window:
+        if rolling_window_eval:
 
             if not test_window_size:
                 print("test_window_size not specified. Set it to 1 year as default")
@@ -94,6 +101,35 @@ class ForecastingPipeline(AbstractPipeline):
             results = merge_results(results)
         else:
             results = train_predict_postprocess()
+
+        if output_dir:
+            if not os.path.exists(PATH_PREDICTIONS / output_dir):
+                os.mkdir(PATH_PREDICTIONS / output_dir)
+                print(f"Created new directory: {PATH_PREDICTIONS / output_dir}")
+
+            backtest_params = {
+                "test_start_date": test_start_date,
+                "end_date": end_date,
+                "rolling_window_eval": rolling_window_eval,
+                "train_window_size": train_window_size,
+                "val_window_size": val_window_size,
+                "test_window_size": test_window_size,
+                "train": train,
+                "calibration_based_on": calibration_based_on,
+            }
+
+            # add evaluation information
+            additional_config_info = {}
+            additional_config_info.update(results.get_crps(mean_lead_times=True, mean_time=True).to_dict())
+            additional_config_info.update(results.get_empirical_coverage_rates(mean_lead_times=True).to_dict())
+            additional_config_info.update(results.get_quantile_scores(mean_lead_times=True).to_dict())
+            config = self.get_config(backtest_params, additional_config_info)
+
+            # Save config as JSON
+            with open(PATH_PREDICTIONS / output_dir / "config.json", "w") as f:
+                json.dump(config, f, indent=4, cls=CustomJSONEncoder)
+
+            results.save(PATH_PREDICTIONS / output_dir / "predictions.joblib")
 
         return results
 
