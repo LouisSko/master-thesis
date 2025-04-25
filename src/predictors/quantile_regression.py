@@ -23,7 +23,10 @@ class QuantileRegression(AbstractPredictor):
         self.models_qr = {}
         self.epsilon = 100_000
 
-    def fit(self, data: PredictionLeadTimes) -> None:
+    def fit(self, data: PredictionLeadTimes, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+
+        if data_val is not None:
+            print("data_val is not used.")
 
         for lt in tqdm(self.lead_times):
 
