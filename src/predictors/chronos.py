@@ -3,7 +3,7 @@ import torch
 from chronos import BaseChronosPipeline
 from autogluon.timeseries import TimeSeriesDataFrame
 from torch.utils.data import DataLoader
-from typing import Callable, List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any, Literal, Union
 import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
@@ -144,73 +144,163 @@ class ChronosBacktestingDataset(Dataset):
 
 
 class Chronos(AbstractPredictor):
-    """Chronos time series predictor using a pretrained Chronos pipeline (from HuggingFace).
+    """
+    Chronos time series predictor using a pretrained Chronos pipeline (from HuggingFace).
+
     This class implements prediction logic based on a fixed context window and multiple lead times.
 
-    Parameters:
-        model_name (str): Name or path of the pretrained Chronos model.
-        device_map (str): Device to run inference on, e.g., "cpu", "cuda", or "mps".
-        context_length (int): Number of timesteps used as context for prediction.
-        lead_times (List[int]): List of prediction steps ahead (lead times).
-        freq (pd.Timedelta): Frequency of the time series data.
-        lora (bool): Whether to load the model with LoRA adapters. If True, `model_name`
-            should point to a directory containing LoRA adapter weights and config.
-            The base model will be automatically determined from the adapter config.
+    Parameters
+    ----------
+    pretrained_model_name_or_path : str or Path, optional
+        Name or path of the chronos model. Defaults to "amazon/chronos-bolt-tiny".
+    device_map : str, optional
+        Device to run inference on, e.g., "cpu", "cuda", or "mps". Defaults to "mps".
+    context_length : int, optional
+        Number of timesteps used as context for prediction. Defaults to 2048.
+    lead_times : List[int], optional
+        List of prediction steps ahead (lead times). Defaults to [1, 2, 3].
+    freq : pd.Timedelta, optional
+        Frequency of the time series data. Defaults to 1 hour.
+    finetuning_type : {"full", "last_layer", "LoRa"}, optional
+        Type of fine-tuning to apply. Defaults to "full".
+    finetuning_hp_search : bool, optional
+        Whether to perform hyperparameter search during fine-tuning. Defaults to False.
+    finetuning_hp_search_trials : int, optional
+        Number of trials for hyperparameter search. Defaults to 10.
     """
 
     def __init__(
         self,
-        model_name: str = "amazon/chronos-bolt-tiny",
+        pretrained_model_name_or_path: Union[str, Path] = "amazon/chronos-bolt-tiny",
         device_map: str = "mps",
         context_length: int = 2048,
         lead_times: List[int] = [1, 2, 3],
         freq: pd.Timedelta = pd.Timedelta("1h"),
-        lora: bool = False,
+        finetuning_type: Literal["full", "last_layer", "LoRa"] = "full",
+        finetuning_hp_search: Optional[bool] = False,
+        finetuning_hp_search_trials: Optional[int] = 10,
     ) -> None:
         super().__init__(lead_times, freq)
         self.context_length = context_length
         self.prediction_length = max(self.lead_times)
+        self.pretrained_model_name_or_path = pretrained_model_name_or_path
+        self.device_map = device_map
+        self.finetuning_type = finetuning_type
+        self.finetuning_hp_search = finetuning_hp_search
+        self.finetuning_hp_search_trials = finetuning_hp_search_trials
+        self.lora = False
 
         if self.prediction_length > 64:
             raise ValueError("Maximum supported lead time is 64 currently.")
 
         print("Load chronos pipeline.")
 
-        # add lora weights if specified
-        if lora:
+        # add lora weights if adapter_config exists in directory
+        if (Path(self.pretrained_model_name_or_path) / "adapter_config.json").exists():
+            print(f"Found LoRa configuration in {self.pretrained_model_name_or_path}")
             print("Load LoRa weights.")
 
-            # Load configs for sanity check
-            with open(Path(model_name) / "adapter_config.json", "r") as f:
+            with open(Path(self.pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
                 adapter_config = json.load(f)
 
             base_model_name = adapter_config.get("base_model_name_or_path")
 
-            self.pipeline = BaseChronosPipeline.from_pretrained(
-                base_model_name,
-                device_map=device_map,
-            )
+            self.pipeline = self._pipeline_init(base_model_name)
 
             # Apply LoRA adapters
-            self.pipeline.inner_model = PeftModel.from_pretrained(self.pipeline.inner_model, model_name, is_trainable=False)
-
+            self.pipeline.inner_model = PeftModel.from_pretrained(self.pipeline.inner_model, self.pretrained_model_name_or_path, is_trainable=False)
+            self.lora = True
         else:
-            self.pipeline = BaseChronosPipeline.from_pretrained(
-                model_name,
-                device_map=device_map,
-            )
+            self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
-    def fit(self, data: TimeSeriesDataFrame) -> None:
+    def _pipeline_init(self, pretrained_model_name_or_path: Union[str, Path]) -> BaseChronosPipeline:
+        """Creates an object of the chronos pipeline"""
+
+        return BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
+
+    def fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
         """Placeholder method for training. Not implemented, as Chronos is a pretrained model. Implement Finetuning in the future
 
         Parameters:
-            data (TimeSeriesDataFrame): Training data (not used).
-
-        Raises:
-            NotImplementedError: Always raised since training is not supported.
+            data_train (TimeSeriesDataFrame): Training data (not used).
+            data_val (TimeSeriesDataFrame): Evaluation data (optional).
         """
 
-        raise NotImplementedError
+        def _model_init_full_tuning() -> PreTrainedModel:
+            """Initialize a model where all parameters are trainable"""
+
+            pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+            return pipeline.inner_model
+
+        def _model_init_last_layer_tuning() -> PreTrainedModel:
+            """Initialize a model where only last layer is trainable."""
+
+            pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+            # whether to only tune the last layer
+            for param in pipeline.inner_model.parameters():
+                param.requires_grad = False
+            # train only last residual block (incl. output layer)
+            for param in pipeline.inner_model.output_patch_embedding.parameters():
+                param.requires_grad = True
+
+            return pipeline.inner_model
+
+        def _model_init_lora() -> PreTrainedModel:
+            """Initialize a model with LoRA"""
+
+            # Initialize the Chronos model
+            pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+            # Configure LoRA
+            lora_config = LoraConfig(
+                task_type=None,
+                inference_mode=False,
+                r=8,  # LoRA rank
+                lora_alpha=8,  # Scaling factor
+                lora_dropout=0.0,  # Dropout rate
+                target_modules=[
+                    # Self Attention (inside SelfAttention and EncDecAttention)
+                    "q",
+                    "k",
+                    "v",
+                    "o",  #
+                    # Feedforward (inside DenseReluDense blocks (Feed Forward))
+                    "wi",
+                    "wo",
+                    # output_patch_embedding and input_patch_embedding blocks
+                    "hidden_layer",
+                    "output_layer",
+                    "residual_layer",
+                ],
+            )
+
+            # Apply LoRA to the base model
+            lora_model = get_peft_model(pipeline.inner_model, lora_config)
+
+            lora_model.print_trainable_parameters()
+
+            return lora_model
+
+        finetuning_options = {"full": _model_init_full_tuning, "last_layer": _model_init_last_layer_tuning, "LoRa": _model_init_lora}
+
+        if self.lora:
+            raise ValueError("Not supported to fine tune model when LoRa is enabled.")
+
+        fine_tuned_model_dir = Path(f"./models/finetuned-{self.finetuning_type}/")
+
+        fine_tune(
+            model_init=finetuning_options[self.finetuning_type],
+            data_train=data_train,
+            data_val=data_val,
+            path=fine_tuned_model_dir,
+            hp_tuning=self.finetuning_hp_search,
+            n_trials=self.finetuning_hp_search_trials,
+        )
+
+        # load saved model
+        self.pipeline = self._pipeline_init(fine_tuned_model_dir / "fine-tuned-ckpt")
+        print(f"Trained model is automatically loaded.")
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame) -> TimeSeriesDataFrame:
         """Merges previous context data with the new prediction data, ensuring time continuity and context length.
@@ -251,8 +341,8 @@ class Chronos(AbstractPredictor):
     def predict(
         self,
         data: TimeSeriesDataFrame,
-        predict_only_last_timestep: bool = False,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        predict_only_last_timestep: bool = False,
     ) -> PredictionLeadTimes:
         """Predicts future values for the given time series data using a pretrained Chronos model.
 
@@ -334,6 +424,7 @@ class BestCheckpointCallback(TrainerCallback):
         return self.best_checkpoint
 
 
+# TODO: implement a trainer class for that
 def fine_tune(
     model_init: Callable[[], PreTrainedModel],
     data_train: TimeSeriesDataFrame,
@@ -371,26 +462,6 @@ def fine_tune(
     prediction_length = 64
     target_column = "target"
 
-    # train_dataset = ChronosFineTuningDataset(
-    #     target_df=data_train,
-    #     target_column=target_column,
-    #     context_length=context_length,
-    #     prediction_length=prediction_length,
-    #     tokenizer=None,
-    #     mode="training",
-    # ).shuffle(True)
-
-    eval_dataset = None
-    # if data_val is not None:
-    #     eval_dataset = ChronosFineTuningDataset(
-    #         target_df=data_val,
-    #         target_column=target_column,
-    #         context_length=context_length,
-    #         prediction_length=prediction_length,
-    #         tokenizer=None,
-    #         mode="validation",
-    # )
-
     train_dataset = ChronosBacktestingDataset(
         data=data_train,
         context_length=context_length,
@@ -398,6 +469,8 @@ def fine_tune(
         return_target=True,
         prediction_length=prediction_length,
     )
+
+    eval_dataset = None
     eval_dataset = ChronosBacktestingDataset(
         data=data_val,
         context_length=context_length,
@@ -412,6 +485,11 @@ def fine_tune(
 
     # Create args for final training with best hyperparameters
     fine_tune_trainer_kwargs = create_trainer_kwargs(path=final_training_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
+
+    print(50 * "-")
+    print("Training results are going to be logged in tensorboard.")
+    print("Run `tensorboard --logdir models/` in the terminal to start.")
+    print(50 * "-")
 
     if hp_tuning:
         if data_val is None:
@@ -509,73 +587,6 @@ def hp_space_optuna(trial: Trial):
         # "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.3),
         # "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
     }
-
-
-def compute_objective(metrics):
-    """Objective to minimize"""
-
-    return metrics["eval_loss"]
-
-
-def model_init_full_tuning() -> PreTrainedModel:
-    """Initialize a fresh Chronos model where all parameters are trainable"""
-
-    chronos_fresh = Chronos(model_name="amazon/chronos-bolt-small", device_map="mps", lead_times=np.arange(1, 65), freq=pd.Timedelta("1h"))
-
-    return chronos_fresh.pipeline.inner_model
-
-
-def model_init_last_layer_tuning() -> PreTrainedModel:
-    """Initialize a fresh Chronos model where only last layer is trainable."""
-
-    chronos_fresh = Chronos(model_name="amazon/chronos-bolt-tiny", device_map="mps", lead_times=np.arange(1, 65), freq=pd.Timedelta("1h"))
-
-    # whether to only tune the last layer
-    for param in chronos_fresh.pipeline.inner_model.parameters():
-        param.requires_grad = False
-
-    # train only last residual block (incl. output layer)
-    for param in chronos_fresh.pipeline.inner_model.output_patch_embedding.parameters():
-        param.requires_grad = True
-
-    return chronos_fresh.pipeline.inner_model
-
-
-def model_init_lora() -> PreTrainedModel:
-    """Initialize a fresh Chronos model with LoRA"""
-
-    # Initialize the Chronos model
-    chronos_fresh = Chronos(model_name="amazon/chronos-bolt-tiny", device_map="mps", lead_times=np.arange(1, 65), freq=pd.Timedelta("1h"))
-
-    # Configure LoRA
-    lora_config = LoraConfig(
-        task_type=None,
-        inference_mode=False,
-        r=8,  # LoRA rank
-        lora_alpha=8,  # Scaling factor
-        lora_dropout=0.0,  # Dropout rate
-        target_modules=[
-            # Self Attention (inside SelfAttention and EncDecAttention)
-            "q",
-            "k",
-            "v",
-            "o",  #
-            # Feedforward (inside DenseReluDense blocks (Feed Forward))
-            "wi",
-            "wo",
-            # output_patch_embedding and input_patch_embedding blocks
-            "hidden_layer",
-            "output_layer",
-            "residual_layer",
-        ],
-    )
-
-    # Apply LoRA to the base model
-    lora_model = get_peft_model(chronos_fresh.pipeline.inner_model, lora_config)
-
-    lora_model.print_trainable_parameters()
-
-    return lora_model
 
 
 def create_trainer_kwargs(path: str = Path("./models/test/"), eval_during_fine_tune: bool = True, save_checkpoints: bool = True):
