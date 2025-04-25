@@ -550,7 +550,7 @@ def plot_crps(
     predictions: Dict[str, PredictionLeadTimes],
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
-    rolling_window: Optional[int] = None,
+    rolling_window_eval: Optional[int] = None,
     reference_predictions: Optional[str] = None,
 ) -> None:
     """Plots the mean CRPS (Continuous Ranked Probability Score) over time for different prediction sources.
@@ -564,7 +564,7 @@ def plot_crps(
         List of lead times to filter CRPS scores. If None, all lead times are used.
     item_ids : Optional[List[int]], default=None
         List of item IDs to include in the CRPS computation. If None, all item IDs are used.
-    rolling_window : Optional[int], default=None
+    rolling_window_eval : Optional[int], default=None
         Window size for computing the rolling mean of CRPS scores. If None, no smoothing is applied.
     reference_predictions : Optional[str], default=None
         Key of a prediction set to be used as a reference for normalization.
@@ -585,8 +585,8 @@ def plot_crps(
 
     df = df.reset_index(level=0, drop=True).groupby("timestamp").mean()
 
-    if rolling_window:
-        df = df.rolling(window=rolling_window).mean()
+    if rolling_window_eval:
+        df = df.rolling(window=rolling_window_eval).mean()
 
     # Plotting with matplotlib
     plt.figure(figsize=(12, 6))
@@ -691,7 +691,7 @@ def load_predictions(prediction_dir: str = "data/predictions/realisierter_stromv
             all_predictions[filepath.split("/")[-1].split(".")[0]] = joblib.load(filepath)
 
     print("Loaded the following predictions:")
-    print(30*"-")
+    print(30 * "-")
     print("\n".join([key for key in all_predictions.keys()]))
 
     return all_predictions
