@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 import pandas as pd
-from src.core.timeseries_evaluation import PredictionLeadTimes
+from src.core.timeseries_evaluation import PredictionLeadTimes, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
+from typing import Dict, List, Optional, Type, Union
 
 
 class AbstractPredictor(ABC):
@@ -31,3 +32,25 @@ class AbstractPostprocessor(ABC):
     @abstractmethod
     def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:
         pass
+
+
+class AbstractPipeline(ABC):
+    def __init__(
+        self,
+        model: Type[AbstractPredictor],
+        model_kwargs: Dict,
+        data: Union[TimeSeriesDataFrame, TabularDataFrame],
+        postprocessor: Optional[Type[AbstractPostprocessor]] = None,
+    ):
+        self.model = model
+        self.model_kwargs = model_kwargs
+        self.data = data
+        self.postprocessor = postprocessor
+
+    @abstractmethod
+    def backtest(self) -> PredictionLeadTimes:
+        raise NotImplementedError
+
+    @abstractmethod
+    def inference(self) -> PredictionLeadTimes:
+        raise NotImplementedError
