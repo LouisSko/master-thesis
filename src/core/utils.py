@@ -48,13 +48,13 @@ class CustomJSONEncoder(json.JSONEncoder):
     def default(self, o):
         """Override the default method to serialize timestamps.
 
-        Parameters:
+        Parameters
         ----------
         o
             The object to serialize.
 
-        Returns:
-
+        Returns
+        -------
             str: The serialized object.
         """
 
@@ -80,6 +80,13 @@ class CustomJSONEncoder(json.JSONEncoder):
 
         if isinstance(o, np.float32):
             return float(o)
+
+        if isinstance(o, np.ndarray):
+            return list(o)
+
+        if isinstance(o, pd.DateOffset):
+            # Serialize DateOffset as its keyword arguments
+            return o.kwds
 
         return super().default(o)
 
