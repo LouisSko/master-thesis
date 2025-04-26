@@ -103,12 +103,6 @@ class AbstractPipeline(ABC):
             The predictions for each lead time
         """
 
-        raise NotImplementedError
-
-    @abstractmethod
-    def inference(self) -> PredictionLeadTimes:
-        raise NotImplementedError
-
     def get_config(
         self,
         backtest_params: Dict,

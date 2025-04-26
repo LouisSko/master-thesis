@@ -1,5 +1,5 @@
 import torch
-from typing import Dict, Any, List, Optional, Type, Union, Literal
+from typing import Dict, Any, List, Optional, Type, Union, Literal, Tuple
 from src.core.timeseries_evaluation import PredictionLeadTime, PredictionLeadTimes, TabularDataFrame
 from src.core.base import AbstractPostprocessor, AbstractPredictor
 from src.core.utils import CustomJSONEncoder
@@ -22,6 +22,9 @@ class ForecastingPipeline(AbstractPipeline):
     ):
         super().__init__(model, model_kwargs, data, postprocessors)
 
+        # initialize None predictor
+        self.predictor = None
+
     def backtest(
         self,
         test_start_date: pd.Timestamp,
@@ -34,7 +37,35 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         output_dir: Optional[Path] = None,
     ) -> PredictionLeadTimes:
+        """
+        Run a backtest over the specified time period.
 
+        Parameters
+        ----------
+        test_start_date : pd.Timestamp
+            Start date of the test set.
+        test_end_date : Optional[pd.Timestamp], optional
+            End date of the test set. Defaults to last available timestamp.
+        rolling_window_eval : bool, optional
+            Whether to perform rolling window evaluation. Defaults to False.
+        train_window_size : Optional[pd.DateOffset], optional
+            Size of the training window. Defaults to None.
+        val_window_size : Optional[pd.DateOffset], optional
+            Size of the validation window. Defaults to None.
+        test_window_size : Optional[pd.DateOffset], optional
+            Size of the test window. Defaults to None.
+        train : bool, optional
+            Whether to train the model during backtesting. Defaults to False.
+        calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], optional
+            Strategy for calibrating postprocessors. Defaults to None.
+        output_dir : Optional[Path], optional
+            Directory to save backtest results. Defaults to None.
+
+        Returns
+        -------
+        PredictionLeadTimes
+            The predictions over the backtest period.
+        """
         results = {}
 
         if test_end_date is None:
@@ -68,6 +99,148 @@ class ForecastingPipeline(AbstractPipeline):
 
         return results
 
+    def split_data(
+        self,
+        test_start_date: pd.Timestamp,
+        train_window_size: Optional[pd.DateOffset],
+        val_window_size: Optional[pd.DateOffset],
+        test_window_size: Optional[pd.DateOffset],
+    ) -> Tuple[Union[TimeSeriesDataFrame, TabularDataFrame], Union[TimeSeriesDataFrame, TabularDataFrame, None], Union[TimeSeriesDataFrame, TabularDataFrame]]:
+        """
+        Split data into training, validation, and testing sets.
+
+        Parameters
+        ----------
+        test_start_date : pd.Timestamp
+            Start date of the test set.
+        train_window_size : Optional[pd.DateOffset]
+            Size of the training window.
+        val_window_size : Optional[pd.DateOffset]
+            Size of the validation window.
+        test_window_size : Optional[pd.DateOffset]
+            Size of the test window.
+
+        Returns
+        -------
+        Tuple[data_train, data_val, data_test]
+            Split datasets for training, validation (optional), and testing.
+        """
+        data_val = None
+        data_train, data_test = self.data.split_by_time(test_start_date)
+
+        if val_window_size:
+            data_train, data_val = data_train.split_by_time(test_start_date - val_window_size)
+        if test_window_size:
+            data_test, _ = data_test.split_by_time(test_start_date + test_window_size)
+        if train_window_size:
+            _, data_train = data_train.split_by_time(test_start_date - train_window_size)
+
+        return data_train, data_val, data_test
+
+    def train(
+        self,
+        data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
+        data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+    ) -> None:
+        """
+        Train the predictor.
+
+        Parameters
+        ----------
+        data_train : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The training data.
+        data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
+            Optional validation data. Defaults to None.
+
+        Returns
+        -------
+        None
+        """
+
+        self.predictor = self.model(**self.model_kwargs)
+        print(f"Training from {data_train.index.get_level_values('timestamp').min()} to {data_train.index.get_level_values('timestamp').max()}")
+        if data_val is not None:
+            print(f"Validation from {data_val.index.get_level_values('timestamp').min()} to {data_val.index.get_level_values('timestamp').max()}")
+        self.predictor.fit(data_train, data_val)
+
+    def predict(
+        self,
+        data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
+    ) -> Dict[str, PredictionLeadTimes]:
+        """
+        predict on the test data.
+
+        Parameters
+        ----------
+        data_test : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The test dataset.
+
+        Returns
+        -------
+        Dict[str, PredictionLeadTimes]
+            Dictionary with raw predictions.
+        """
+
+        print(f"Prediction from {data_test.index.get_level_values('timestamp').min()} to {data_test.index.get_level_values('timestamp').max()}")
+
+        if self.predictor is None:
+            print("Predictor has not been fitted yet. Trying to predict anyways...")
+            self.predictor = self.model(**self.model_kwargs)
+
+        return {
+            self.predictor.__class__.__name__: self.predictor.predict(
+                data=data_test,
+                previous_context_data=self.data.split_by_time(data_test.index.get_level_values("timestamp").min())[0],
+            )
+        }
+
+    def postprocess(
+        self,
+        predictions: Dict[str, PredictionLeadTimes],
+        data_train: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        calibration_based_on: Optional[Literal["val", "train", "train_val"]] = None,
+    ) -> Dict[str, PredictionLeadTimes]:
+        """
+        Apply postprocessing to predictions.
+
+        Parameters
+        ----------
+        predictions : Dict[str, PredictionLeadTimes]
+            The predictions. Keys correspond to the utilized model, e.g. `Chronos` or `QuantileRegression`
+        data_train : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
+            The training data. Defaults to None.
+        data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
+            The validation data, if available. Defaults to None.
+        calibration_based_on : Optional[Literal["val", "train", "train_val"]], optional
+            Calibration strategy. Defaults to None.
+
+        Returns
+        -------
+        Dict[str, PredictionLeadTimes]
+            Dictionary with processed predictions.
+        """
+        if not self.postprocessors:
+            return predictions
+
+        for postprocessor in self.postprocessors:
+            if calibration_based_on == "val":
+                calibration_predictions = self.predictor.predict(data_val, data_train)
+            elif calibration_based_on == "train":
+                calibration_predictions = self.predictor.predict(data_train)
+            elif calibration_based_on == "train_val":
+                calibration_predictions = self.predictor.predict(pd.concat([data_train, data_val]).sort_index())
+            else:
+                raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
+
+            pp = postprocessor()
+            print(f"Fit postprocessor: {postprocessor.__name__}")
+            pp.fit(data=calibration_predictions)
+            print(f"Postprocessing predictions using {postprocessor.__name__}")
+            predictions[postprocessor.__name__] = pp.postprocess(data=predictions[self.predictor.__class__.__name__])
+
+        return predictions
+
     def _train_predict_postprocess(
         self,
         test_start_date: pd.Timestamp,
@@ -77,84 +250,16 @@ class ForecastingPipeline(AbstractPipeline):
         test_window_size: Optional[pd.DateOffset],
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
     ) -> Dict[str, PredictionLeadTimes]:
-        """Train, predict and postprocess."""
-        # get datasets
-        data_val = None
-        data_train, data_test = self.data.split_by_time(test_start_date)
-        if val_window_size:
-            data_train, data_val = data_train.split_by_time(test_start_date - val_window_size)
-        if test_window_size:
-            data_test, _ = data_test.split_by_time(test_start_date + test_window_size)
-        if train_window_size:
-            _, data_train = data_train.split_by_time(test_start_date - train_window_size)
+        """Train, predict, and postprocess wrapper for internal backtesting."""
+        data_train, data_val, data_test = self.split_data(test_start_date, train_window_size, val_window_size, test_window_size)
 
-        # load predictor
-        predictor = self.model(**self.model_kwargs)
-
-        # optionally train model
         if train:
-            print(f"training from {data_train.index.get_level_values('timestamp').min()} to {data_train.index.get_level_values('timestamp').max()}")
-            if data_val is not None:
-                print(f"validation from {data_val.index.get_level_values('timestamp').min()} to {data_val.index.get_level_values('timestamp').max()}")
-            predictor.fit(data_train, data_val)
+            self.train(data_train, data_val)
 
-        # make predictions
-        predictions_test = {}
+        predictions = self.predict(data_test)
+        predictions = self.postprocess(predictions, data_train, data_val, calibration_based_on)
 
-        print(f"prediction from {data_test.index.get_level_values('timestamp').min()} to {data_test.index.get_level_values('timestamp').max()}")
-        predictions_test["raw"] = predictor.predict(
-            data=data_test,
-            previous_context_data=self.data.split_by_time(data_test.index.get_level_values("timestamp").min())[0],
-        )
-
-        # optionally postprocess
-        if self.postprocessors:
-            for postprocessor in self.postprocessors:
-                if calibration_based_on == "val":
-                    calibration_predictions = predictor.predict(data_val, data_train)
-                elif calibration_based_on == "train":
-                    calibration_predictions = predictor.predict(data_train)
-                elif calibration_based_on == "train_val":
-                    calibration_predictions = predictor.predict(pd.concat([data_train, data_val]).sort_index())
-                else:
-                    raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
-
-                pp = postprocessor()
-
-                print(f"Fit postprocessor: {postprocessor.__name__}")
-                pp.fit(data=calibration_predictions)
-                print(f"Postprocessing predictions using {postprocessor.__name__}")
-                predictions_test[postprocessor.__name__] = pp.postprocess(data=predictions_test["raw"])
-
-        return predictions_test
-
-    def _save_backtest_results(self, results: Dict[str, PredictionLeadTimes], output_dir: Path, backtest_params: Dict) -> None:
-        """Save backtest results and config."""
-
-        for method, result in results.items():
-            save_path = PATH_PREDICTIONS / output_dir / method
-
-            if not save_path.exists():
-                save_path.mkdir(parents=True)
-                print(f"Created new directory: {save_path}")
-
-            # Add information
-            eval_config_info = {}
-            eval_config_info = {"applied_postprocessor": None if method == "raw" else method}
-            eval_config_info.update(result.get_crps(mean_lead_times=True, mean_time=True).to_dict())
-            eval_config_info.update(result.get_empirical_coverage_rates(mean_lead_times=True).to_dict())
-            eval_config_info.update(result.get_quantile_scores(mean_lead_times=True).to_dict())
-            config = self.get_config(backtest_params, eval_config_info)
-
-            # Save config
-            with open(save_path / "config.json", "w") as f:
-                json.dump(config, f, indent=4, cls=CustomJSONEncoder)
-
-            # Save predictions
-            result.save(save_path / "predictions.joblib")
-
-    def inference(self) -> PredictionLeadTimes:
-        raise NotImplementedError
+        return predictions
 
     def _merge_results(self, results: Dict[pd.Timestamp, Dict[str, PredictionLeadTimes]]) -> Dict[str, PredictionLeadTimes]:
 
@@ -196,6 +301,31 @@ class ForecastingPipeline(AbstractPipeline):
                 results_all[postprocessor_name] = PredictionLeadTimes(results=results_merged)
 
         return results_all
+
+    def _save_backtest_results(self, results: Dict[str, PredictionLeadTimes], output_dir: Path, backtest_params: Dict) -> None:
+        """Save backtest results and config."""
+
+        for method, result in results.items():
+            save_path = PATH_PREDICTIONS / output_dir / method
+
+            if not save_path.exists():
+                save_path.mkdir(parents=True)
+                print(f"Created new directory: {save_path}")
+
+            # Add information
+            eval_config_info = {}
+            eval_config_info = {"applied_postprocessor": None if method == "raw" else method}
+            eval_config_info.update(result.get_crps(mean_lead_times=True, mean_time=True).to_dict())
+            eval_config_info.update(result.get_empirical_coverage_rates(mean_lead_times=True).to_dict())
+            eval_config_info.update(result.get_quantile_scores(mean_lead_times=True).to_dict())
+            config = self.get_config(backtest_params, eval_config_info)
+
+            # Save config
+            with open(save_path / "config.json", "w") as f:
+                json.dump(config, f, indent=4, cls=CustomJSONEncoder)
+
+            # Save predictions
+            result.save(save_path / "predictions.joblib")
 
 
 # check if all lead times, quantiles and freq are the same
