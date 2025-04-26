@@ -7,6 +7,7 @@ from tqdm import tqdm
 from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 from src.core.base import AbstractPredictor
 import logging
+from pydantic import Field
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -15,8 +16,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 class NNPredictor(AbstractPredictor):
     def __init__(
         self,
-        quantiles: np.ndarray,
-        lead_times: List[int] = [1, 2, 3],
+        quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
+        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: pd.Timedelta = pd.Timedelta("1h"),
         last_n_samples: int = 10,
     ) -> None:
@@ -92,7 +93,7 @@ class NNPredictor(AbstractPredictor):
 
         forecasts = {lt: [] for lt in self.lead_times}
         results = {lt: {} for lt in self.lead_times}
-        percentiles = (self.quantiles * 100).astype(int)
+        percentiles = (np.array(self.quantiles) * 100).astype(int)
 
         self.last_train_date = data.index.get_level_values("timestamp").max()
 

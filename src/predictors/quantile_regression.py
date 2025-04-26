@@ -8,13 +8,14 @@ from src.core.base import AbstractPredictor
 from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 from fastai.tabular.core import add_datepart
 import statsmodels.api as sm
+from pydantic import Field
 
 
 class QuantileRegression(AbstractPredictor):
     def __init__(
         self,
-        quantiles: np.ndarray[float],
-        lead_times: List[int] = [1, 2, 3],
+        quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
+        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: pd.Timedelta = pd.Timedelta("1h"),
     ) -> None:
         super().__init__(lead_times, freq)
@@ -23,14 +24,14 @@ class QuantileRegression(AbstractPredictor):
         self.models_qr = {}
         self.epsilon = 100_000
 
-    def fit(self, data: PredictionLeadTimes, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def fit(self, data_train: PredictionLeadTimes, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
 
         if data_val is not None:
             print("data_val is not used.")
 
         for lt in tqdm(self.lead_times):
 
-            data_lt = self._create_cyclic_features(data, lt, dropna=True)
+            data_lt = self._create_cyclic_features(data_train, lt, dropna=True)
 
             # Postprocess each time series separately
             for item_id in data_lt.item_ids:
@@ -47,16 +48,18 @@ class QuantileRegression(AbstractPredictor):
                     model = sm.QuantReg(y_train, x_train)
                     self.models_qr[(lt, item_id, q)] = model.fit(q=q)
 
-    def predict(self, data: PredictionLeadTimes, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
+    def predict(
+        self, data_train: PredictionLeadTimes, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False
+    ) -> PredictionLeadTimes:
 
         if self.models_qr is None:
-            raise ValueError("Need to fit models first")
+            raise ValueError("Need to fit models first.")
 
         results = {ld: None for ld in self.lead_times}
 
         for lt in tqdm(self.lead_times):
 
-            data_lt = self._create_cyclic_features(data, lt, dropna=False)
+            data_lt = self._create_cyclic_features(data_train, lt, dropna=False)
 
             # store results
             test_results = {}
