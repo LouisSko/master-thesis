@@ -8,9 +8,15 @@ import pandas as pd
 from src.core.base import AbstractPipeline
 from pathlib import Path
 import json
+import importlib
+from typing import Type
+import os
+import joblib
 
+DIR = Path("./data/pipeline")
+DIR_MODELS = "models"
+DIR_POSTPROCESSORS = "postprocessors"
 PATH_PREDICTIONS = Path("./data/predictions/")
-PATH_MODELS = Path("./data/models/")
 
 
 class ForecastingPipeline(AbstractPipeline):
@@ -25,6 +31,82 @@ class ForecastingPipeline(AbstractPipeline):
         # initialize None predictor
         self.predictor = None
         self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
+
+    def save(self, pipeline_name: Path) -> None:
+        """
+        Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib.
+
+        Parameters:
+        -----------
+        pipeline_name : str
+            name of the pipeline directory.
+        """
+
+        pipeline_dir = DIR / pipeline_name
+        pipeline_dir_models = pipeline_dir / DIR_MODELS
+        pipeline_dir_postprocessors = pipeline_dir / DIR_POSTPROCESSORS
+
+        create_dir(pipeline_dir)
+        create_dir(pipeline_dir_models)
+        create_dir(pipeline_dir_postprocessors)
+
+        config = {
+            "model": get_class_path(self.model),
+            "model_kwargs": self.model_kwargs,
+            "postprocessors": [get_class_path(postprocessor) for postprocessor in (self.postprocessors or [])],
+        }
+        with open(pipeline_dir / "pipeline_config.json", "w") as f:
+            json.dump(config, f, indent=4, cls=CustomJSONEncoder)
+
+        if self.predictor is not None:
+            self.predictor.save(pipeline_dir_models / f"{self.predictor.__class__.__name__}.joblib")
+
+        if self.postprocessor_dict is not None:
+            for name, postprocessor in self.postprocessor_dict.items():
+                postprocessor.save(pipeline_dir_postprocessors / f"{name}.joblib")
+
+    @classmethod
+    def from_pretrained(cls, pipeline_name: Path) -> "ForecastingPipeline":
+
+        pipeline_dir = DIR / pipeline_name
+
+        with open(pipeline_dir / "pipeline_config.json", "r") as f:
+            config: dict = json.load(f)
+
+        # Fix the config
+        config["model"] = load_class_from_path(config["model"])
+
+        # Special handling for model_kwargs
+        model_kwargs = config.get("model_kwargs", {})
+        if "freq" in model_kwargs:
+            model_kwargs["freq"] = pd.Timedelta(model_kwargs["freq"])
+
+        config["model_kwargs"] = model_kwargs
+
+        # Special handling for postprocessors
+        config["postprocessors"] = [load_class_from_path(pp) for pp in config.get("postprocessors", [])]
+
+        # recreate the pipeline
+        pipeline = ForecastingPipeline(
+            model=config["model"],
+            model_kwargs=config["model_kwargs"],
+            postprocessors=config["postprocessors"],
+        )
+
+        # loading predictors
+        models = os.listdir(pipeline_dir / DIR_MODELS)
+        if models is None:
+            print(f"No models in the directory {pipeline_dir/DIR_MODELS}. Skip.")
+        pipeline.predictor = joblib.load(pipeline_dir / DIR_MODELS / models[0])
+
+        # loading postprocessors
+        postprocessors = os.listdir(pipeline_dir / DIR_POSTPROCESSORS)
+        if postprocessors is None:
+            print(f"No postprocessors in the directory {pipeline_dir/DIR_POSTPROCESSORS}. Skip.")
+        for pp in postprocessors:
+            pipeline.postprocessor_dict[pp.split(".")[0]] = joblib.load(pipeline_dir / DIR_POSTPROCESSORS / pp)
+
+        return pipeline
 
     def backtest(
         self,
@@ -360,3 +442,46 @@ def _get_freq(results: List[PredictionLeadTime]) -> pd.Timedelta:
 
 def _get_quantiles(results: List[PredictionLeadTime]) -> List[float]:
     return _get_common_attr(results, "quantiles")
+
+
+def create_dir(path: Path) -> None:
+    if not path.exists():
+        path.mkdir(parents=True)
+        print(f"Created new directory: {path}")
+
+
+def get_class_path(cls: Type) -> str:
+    """
+    Get the full import path of a class.
+    Example: mypackage.module.MyClass
+
+    Parameters:
+    -----------
+    cls : Type
+        The class to get the path from.
+
+    Returns:
+    --------
+    str
+        Full import path of the class.
+    """
+    return cls.__module__ + "." + cls.__name__
+
+
+def load_class_from_path(class_path: str) -> Type:
+    """
+    Dynamically load a class from a full import path.
+
+    Parameters:
+    -----------
+    class_path : str
+        Full import path (e.g., 'mypackage.module.MyClass').
+
+    Returns:
+    --------
+    Type
+        The loaded class.
+    """
+    module_name, class_name = class_path.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)
