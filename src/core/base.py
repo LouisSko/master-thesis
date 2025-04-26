@@ -4,6 +4,8 @@ import pandas as pd
 from src.core.timeseries_evaluation import PredictionLeadTimes, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 from typing import Dict, List, Optional, Type, Union, Literal
+from pathlib import Path
+import joblib
 
 
 class AbstractPredictor(ABC):
@@ -20,6 +22,9 @@ class AbstractPredictor(ABC):
     def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
         pass
 
+    def save(self, file_path: Path) -> None:
+        joblib.dump(self, file_path)
+
 
 class AbstractPostprocessor(ABC):
     def __init__(self) -> None:
@@ -32,6 +37,9 @@ class AbstractPostprocessor(ABC):
     @abstractmethod
     def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:
         pass
+
+    def save(self, file_path: Path) -> None:
+        joblib.dump(self, file_path)
 
 
 class AbstractPipeline(ABC):
@@ -146,13 +154,18 @@ class AbstractPipeline(ABC):
         """
 
     @abstractmethod
-    def postprocess(
-        self,
-        predictions: Dict[str, PredictionLeadTimes],
-        data_train: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-        data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-        calibration_based_on: Optional[Literal["val", "train", "train_val"]] = None,
-    ) -> Dict[str, PredictionLeadTimes]:
+    def train_postprocessors(self, calibration_data: Union[TimeSeriesDataFrame, TabularDataFrame]) -> None:
+        """
+        Fit the postprocessors based on calibration data.
+
+        Parameters
+        ----------
+        calibration_data : Union[TimeSeriesDataFrame, TabularDataFrame]]
+            The calibration data. Used to fit the postprocessor.
+        """
+
+    @abstractmethod
+    def apply_postprocessing(self, predictions: Dict[str, PredictionLeadTimes]) -> Dict[str, PredictionLeadTimes]:
         """
         Apply postprocessing to predictions.
 
@@ -160,12 +173,6 @@ class AbstractPipeline(ABC):
         ----------
         predictions : Dict[str, PredictionLeadTimes]
             The predictions. Keys correspond to the utilized model, e.g. `Chronos` or `QuantileRegression`
-        data_train : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
-            The training data. Defaults to None.
-        data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
-            The validation data, if available. Defaults to None.
-        calibration_based_on : Optional[Literal["val", "train", "train_val"]], optional
-            Calibration strategy. Defaults to None.
 
         Returns
         -------

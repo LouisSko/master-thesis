@@ -10,6 +10,7 @@ from pathlib import Path
 import json
 
 PATH_PREDICTIONS = Path("./data/predictions/")
+PATH_MODELS = Path("./data/models/")
 
 
 class ForecastingPipeline(AbstractPipeline):
@@ -23,6 +24,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # initialize None predictor
         self.predictor = None
+        self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
 
     def backtest(
         self,
@@ -187,7 +189,6 @@ class ForecastingPipeline(AbstractPipeline):
         Dict[str, PredictionLeadTimes]
             Dictionary with raw predictions.
         """
-
         print(f"Prediction from {data_test.index.get_level_values('timestamp').min()} to {data_test.index.get_level_values('timestamp').max()}")
 
         if self.predictor is None:
@@ -196,13 +197,26 @@ class ForecastingPipeline(AbstractPipeline):
 
         return {self.predictor.__class__.__name__: self.predictor.predict(data=data_test, previous_context_data=data_previous_context)}
 
-    def postprocess(
-        self,
-        predictions: Dict[str, PredictionLeadTimes],
-        data_train: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-        data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-        calibration_based_on: Optional[Literal["val", "train", "train_val"]] = None,
-    ) -> Dict[str, PredictionLeadTimes]:
+    def train_postprocessors(self, calibration_data: Union[TimeSeriesDataFrame, TabularDataFrame]) -> None:
+        """
+        Fit the postprocessors based on calibration data.
+
+        Parameters
+        ----------
+        calibration_data : Union[TimeSeriesDataFrame, TabularDataFrame]]
+            The calibration data. Used to fit the postprocessor.
+        """
+        if not self.postprocessors:
+            raise ValueError("No postprocessors specified.")
+
+        calibration_predictions = self.predictor.predict(calibration_data)
+
+        for postprocessor in self.postprocessors:
+            self.postprocessor_dict[postprocessor.__name__] = postprocessor()
+            print(f"Fit postprocessor: {postprocessor.__name__}")
+            self.postprocessor_dict[postprocessor.__name__].fit(data=calibration_predictions)
+
+    def apply_postprocessing(self, predictions: Dict[str, PredictionLeadTimes]) -> Dict[str, PredictionLeadTimes]:
         """
         Apply postprocessing to predictions.
 
@@ -210,12 +224,6 @@ class ForecastingPipeline(AbstractPipeline):
         ----------
         predictions : Dict[str, PredictionLeadTimes]
             The predictions. Keys correspond to the utilized model, e.g. `Chronos` or `QuantileRegression`
-        data_train : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
-            The training data. Defaults to None.
-        data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
-            The validation data, if available. Defaults to None.
-        calibration_based_on : Optional[Literal["val", "train", "train_val"]], optional
-            Calibration strategy. Defaults to None.
 
         Returns
         -------
@@ -225,21 +233,12 @@ class ForecastingPipeline(AbstractPipeline):
         if not self.postprocessors:
             return predictions
 
-        for postprocessor in self.postprocessors:
-            if calibration_based_on == "val":
-                calibration_predictions = self.predictor.predict(data_val, data_train)
-            elif calibration_based_on == "train":
-                calibration_predictions = self.predictor.predict(data_train)
-            elif calibration_based_on == "train_val":
-                calibration_predictions = self.predictor.predict(pd.concat([data_train, data_val]).sort_index())
-            else:
-                raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
+        if self.postprocessor_dict is None:
+            raise ValueError("Postprocessora need to be fitted via `.train_postprocessors()` first.")
 
-            pp = postprocessor()
-            print(f"Fit postprocessor: {postprocessor.__name__}")
-            pp.fit(data=calibration_predictions)
+        for postprocessor in self.postprocessors:
             print(f"Postprocessing predictions using {postprocessor.__name__}")
-            predictions[postprocessor.__name__] = pp.postprocess(data=predictions[self.predictor.__class__.__name__])
+            predictions[postprocessor.__name__] = self.postprocessor_dict[postprocessor.__name__].postprocess(data=predictions[self.predictor.__class__.__name__])
 
         return predictions
 
@@ -259,8 +258,19 @@ class ForecastingPipeline(AbstractPipeline):
         if train:
             self.train(data_train, data_val)
 
-        predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
-        predictions = self.postprocess(predictions, data_train, data_val, calibration_based_on)
+        if self.postprocessors is not None:
+            if calibration_based_on == "val":
+                calibration_data = data_val
+            elif calibration_based_on == "train":
+                calibration_data = data_train
+            elif calibration_based_on == "train_val":
+                calibration_data = pd.concat([data_train, data_val]).sort_index()
+            else:
+                raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
+
+            self.train_postprocessors(calibration_data)
+            predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
+            predictions = self.apply_postprocessing(predictions)
 
         return predictions
 
