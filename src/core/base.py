@@ -4,7 +4,6 @@ import pandas as pd
 from src.core.timeseries_evaluation import PredictionLeadTimes, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 from typing import Dict, List, Optional, Type, Union, Literal
-from datetime import datetime
 
 
 class AbstractPredictor(ABC):
@@ -41,7 +40,7 @@ class AbstractPipeline(ABC):
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
         data: Union[TimeSeriesDataFrame, TabularDataFrame],
-        postprocessor: Optional[Type[AbstractPostprocessor]] = None,
+        postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
     ):
         """Initialize the pipeline with model, data, and optional postprocessor.
 
@@ -53,20 +52,20 @@ class AbstractPipeline(ABC):
             Keyword arguments to pass to the model constructor
         data : Union[TimeSeriesDataFrame, TabularDataFrame]
             The dataset to use for training and prediction
-        postprocessor : Optional[Type[AbstractPostprocessor]], default=None
-            Optional postprocessor class for refining predictions
+        postprocessors : Optional[List[Type[AbstractPostprocessor]]], default=None
+            Optional list of postprocessors for refining predictions
         """
 
         self.model = model
         self.model_kwargs = model_kwargs
         self.data = data
-        self.postprocessor = postprocessor
+        self.postprocessors = postprocessors
 
     @abstractmethod
     def backtest(
         self,
         test_start_date: pd.Timestamp,
-        end_date: Optional[pd.Timestamp] = None,
+        test_end_date: Optional[pd.Timestamp] = None,
         rolling_window_eval: bool = False,
         train_window_size: Optional[pd.DateOffset] = None,
         val_window_size: Optional[pd.DateOffset] = None,
@@ -81,7 +80,7 @@ class AbstractPipeline(ABC):
         ----------
         test_start_date : pd.Timestamp
             The starting date for the test dataset
-        end_date : Optional[pd.Timestamp], default=None
+        test_end_date : Optional[pd.Timestamp], default=None
             The ending date for the test dataset, defaults to the last date in the data
         rolling_window_eval : bool, default=False
             Whether to use rolling window approach for backtesting
@@ -135,17 +134,18 @@ class AbstractPipeline(ABC):
 
         # Create base config with model information
         config = {
-            "model": self.model.__name__,
-            "model_kwargs": self.model_kwargs,
-            "postprocessor": self.postprocessor.__name__ if self.postprocessor is not None else None,
-            "timestamp": datetime.now().isoformat(),
+            "init_params": {
+                "model": self.model.__name__,
+                "model_kwargs": self.model_kwargs,
+                "postprocessors": [p.__name__ for p in self.postprocessors] if self.postprocessors is not None else None,
+            }
         }
 
         # Add backtest parameters
-        config.update(backtest_params)
+        config.update({"backtest_params": backtest_params})
 
         # Add any additional information
         if additional_config_info:
-            config.update(additional_config_info)
+            config.update({"additional_info": additional_config_info})
 
         return config
