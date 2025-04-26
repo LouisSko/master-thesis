@@ -471,13 +471,15 @@ def fine_tune(
     )
 
     eval_dataset = None
-    eval_dataset = ChronosBacktestingDataset(
-        data=data_val,
-        context_length=context_length,
-        target_column=target_column,
-        return_target=True,
-        prediction_length=prediction_length,
-    )
+
+    if data_val is not None:
+        eval_dataset = ChronosBacktestingDataset(
+            data=data_val,
+            context_length=context_length,
+            target_column=target_column,
+            return_target=True,
+            prediction_length=prediction_length,
+        )
 
     # Create separate directory for final training
     final_training_path = path / "training"
