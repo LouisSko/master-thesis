@@ -39,7 +39,6 @@ class AbstractPipeline(ABC):
         self,
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
-        data: Union[TimeSeriesDataFrame, TabularDataFrame],
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
     ):
         """Initialize the pipeline with model, data, and optional postprocessor.
@@ -50,20 +49,18 @@ class AbstractPipeline(ABC):
             The predictor model class to use
         model_kwargs : Dict
             Keyword arguments to pass to the model constructor
-        data : Union[TimeSeriesDataFrame, TabularDataFrame]
-            The dataset to use for training and prediction
         postprocessors : Optional[List[Type[AbstractPostprocessor]]], default=None
             Optional list of postprocessors for refining predictions
         """
 
         self.model = model
         self.model_kwargs = model_kwargs
-        self.data = data
         self.postprocessors = postprocessors
 
     @abstractmethod
     def backtest(
         self,
+        data: Union[TimeSeriesDataFrame, TabularDataFrame],
         test_start_date: pd.Timestamp,
         test_end_date: Optional[pd.Timestamp] = None,
         rolling_window_eval: bool = False,
@@ -74,33 +71,106 @@ class AbstractPipeline(ABC):
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         output_dir: Optional[str] = None,
     ) -> PredictionLeadTimes:
-        """Perform backtesting of the model.
+        """
+        Run a backtest over the specified time period.
 
         Parameters
         ----------
+        data : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The dataset to use for training and prediction
         test_start_date : pd.Timestamp
-            The starting date for the test dataset
-        test_end_date : Optional[pd.Timestamp], default=None
-            The ending date for the test dataset, defaults to the last date in the data
-        rolling_window_eval : bool, default=False
-            Whether to use rolling window approach for backtesting
-        train_window_size : Optional[pd.DateOffset], default=None
-            The size of the training window
-        val_window_size : Optional[pd.DateOffset], default=None
-            The size of the validation window
-        test_window_size : Optional[pd.DateOffset], default=None
-            The size of the test window
-        train : bool, default=False
-            Whether to train the model before prediction
-        calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], default=None
-            Which dataset to use for calibration
-        output_dir : Optional[str], default=None
-            Base name for saving prediction files and config
+            Start date of the test set.
+        test_end_date : Optional[pd.Timestamp], optional
+            End date of the test set. Defaults to last available timestamp.
+        rolling_window_eval : bool, optional
+            Whether to perform rolling window evaluation. Defaults to False.
+        train_window_size : Optional[pd.DateOffset], optional
+            Size of the training window. Defaults to None.
+        val_window_size : Optional[pd.DateOffset], optional
+            Size of the validation window. Defaults to None.
+        test_window_size : Optional[pd.DateOffset], optional
+            Size of the test window. Defaults to None.
+        train : bool, optional
+            Whether to train the model during backtesting. Defaults to False.
+        calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], optional
+            Strategy for calibrating postprocessors. Defaults to None.
+        output_dir : Optional[Path], optional
+            Directory to save backtest results. Defaults to None.
 
         Returns
         -------
         PredictionLeadTimes
-            The predictions for each lead time
+            The predictions over the backtest period.
+        """
+
+    @abstractmethod
+    def train(
+        self,
+        data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
+        data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+    ) -> None:
+        """
+        Train the predictor.
+
+        Parameters
+        ----------
+        data_train : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The training data.
+        data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
+            Optional validation data. Defaults to None.
+
+        Returns
+        -------
+        None
+        """
+
+    @abstractmethod
+    def predict(
+        self,
+        data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
+        data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+    ) -> Dict[str, PredictionLeadTimes]:
+        """
+        predict on the test data.
+
+        Parameters
+        ----------
+        data_test : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The test dataset.
+        data_previous_context : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The previous context data. This is used by some predictors.
+        Returns
+        -------
+        Dict[str, PredictionLeadTimes]
+            Dictionary with raw predictions.
+        """
+
+    @abstractmethod
+    def postprocess(
+        self,
+        predictions: Dict[str, PredictionLeadTimes],
+        data_train: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        calibration_based_on: Optional[Literal["val", "train", "train_val"]] = None,
+    ) -> Dict[str, PredictionLeadTimes]:
+        """
+        Apply postprocessing to predictions.
+
+        Parameters
+        ----------
+        predictions : Dict[str, PredictionLeadTimes]
+            The predictions. Keys correspond to the utilized model, e.g. `Chronos` or `QuantileRegression`
+        data_train : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
+            The training data. Defaults to None.
+        data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
+            The validation data, if available. Defaults to None.
+        calibration_based_on : Optional[Literal["val", "train", "train_val"]], optional
+            Calibration strategy. Defaults to None.
+
+        Returns
+        -------
+        Dict[str, PredictionLeadTimes]
+            Dictionary with processed predictions.
         """
 
     def get_config(
@@ -112,8 +182,6 @@ class AbstractPipeline(ABC):
 
         Parameters
         ----------
-        prediction_file_name : str
-            Base filename for the config file
         backtest_params : Dict
             Dictionary containing the backtest parameters
         additional_config_info : Optional[Dict], default=None

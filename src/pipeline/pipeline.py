@@ -17,16 +17,16 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
-        data: Union[TimeSeriesDataFrame, TabularDataFrame],
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
     ):
-        super().__init__(model, model_kwargs, data, postprocessors)
+        super().__init__(model, model_kwargs, postprocessors)
 
         # initialize None predictor
         self.predictor = None
 
     def backtest(
         self,
+        data: Union[TimeSeriesDataFrame, TabularDataFrame],
         test_start_date: pd.Timestamp,
         test_end_date: Optional[pd.Timestamp] = None,
         rolling_window_eval: bool = False,
@@ -42,6 +42,8 @@ class ForecastingPipeline(AbstractPipeline):
 
         Parameters
         ----------
+        data : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The dataset to use for training and prediction
         test_start_date : pd.Timestamp
             Start date of the test set.
         test_end_date : Optional[pd.Timestamp], optional
@@ -69,7 +71,7 @@ class ForecastingPipeline(AbstractPipeline):
         results = {}
 
         if test_end_date is None:
-            test_end_date = self.data.index.get_level_values("timestamp").max()
+            test_end_date = data.index.get_level_values("timestamp").max()
 
         if rolling_window_eval:
             if not test_window_size:
@@ -77,12 +79,12 @@ class ForecastingPipeline(AbstractPipeline):
                 test_window_size = pd.DateOffset(years=1)
 
             while test_start_date < test_end_date:
-                results[test_start_date] = self._train_predict_postprocess(test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
+                results[test_start_date] = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
                 test_start_date += test_window_size
 
             results = self._merge_results(results)
         else:
-            results = self._train_predict_postprocess(test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
+            results = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
 
         if output_dir:
             backtest_params = {
@@ -101,6 +103,7 @@ class ForecastingPipeline(AbstractPipeline):
 
     def split_data(
         self,
+        data: Union[TimeSeriesDataFrame, TabularDataFrame],
         test_start_date: pd.Timestamp,
         train_window_size: Optional[pd.DateOffset],
         val_window_size: Optional[pd.DateOffset],
@@ -111,6 +114,8 @@ class ForecastingPipeline(AbstractPipeline):
 
         Parameters
         ----------
+        data : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The dataset to use for training and prediction
         test_start_date : pd.Timestamp
             Start date of the test set.
         train_window_size : Optional[pd.DateOffset]
@@ -126,7 +131,7 @@ class ForecastingPipeline(AbstractPipeline):
             Split datasets for training, validation (optional), and testing.
         """
         data_val = None
-        data_train, data_test = self.data.split_by_time(test_start_date)
+        data_train, data_test = data.split_by_time(test_start_date)
 
         if val_window_size:
             data_train, data_val = data_train.split_by_time(test_start_date - val_window_size)
@@ -166,6 +171,7 @@ class ForecastingPipeline(AbstractPipeline):
     def predict(
         self,
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
+        data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
     ) -> Dict[str, PredictionLeadTimes]:
         """
         predict on the test data.
@@ -174,7 +180,8 @@ class ForecastingPipeline(AbstractPipeline):
         ----------
         data_test : Union[TimeSeriesDataFrame, TabularDataFrame]
             The test dataset.
-
+        data_previous_context : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The previous context data. This is used by some predictors.
         Returns
         -------
         Dict[str, PredictionLeadTimes]
@@ -187,12 +194,7 @@ class ForecastingPipeline(AbstractPipeline):
             print("Predictor has not been fitted yet. Trying to predict anyways...")
             self.predictor = self.model(**self.model_kwargs)
 
-        return {
-            self.predictor.__class__.__name__: self.predictor.predict(
-                data=data_test,
-                previous_context_data=self.data.split_by_time(data_test.index.get_level_values("timestamp").min())[0],
-            )
-        }
+        return {self.predictor.__class__.__name__: self.predictor.predict(data=data_test, previous_context_data=data_previous_context)}
 
     def postprocess(
         self,
@@ -243,6 +245,7 @@ class ForecastingPipeline(AbstractPipeline):
 
     def _train_predict_postprocess(
         self,
+        data: Union[TimeSeriesDataFrame, TabularDataFrame],
         test_start_date: pd.Timestamp,
         train: bool,
         train_window_size: Optional[pd.DateOffset],
@@ -251,12 +254,12 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
     ) -> Dict[str, PredictionLeadTimes]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
-        data_train, data_val, data_test = self.split_data(test_start_date, train_window_size, val_window_size, test_window_size)
+        data_train, data_val, data_test = self.split_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
 
         if train:
             self.train(data_train, data_val)
 
-        predictions = self.predict(data_test)
+        predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
         predictions = self.postprocess(predictions, data_train, data_val, calibration_based_on)
 
         return predictions
