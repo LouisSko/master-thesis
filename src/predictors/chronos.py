@@ -200,32 +200,36 @@ class Chronos(AbstractPredictor):
             logging.error("Maximum supported lead time is 64 currently.")
             raise ValueError("Maximum supported lead time is 64 currently.")
 
-        logging.info("Loading Chronos pipeline from model: %s", self.pretrained_model_name_or_path)
+        self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+    def _pipeline_init(self, pretrained_model_name_or_path: Union[str, Path]) -> BaseChronosPipeline:
+        """Creates and returns an instance of the Chronos pipeline."""
+
+        logging.info("Loading Chronos pipeline from model: %s", pretrained_model_name_or_path)
 
         # add lora weights if adapter_config exists in directory
-        if (Path(self.pretrained_model_name_or_path) / "adapter_config.json").exists():
-            logging.info(f"Found LoRa configuration in {self.pretrained_model_name_or_path}.")
+        if (Path(pretrained_model_name_or_path) / "adapter_config.json").exists():
+            logging.info(f"Found LoRa configuration in {pretrained_model_name_or_path}.")
 
-            with open(Path(self.pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
+            with open(Path(pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
                 adapter_config: dict = json.load(f)
 
             base_model_name = adapter_config.get("base_model_name_or_path")
             logging.info("Base model name: %s", base_model_name)
 
-            self.pipeline = self._pipeline_init(base_model_name)
+            logging.info("Initializing Chronos pipeline with model: %s", base_model_name)
+            pipeline = BaseChronosPipeline.from_pretrained(base_model_name, device_map=self.device_map)
 
             # Apply LoRA adapters
-            self.pipeline.inner_model = PeftModel.from_pretrained(self.pipeline.inner_model, self.pretrained_model_name_or_path, is_trainable=False)
+            pipeline.inner_model = PeftModel.from_pretrained(pipeline.inner_model, pretrained_model_name_or_path, is_trainable=False)
             self.lora = True
             logging.info("LoRa adapters applied successfully.")
+
         else:
-            self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+            logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
+            pipeline = BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
 
-    def _pipeline_init(self, pretrained_model_name_or_path: Union[str, Path]) -> BaseChronosPipeline:
-        """Creates an object of the chronos pipeline"""
-
-        logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
-        return BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
+        return pipeline
 
     def fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
         """
@@ -432,7 +436,9 @@ def fine_tune(
     def create_callbacks():
         callbacks = [BestCheckpointCallback()]
         if data_val is not None:
-            callbacks.append(EarlyStoppingCallback(early_stopping_patience=5))
+            patience = 5
+            callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
+            logging.info("Validation data is available, setting early_stopping_patience=%s", patience)
         return callbacks
 
     # TODO: provide this as parameter
@@ -507,7 +513,7 @@ def fine_tune(
         logging.info("Hyperparameter tuning completed.")
 
     logging.info("Final training hyperparameters:")
-    logging.debug(fine_tune_trainer_kwargs)
+    logging.info(fine_tune_trainer_kwargs)
 
     trainer = Trainer(
         model_init=model_init,
