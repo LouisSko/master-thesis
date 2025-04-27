@@ -1,6 +1,6 @@
 import torch
 from typing import Dict, Any, List, Optional, Type, Union, Literal, Tuple
-from src.core.timeseries_evaluation import PredictionLeadTime, PredictionLeadTimes, TabularDataFrame
+from src.core.timeseries_evaluation import PredictionLeadTime, PredictionLeadTimes, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS
 from src.core.base import AbstractPostprocessor, AbstractPredictor
 from src.core.utils import CustomJSONEncoder
 from autogluon.timeseries import TimeSeriesDataFrame
@@ -13,9 +13,6 @@ from typing import Type
 import joblib
 import logging
 
-DIR_BACKTESTS = "backtest"
-DIR_MODELS = "models"
-DIR_POSTPROCESSORS = "postprocessors"
 PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
 
 
@@ -32,15 +29,15 @@ class ForecastingPipeline(AbstractPipeline):
     ):
         super().__init__(model, model_kwargs, postprocessors, output_dir)
 
-        # instantiate predictor
-        self.predictor = model(**model_kwargs)
-        self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
-
         # define storage directory
         self.pipeline_dir_models = self.output_dir / DIR_MODELS
         self.pipeline_dir_postprocessors = self.output_dir / DIR_POSTPROCESSORS
         self.pipeline_dir_backtests = self.output_dir / DIR_BACKTESTS
         self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
+
+        # instantiate predictor
+        self.predictor = model(**model_kwargs)
+        self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
 
     def save(self) -> None:
         """Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib."""
