@@ -31,6 +31,23 @@ pip install -r requirements.txt
 
 ### Create a pipeline consisting of models and postprocessors
 ```python
+from autogluon.timeseries import TimeSeriesDataFrame
+from src.data.preprocessor import read_smard_data
+from autogluon.timeseries import TimeSeriesDataFrame
+
+df, mapping = read_smard_data(file_paths=["data/Realisierter_Stromverbrauch_201501010000_202101010000_Stunde.csv",
+                                          "data/Realisierter_Stromverbrauch_202101010000_202504240000_Stunde.csv"],
+                              selected_time_series=["Netzlast [MWh] Berechnete Auflösungen", 
+                                                    "Residuallast [MWh] Berechnete Auflösungen"])
+
+
+data = TimeSeriesDataFrame(df)
+
+from src.predictors.chronos import Chronos
+from src.postprocessors.mle import PostprocessorMLE
+from src.postprocessors.qr import PostprocessorQR
+from src.pipeline.pipeline import ForecastingPipeline
+
 pipeline = ForecastingPipeline(model=Chronos, 
                                model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "device_map": "mps", "lead_times": lead_times, "freq": freq, "finetuning_type": "full"}, 
                                postprocessors=[PostprocessorMLE, PostprocessorQR],
@@ -40,7 +57,6 @@ pipeline = ForecastingPipeline(model=Chronos,
 ### Train, Predict, Postprocess 
 
 ```python
-# data needs to be provided in the autogluon TimeSeriesDataFrame format
 data_train, data_val, data_test = pipeline.split_data(data=data, 
                                                       test_start_date=pd.Timestamp  ("01-01-2022"), 
                                                       train_window_size=None,
@@ -49,21 +65,43 @@ data_train, data_val, data_test = pipeline.split_data(data=data,
 
 pipeline.train(data_train)
 pipeline.train_postprocessors(calibration_data=data_val)
-pipeline.save()
 
 predictions = pipeline.predict(data_test=data_test, data_previous_context=data_val)
 predictions = pipeline.apply_postprocessing(predictions)
+
+# save and reload pipeline
+pipeline.save()
+pipeline = ForecastingPipeline.from_pretrained(path="./results/pipeline/nearest_neighbour")
 ```
 
-### Or backtest performance E2E
+### Evaluation of Predictions on Test Dataset
+
+Predictions are stored as `PredictionLeadTimes` instances, allowing you to easily compute various evaluation metrics:
+
+- `get_crps()`
+- `get_quantile_scores()`
+- `get_empirical_coverage_rates()`
+- `get_pit_histogram()`
+- `get_reliability_diagram()`
+
 ```python
-results = pipeline.backtest(data=data,
-                            test_start_date=pd.Timestamp("01-01-2022"),
-                            rolling_window_eval=False,
-                            train=True,
-                            val_window_size=None,
-                            train_window_size=None,
-                            test_window_size=None,
-                            calibration_based_on="train",
-                            save_results=True)
+# The raw, non-postprocessed predictions
+predictions["Chronos"].get_crps(mean_lead_times=True, mean_time=True)
+
+# Postprocessed predictions
+predictions["PostprocessorMLE"].get_crps(mean_lead_times=True, mean_time=True)
+predictions["PostprocessorQR"].get_crps(mean_lead_times=True, mean_time=True)
+```
+
+### Or Backtest Performance End-to-End
+```python
+predictions = pipeline.backtest(data=data,
+                                test_start_date=pd.Timestamp("01-01-2022"),
+                                rolling_window_eval=False,
+                                train=True,
+                                val_window_size=None,
+                                train_window_size=None,
+                                test_window_size=None,
+                                calibration_based_on="train",
+                                save_results=True)                              
 ```
