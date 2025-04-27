@@ -484,7 +484,7 @@ def get_quantile_scores(
 
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
-    return scores
+    return scores.round(3)
 
 
 def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
@@ -511,7 +511,7 @@ def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], le
     scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
     scores.columns = [key for key in predictions.keys()]
 
-    return scores
+    return scores.round(3)
 
 
 def get_crps_scores(
@@ -549,7 +549,7 @@ def get_crps_scores(
     scores.index.name = "lead times"
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
-    return scores
+    return scores.round(3)
 
 
 def plot_crps(
@@ -675,7 +675,7 @@ def get_crps_by_period(
         results[f"{first_date}_to_{d}"] = subset_df.drop(columns=["item_id", "timestamp"]).mean()
         first_date = d
 
-    return pd.DataFrame(results).T
+    return pd.DataFrame(results).T.round(3)
 
 
 def load_predictions(
