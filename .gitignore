@@ -136,3 +136,4 @@ AutogluonModels
 chronos-forecasting
 models/
 data/predictions/
+results/
