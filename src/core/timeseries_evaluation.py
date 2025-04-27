@@ -14,7 +14,11 @@ import matplotlib.dates as mdates
 from pathlib import Path
 import joblib
 import logging
+import os
 
+DIR_BACKTESTS = "backtest"
+DIR_MODELS = "models"
+DIR_POSTPROCESSORS = "postprocessors"
 ITEMID = "item_id"
 TIMESTAMP = "timestamp"
 TARGET = "target"
@@ -550,6 +554,7 @@ def get_crps_scores(
 
 def plot_crps(
     predictions: Dict[str, PredictionLeadTimes],
+    selected_keys: Optional[List] = None,
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     rolling_window_eval: Optional[int] = None,
@@ -576,6 +581,9 @@ def plot_crps(
     --------
     None
     """
+
+    if selected_keys:
+        predictions = {key: value for key, value in predictions.items() if key in selected_keys}
 
     # Compute CRPS DataFrame
     df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
@@ -673,7 +681,7 @@ def get_crps_by_period(
 def load_predictions(
     prediction_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
     prediction_files: Union[List[Union[Path, str]], Path, str, None] = None,
-) -> Dict[str, object]:
+) -> Dict[str, PredictionLeadTimes]:
     """
     Load saved prediction files from specified files or recursively from directories.
 
@@ -693,14 +701,16 @@ def load_predictions(
 
     Returns
     -------
-    Dict[str, object]
+    Dict[str, PredictionLeadTimes]
         A dictionary mapping generated keys to loaded prediction objects.
     """
 
     all_predictions = {}
+    all_file_paths: List[Path] = []
 
+    # Collect the prediction files from either the provided list or directories
     if prediction_files:
-        logging.info("Loading predictions from provided file list...")
+        logging.info("Loading predictions from provided files...")
 
         if isinstance(prediction_files, (str, Path)):
             prediction_files = [prediction_files]
@@ -708,11 +718,7 @@ def load_predictions(
         for file in prediction_files:
             file = Path(file)
             if file.is_file() and file.suffix == ".joblib":
-                key = file.stem
-                all_predictions[key] = joblib.load(file)
-                logging.info(f"Loaded prediction file: {file} as key: {key}")
-            else:
-                logging.warning(f"Skipping invalid or non-joblib file: {file}")
+                all_file_paths.append(file)
 
     elif prediction_dirs:
         logging.info("Loading predictions by searching in provided directories...")
@@ -727,13 +733,32 @@ def load_predictions(
                 continue
 
             for filepath in prediction_dir.rglob("predictions.joblib"):
-                parent_name = filepath.parent.name
-                key = f"{parent_name}_{filepath.stem}"
-                all_predictions[key] = joblib.load(filepath)
-                logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
+                all_file_paths.append(filepath)
 
     else:
         raise ValueError("Either prediction_files or prediction_dirs must be provided.")
+
+    # If we found any joblib files, process them
+    if all_file_paths:
+        # Find the common path prefix
+        common_path = Path(os.path.commonpath(all_file_paths))
+        logging.info(f"Common path identified: {common_path}")
+
+        for filepath in all_file_paths:
+            # Remove the common path from the filename and the generic prediction.joblib at the end
+            if len(all_file_paths) > 1:
+                relevant_dirs = list(filepath.relative_to(common_path).parent.parts)
+            else:
+                relevant_dirs = [filepath.parent.parts[-1]]
+            for d in relevant_dirs:
+                if d in [DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS]:
+                    relevant_dirs.remove(d)
+
+            key = "_".join(relevant_dirs)
+            all_predictions[key] = joblib.load(filepath)
+            logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
+    else:
+        logging.warning("No prediction files were found.")
 
     if all_predictions:
         formatted_keys = "\n      - " + "\n      - ".join(all_predictions.keys())
