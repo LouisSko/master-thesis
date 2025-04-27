@@ -59,7 +59,7 @@ pipeline = ForecastingPipeline(model=Chronos,
 
 ```python
 data_train, data_val, data_test = pipeline.split_data(data=data, 
-                                                      test_start_date=pd.Timestamp  ("01-01-2022"), 
+                                                      test_start_date=pd.Timestamp("01-01-2022"), 
                                                       train_window_size=None,
                                                       test_window_size=None,
                                                       val_window_size=pd.DateOffset(years=1))
