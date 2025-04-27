@@ -15,6 +15,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 class NNPredictor(AbstractPredictor):
+    """
+    Nearest Neighbour Predictor for quantile forecasting based on historical values.
+
+    Parameters
+    ----------
+    quantiles : List[float], optional
+        List of quantiles to predict. Defaults to [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9].
+    lead_times : List[int], optional
+        List of lead times (in steps) for forecasting. Defaults to [1, 2, 3].
+    freq : pd.Timedelta, optional
+        Frequency of the time series data. Defaults to 1 hour.
+    last_n_samples : int, optional
+        Number of past samples to consider for prediction. Defaults to 10.
+    output_dir : Optional[Union[str, Path]], optional
+        Directory to store outputs. Defaults to None.
+    """
+
     def __init__(
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
@@ -23,6 +40,7 @@ class NNPredictor(AbstractPredictor):
         last_n_samples: int = 10,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
+
         super().__init__(lead_times, freq, output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
