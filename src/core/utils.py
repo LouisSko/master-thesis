@@ -4,6 +4,7 @@ import re
 
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 
 def get_logger(log_level: str, logger_name: str = "default") -> logging.Logger:
@@ -87,6 +88,10 @@ class CustomJSONEncoder(json.JSONEncoder):
         if isinstance(o, pd.DateOffset):
             # Serialize DateOffset as its keyword arguments
             return o.kwds
+
+        if isinstance(o, Path):
+            # Serialize DateOffset as its keyword arguments
+            return str(o)
 
         return super().default(o)
 
