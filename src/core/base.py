@@ -28,6 +28,50 @@ class AbstractPredictor(ABC):
     def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
         pass
 
+    def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
+        """
+        Merges previous context data with the new prediction data, ensuring time continuity and context length.
+
+        Parameters
+            data : TimeSeriesDataFrame
+                New data for which predictions will be made.
+            previous_context_data : TimeSeriesDataFrame
+                Historical context data preceding `data`.
+            context_length : int
+                Context length to be considered.
+
+        Returns
+            TimeSeriesDataFrame: Combined and sorted dataframe used as input for prediction.
+
+        Raises:
+            ValueError: If any time series are not continuous between the two datasets.
+        """
+
+        # get item ids (unique time series)
+        shared_ids = data.item_ids.intersection(previous_context_data.item_ids)
+
+        # verify if there are gaps between data and previous_context_data
+        for item_id in shared_ids:
+            prev_series = previous_context_data.loc[item_id]
+            curr_series = data.loc[item_id]
+
+            if len(prev_series) == 0 or len(curr_series) == 0:
+                continue
+
+            last_prev_time = prev_series.index[-1]
+            first_curr_time = curr_series.index[0]
+
+            expected_next_time = last_prev_time + self.freq
+            if expected_next_time != first_curr_time:
+                raise ValueError(f"Data for item_id '{item_id}' is not consecutive. " f"Expected {expected_next_time}, got {first_curr_time}.")
+
+        # add the context length to data
+        previous_context_data = previous_context_data.loc[data.item_ids]
+        previous_context_data = previous_context_data.groupby("item_id").tail(context_length)
+        data_merged = pd.concat([previous_context_data, data]).sort_index()
+
+        return TimeSeriesDataFrame(data_merged)
+
     def save(self, file_path: Optional[Path] = None) -> None:
         if file_path is not None:
             joblib.dump(self, file_path)
