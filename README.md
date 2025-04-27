@@ -47,9 +47,10 @@ from src.predictors.chronos import Chronos
 from src.postprocessors.mle import PostprocessorMLE
 from src.postprocessors.qr import PostprocessorQR
 from src.pipeline.pipeline import ForecastingPipeline
+import pandas as pd
 
 pipeline = ForecastingPipeline(model=Chronos, 
-                               model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "device_map": "mps", "lead_times": lead_times, "freq": freq, "finetuning_type": "full"}, 
+                               model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "device_map": "mps", "lead_times": [1,4,8,16,32,64], "freq": pd.Timedelta("1h"), "finetuning_type": "full"}, 
                                postprocessors=[PostprocessorMLE, PostprocessorQR],
                                output_dir=Path("./results/pipeline/chronos"))
 ```
