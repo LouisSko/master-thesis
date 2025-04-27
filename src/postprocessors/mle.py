@@ -11,11 +11,26 @@ from typing import Tuple
 
 class PostprocessorMLE(AbstractPostprocessor):
     def __init__(self) -> None:
+        """
+        Postprocessor that adjusts quantile regression outputs using Maximum Likelihood Estimation (MLE).
+
+        Learns a simple parametric relationship between predicted medians (M) and interquartile ranges (IQR)
+        to true target values by fitting a normal distribution to the log transformed predictions.
+        """
         super().__init__()
         self.params = {}  # Store {lead_time: {item_id: (a, b, c, d)}}
         self.epsilon = 100_000
 
     def fit(self, data: PredictionLeadTimes) -> None:
+        """
+        Fits the MLE parameters to the provided prediction data.
+
+        Parameters
+        ----------
+        data : PredictionLeadTimes
+            The prediction results for different lead times and item IDs,
+            including quantile predictions and true target values.
+        """
         self.params = {}
         ignore_first_n = 500
 
@@ -45,7 +60,19 @@ class PostprocessorMLE(AbstractPostprocessor):
                 self.params[lt][item_id] = result.x
 
     def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:
+        """
+        Postprocesses the prediction data using the fitted MLE parameters.
 
+        Parameters
+        ----------
+        data : PredictionLeadTimes
+            The prediction results to postprocess using the estimated parameters.
+
+        Returns
+        -------
+        PredictionLeadTimes
+            The postprocessed prediction results with adjusted quantiles based on the MLE calibration.
+        """
         results = {}
         lead_times = data.results.keys()
 
@@ -74,7 +101,8 @@ class PostprocessorMLE(AbstractPostprocessor):
         return PredictionLeadTimes(results=results)
 
     def _neg_log_likelihood(self, params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarray):
-        """Computes the negative log-likelihood for a normal distribution, parameterized
+        """
+        Computes the negative log-likelihood for a normal distribution, parameterized
         by median (M) and interquartile range (IQR), used for maximum likelihood estimation.
 
         Parameters
@@ -95,7 +123,6 @@ class PostprocessorMLE(AbstractPostprocessor):
         float
             Negative log-likelihood value.
         """
-
         a, b, c, d = params
         mu = a + b * M
         sigma = c + d * IQR
@@ -109,7 +136,8 @@ class PostprocessorMLE(AbstractPostprocessor):
         return nll
 
     def _estimate_init_params(self, m: np.ndarray, iqr: np.ndarray, y_mu: np.ndarray, y_sigma: np.ndarray) -> Tuple[float, float, float, float]:
-        """Estimates initial parameters [a, b, c, d] using linear regression for mean and std.
+        """
+        Estimates initial parameters [a, b, c, d] using linear regression for mean and std.
 
         Parameters
         ----------
@@ -127,7 +155,6 @@ class PostprocessorMLE(AbstractPostprocessor):
         Tuple[float, float, float, float]
             Initial parameter estimates [a, b, c, d] for mu and sigma formulas.
         """
-
         # mean = a + b * Median
         x_mu = sm.add_constant(m)
         model_mu = sm.OLS(y_mu, x_mu).fit()
