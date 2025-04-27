@@ -6,6 +6,9 @@ from autogluon.timeseries import TimeSeriesDataFrame
 from typing import Dict, List, Optional, Type, Union, Literal
 from pathlib import Path
 import joblib
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class AbstractPredictor(ABC):
@@ -73,12 +76,14 @@ class AbstractPredictor(ABC):
         return TimeSeriesDataFrame(data_merged)
 
     def save(self, file_path: Optional[Path] = None) -> None:
-        if file_path is not None:
-            joblib.dump(self, file_path)
-        elif self.output_dir is not None:
-            joblib.dump(self, self.output_dir / f"{self.__class__.__name__}.joblib")
-        else:
+
+        if file_path is None and self.output_dir is None:
             raise ValueError("No file path provided and no default output_dir set.")
+
+        file_path = file_path or self.output_dir / f"{self.__class__.__name__}.joblib"
+
+        joblib.dump(self, file_path)
+        logging.info("%s successfully saved to: %s", self.__class__.__name__, file_path)
 
 
 class AbstractPostprocessor(ABC):
@@ -95,6 +100,7 @@ class AbstractPostprocessor(ABC):
 
     def save(self, file_path: Path) -> None:
         joblib.dump(self, file_path)
+        logging.info("%s successfully saved to: %s", self.__class__.__name__, file_path)
 
 
 class AbstractPipeline(ABC):

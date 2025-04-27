@@ -45,6 +45,7 @@ class ForecastingPipeline(AbstractPipeline):
     def save(self) -> None:
         """Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib."""
 
+        logging.info("Saving Pipeline to specified output directory: %s", self.output_dir)
         create_dir(self.pipeline_dir_models)
         create_dir(self.pipeline_dir_postprocessors)
 
@@ -53,8 +54,10 @@ class ForecastingPipeline(AbstractPipeline):
             "model_kwargs": self.model_kwargs,
             "postprocessors": [get_class_path(postprocessor) for postprocessor in (self.postprocessors or [])],
         }
-        with open(self.output_dir / "pipeline_config.json", "w") as f:
+        config_file_path = self.output_dir / "pipeline_config.json"
+        with open(config_file_path, "w") as f:
             json.dump(config, f, indent=4, cls=CustomJSONEncoder)
+        logging.info("Pipeline configuration saved to: %s", config_file_path)
 
         if self.predictor is not None:
             self.predictor.save()
@@ -63,6 +66,8 @@ class ForecastingPipeline(AbstractPipeline):
             for name, postprocessor in self.postprocessor_dict.items():
                 # TODO: storing should be done in the same way as for predictor
                 postprocessor.save(self.pipeline_dir_postprocessors / f"{name}.joblib")
+
+        logging.info("Pipeline saved successfully. Reload Pipeline using: ForecastingPipeline.from_pretrained(%s)", self.output_dir)
 
     @classmethod
     def from_pretrained(cls, path: Union[str, Path]) -> "ForecastingPipeline":
