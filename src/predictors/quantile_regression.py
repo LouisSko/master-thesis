@@ -5,11 +5,14 @@ from typing import List, Optional
 import pandas as pd
 import numpy as np
 from src.core.base import AbstractPredictor
+import logging
 from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 from fastai.tabular.core import add_datepart
 import statsmodels.api as sm
 from pydantic import Field
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class QuantileRegression(AbstractPredictor):
@@ -46,7 +49,7 @@ class QuantileRegression(AbstractPredictor):
     def fit(self, data_train: PredictionLeadTimes, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
 
         if data_val is not None:
-            print("data_val is not used.")
+            logging.info("data_val is not used. No Hyperparameter tuning is applied.")
 
         for lt in tqdm(self.lead_times):
 

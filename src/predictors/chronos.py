@@ -8,6 +8,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
 from src.core.base import AbstractPredictor
+import logging
 from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 from optuna.trial import Trial
 from pathlib import Path
@@ -18,6 +19,8 @@ from transformers.trainer import Trainer
 from transformers import PreTrainedModel
 from peft import get_peft_model, LoraConfig
 from transformers import TrainerCallback, EarlyStoppingCallback, TrainerState, TrainerControl
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class ChronosInferenceDataset(Dataset):
@@ -194,37 +197,42 @@ class Chronos(AbstractPredictor):
         self.lora = False
 
         if self.prediction_length > 64:
+            logging.error("Maximum supported lead time is 64 currently.")
             raise ValueError("Maximum supported lead time is 64 currently.")
 
-        print("Load chronos pipeline.")
+        logging.info("Loading Chronos pipeline from model: %s", self.pretrained_model_name_or_path)
 
         # add lora weights if adapter_config exists in directory
         if (Path(self.pretrained_model_name_or_path) / "adapter_config.json").exists():
-            print(f"Found LoRa configuration in {self.pretrained_model_name_or_path}")
-            print("Load LoRa weights.")
+            logging.info(f"Found LoRa configuration in {self.pretrained_model_name_or_path}.")
 
             with open(Path(self.pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
                 adapter_config: dict = json.load(f)
 
             base_model_name = adapter_config.get("base_model_name_or_path")
+            logging.info("Base model name: %s", base_model_name)
 
             self.pipeline = self._pipeline_init(base_model_name)
 
             # Apply LoRA adapters
             self.pipeline.inner_model = PeftModel.from_pretrained(self.pipeline.inner_model, self.pretrained_model_name_or_path, is_trainable=False)
             self.lora = True
+            logging.info("LoRa adapters applied successfully.")
         else:
             self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
     def _pipeline_init(self, pretrained_model_name_or_path: Union[str, Path]) -> BaseChronosPipeline:
         """Creates an object of the chronos pipeline"""
 
+        logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
         return BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
 
     def fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
-        """Placeholder method for training. Not implemented, as Chronos is a pretrained model. Implement Finetuning in the future
+        """
+        Finetuning chronos model
 
-        Parameters:
+        Parameters
+        ----------
             data_train (TimeSeriesDataFrame): Training data (not used).
             data_val (TimeSeriesDataFrame): Evaluation data (optional).
         """
@@ -232,18 +240,19 @@ class Chronos(AbstractPredictor):
         def _model_init_full_tuning() -> PreTrainedModel:
             """Initialize a model where all parameters are trainable"""
 
+            logging.info("Initializing model for full tuning (all parameters trainable).")
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
-
             return pipeline.inner_model
 
         def _model_init_last_layer_tuning() -> PreTrainedModel:
-            """Initialize a model where only last layer is trainable."""
+            """Initialize a model where only the last layer is trainable."""
 
+            logging.info("Initializing model for last layer tuning (only last layer trainable).")
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
-            # whether to only tune the last layer
+            # Freeze all parameters
             for param in pipeline.inner_model.parameters():
                 param.requires_grad = False
-            # train only last residual block (incl. output layer)
+            # Train only last residual block (incl. output layer)
             for param in pipeline.inner_model.output_patch_embedding.parameters():
                 param.requires_grad = True
 
@@ -252,6 +261,7 @@ class Chronos(AbstractPredictor):
         def _model_init_lora() -> PreTrainedModel:
             """Initialize a model with LoRA"""
 
+            logging.info("Initializing model with LoRA adapters.")
             # Initialize the Chronos model
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
@@ -280,16 +290,16 @@ class Chronos(AbstractPredictor):
 
             # Apply LoRA to the base model
             lora_model = get_peft_model(pipeline.inner_model, lora_config)
-
             lora_model.print_trainable_parameters()
-
             return lora_model
 
         finetuning_options = {"full": _model_init_full_tuning, "last_layer": _model_init_last_layer_tuning, "LoRa": _model_init_lora}
 
         if self.lora:
+            logging.error("Cannot fine-tune the model when LoRa is enabled.")
             raise ValueError("Not supported to fine tune model when LoRa is enabled.")
 
+        logging.info("Starting fine-tuning with type: %s", self.finetuning_type)
         output_dir_fine_tuning = self.output_dir / f"finetuned-{self.finetuning_type}"
 
         fine_tune(
@@ -301,45 +311,9 @@ class Chronos(AbstractPredictor):
             n_trials=self.finetuning_hp_search_trials,
         )
 
-        # load saved model from best checkpoint
+        # Load the fine-tuned model from the best checkpoint
         self.pipeline = self._pipeline_init(output_dir_fine_tuning / "fine-tuned-ckpt")
-        print(f"Trained model is automatically loaded.")
-
-    def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame) -> TimeSeriesDataFrame:
-        """Merges previous context data with the new prediction data, ensuring time continuity and context length.
-
-        Parameters:
-            data (TimeSeriesDataFrame): New data for which predictions will be made.
-            previous_context_data (TimeSeriesDataFrame): Historical context data preceding `data`.
-
-        Returns:
-            TimeSeriesDataFrame: Combined and sorted dataframe used as input for prediction.
-
-        Raises:
-            ValueError: If any time series are not continuous between the two datasets.
-        """
-
-        shared_ids = data.item_ids.intersection(previous_context_data.item_ids)
-
-        for item_id in shared_ids:
-            prev_series = previous_context_data.loc[item_id]
-            curr_series = data.loc[item_id]
-
-            if len(prev_series) == 0 or len(curr_series) == 0:
-                continue
-
-            last_prev_time = prev_series.index[-1]
-            first_curr_time = curr_series.index[0]
-
-            expected_next_time = last_prev_time + self.freq
-            if expected_next_time != first_curr_time:
-                raise ValueError(f"Data for item_id '{item_id}' is not consecutive. " f"Expected {expected_next_time}, got {first_curr_time}.")
-
-        previous_context_data = previous_context_data.loc[data.item_ids]
-        previous_context_data = previous_context_data.groupby("item_id").tail(self.context_length)
-        data_merged = pd.concat([previous_context_data, data]).sort_index()
-
-        return TimeSeriesDataFrame(data_merged)
+        logging.info("Trained model is automatically loaded from checkpoint.")
 
     def predict(
         self,
@@ -360,7 +334,7 @@ class Chronos(AbstractPredictor):
 
         # Add previous context to test data if available
         if previous_context_data is not None:
-            data_merged = self._merge_data(data, previous_context_data)
+            data_merged = self._merge_data(data, previous_context_data, self.context_length)
         else:
             data_merged = data
 
@@ -461,10 +435,12 @@ def fine_tune(
             callbacks.append(EarlyStoppingCallback(early_stopping_patience=5))
         return callbacks
 
+    # TODO: provide this as parameter
     context_length = 2048
     prediction_length = 64
     target_column = "target"
 
+    logging.info("Preparing training dataset...")
     train_dataset = ChronosBacktestingDataset(
         data=data_train,
         context_length=context_length,
@@ -474,8 +450,8 @@ def fine_tune(
     )
 
     eval_dataset = None
-
     if data_val is not None:
+        logging.info("Preparing validation dataset...")
         eval_dataset = ChronosBacktestingDataset(
             data=data_val,
             context_length=context_length,
@@ -491,15 +467,15 @@ def fine_tune(
     # Create args for final training with best hyperparameters
     fine_tune_trainer_kwargs = create_trainer_kwargs(path=final_training_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
 
-    print(50 * "-")
-    print("Training results are going to be logged in tensorboard.")
-    print(f"Run `tensorboard --logdir {output_dir}` in the terminal to start.")
-    print(50 * "-")
+    logging.info("Training results are going to be logged in tensorboard.")
+    logging.info(f"Run `tensorboard --logdir {output_dir}` in the terminal to start.")
 
     if hp_tuning:
         if data_val is None:
+            logging.error("Validation data is required for hyperparameter tuning.")
             raise ValueError("Validation data is required for hyperparameter tuning.")
         if n_trials is None:
+            logging.error("n_trials must be specified when hp_tuning is enabled.")
             raise ValueError("n_trials must be specified when hp_tuning is enabled.")
 
         # Create separate path for hyperparameter tuning logs
@@ -509,10 +485,8 @@ def fine_tune(
         # Args for hyperparameter tuning phase
         hp_tuning_args = create_trainer_kwargs(path=hp_tuning_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
 
-        print("HP tuning hyperparameters:")
-        print(50 * "-")
-        print(hp_tuning_args)
-        print(50 * "-")
+        logging.info("Starting hyperparameter tuning with optuna (%s trials)...", n_trials)
+        logging.debug(f"Hyperparameter tuning args: {hp_tuning_args}")
 
         hp_trainer = Trainer(
             model_init=model_init,
@@ -522,7 +496,7 @@ def fine_tune(
             callbacks=create_callbacks(),
         )
 
-        print("Tuning hyperparameters...")
+        # Perform hyperparameter tuning with Optuna
         best_hp_args = tune_hp_optuna(hp_trainer, hp_space_optuna, n_trials=n_trials)
 
         # Apply best hyperparameters to final training args
@@ -530,10 +504,10 @@ def fine_tune(
             if not key.startswith("_") and not key.endswith("dir"):
                 setattr(fine_tune_trainer_kwargs, key, value)
 
-    print("Final training hyperparameters:")
-    print(50 * "-")
-    print(fine_tune_trainer_kwargs)
-    print(50 * "-")
+        logging.info("Hyperparameter tuning completed.")
+
+    logging.info("Final training hyperparameters:")
+    logging.debug(fine_tune_trainer_kwargs)
 
     trainer = Trainer(
         model_init=model_init,
@@ -543,11 +517,13 @@ def fine_tune(
         callbacks=create_callbacks(),
     )
 
+    logging.info("Starting final training process...")
     trainer.train()
 
+    # Save the fine-tuned model to the specified output directory
     final_model_path = output_dir / "fine-tuned-ckpt"
     trainer.model.save_pretrained(final_model_path)
-    print(f"Saved model to {final_model_path}.")
+    logging.info("Saved fine-tuned model to %s.", final_model_path)
 
 
 def tune_hp_optuna(trainer: Trainer, hp_space_optuna: Dict[str, Any], n_trials: int = 10):
@@ -575,7 +551,7 @@ def tune_hp_optuna(trainer: Trainer, hp_space_optuna: Dict[str, Any], n_trials: 
     )
 
     # Look at best run
-    print("Best configuration: ", best_run)
+    logging.info("Best configuration: %s", best_run)
 
     # Update training args with best hyperparameters
     for key, value in best_run.hyperparameters.items():
@@ -648,4 +624,4 @@ def check_model_parameters(chronos: Chronos, model_name: str = "amazon/chronos-b
 
     for (name1, p1), (name2, p2) in zip(chronos_copy.pipeline.inner_model.named_parameters(), chronos.pipeline.inner_model.named_parameters()):
         if not torch.equal(p1, p2):
-            print(f"Parameter {name1} has changed!")
+            logging.info(f"Parameter %s has changed!", name1)

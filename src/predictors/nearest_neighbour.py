@@ -10,8 +10,8 @@ import logging
 from pydantic import Field
 from pathlib import Path
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class NNPredictor(AbstractPredictor):

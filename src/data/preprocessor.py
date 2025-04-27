@@ -1,10 +1,9 @@
-import logging
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 import pandas as pd
+import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 def read_smard_data(file_paths: List[Path], selected_time_series: Optional[List[str]] = None, cols_to_drop: Optional[List[str]] = None) -> Tuple[pd.DataFrame, Dict[int, str]]:

@@ -6,39 +6,52 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
+import logging
+
 
 def get_logger(log_level: str, logger_name: str = "default") -> logging.Logger:
-    """Creates and configures a logger with the specified name and log level.
+    """
+    Creates and configures a logger with the specified name and log level.
+
+    The logger outputs logs to the console with a standardized format including
+    timestamp, log level, logger name, and message. Existing handlers are cleared
+    to avoid duplicate log entries when re-importing modules.
 
     Parameters
     ----------
     log_level : str
-        Logging level ("DEBUG", "INFO", "WARNING", "ERROR").
-    logger_name : str
-        Name of the logger
+        Logging level to use. Must be one of: "DEBUG", "INFO", "WARNING", or "ERROR".
+    logger_name : str, optional
+        Name of the logger instance. Useful for identifying logs from different modules.
+        Defaults to "default".
 
     Returns
     -------
     logging.Logger
-        Configured logger instance.
+        A configured logger instance.
     """
-    level_map = {"DEBUG": logging.DEBUG, "INFO": logging.INFO, "WARNING": logging.WARNING, "ERROR": logging.ERROR}
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
 
     if log_level not in level_map:
-        raise ValueError(f"Invalid log level: {log_level}")
+        raise ValueError(f"Invalid log level: '{log_level}'. Valid options are: {list(level_map.keys())}")
 
+    # Get the logger instance
     logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logger.setLevel(level_map[log_level])  # Directly use the log level here
 
-    # Clear existing handlers
-    if logger.hasHandlers():
-        logger.handlers.clear()
-
-    handler = logging.StreamHandler()
-    handler.setLevel(level_map[log_level])
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s [%(name)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    # Check for existing handlers before adding a new one
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(level_map[log_level])
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s [%(name)s] - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
 
     return logger
 

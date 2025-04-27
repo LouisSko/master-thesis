@@ -14,10 +14,13 @@ import matplotlib.dates as mdates
 from pathlib import Path
 import joblib
 import os
+import logging
 
 ITEMID = "item_id"
 TIMESTAMP = "timestamp"
 TARGET = "target"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class TabularDataFrame(pd.DataFrame):
@@ -309,7 +312,7 @@ class PredictionLeadTimes(BaseModel):
     def save(self, file_path: Path) -> None:
         """Save predictions to files"""
         joblib.dump(self, file_path)
-        print(f"Saved prediction file (PredictionLeadTimes) to {file_path}.")
+        logging.info("Saved prediction file (PredictionLeadTimes) to %s", file_path)
 
     def get_crps(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, mean_time: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes CRPS for selected lead times."""
@@ -668,6 +671,7 @@ def get_crps_by_period(
     return pd.DataFrame(results).T
 
 
+# TODO: change prediction_dir
 def load_predictions(prediction_dir: str = "data/predictions/realisierter_stromverbrauch") -> Dict[str, PredictionLeadTimes]:
     """
     Load all saved prediction files from a directory.
@@ -690,8 +694,6 @@ def load_predictions(prediction_dir: str = "data/predictions/realisierter_stromv
         if os.path.isfile(filepath) and filepath.endswith(".joblib"):
             all_predictions[filepath.split("/")[-1].split(".")[0]] = joblib.load(filepath)
 
-    print("Loaded the following predictions:")
-    print(30 * "-")
-    print("\n".join([key for key in all_predictions.keys()]))
+    logging.info("Loaded the following predictions:\n%s", "\n".join(all_predictions.keys()))
 
     return all_predictions
