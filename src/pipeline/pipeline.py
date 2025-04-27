@@ -32,8 +32,8 @@ class ForecastingPipeline(AbstractPipeline):
     ):
         super().__init__(model, model_kwargs, postprocessors, output_dir)
 
-        # initialize None predictor
-        self.predictor = None
+        # instantiate predictor
+        self.predictor = model(**model_kwargs)
         self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
 
         # define storage directory
@@ -59,15 +59,14 @@ class ForecastingPipeline(AbstractPipeline):
             json.dump(config, f, indent=4, cls=CustomJSONEncoder)
         logging.info("Pipeline configuration saved to: %s", config_file_path)
 
-        if self.predictor is not None:
-            self.predictor.save()
+        self.predictor.save()
 
         if self.postprocessor_dict is not None:
             for name, postprocessor in self.postprocessor_dict.items():
                 # TODO: storing should be done in the same way as for predictor
                 postprocessor.save(self.pipeline_dir_postprocessors / f"{name}.joblib")
 
-        logging.info("Pipeline saved successfully. Reload Pipeline using: ForecastingPipeline.from_pretrained(\"%s\")", self.output_dir)
+        logging.info('Pipeline saved successfully. Reload Pipeline using: ForecastingPipeline.from_pretrained("%s")', self.output_dir)
 
     @classmethod
     def from_pretrained(cls, path: Union[str, Path]) -> "ForecastingPipeline":
@@ -324,11 +323,6 @@ class ForecastingPipeline(AbstractPipeline):
         start_time = pd.Timestamp.now()
         logging.info("Starting prediction for test data from %s to %s", data_test.index.get_level_values("timestamp").min(), data_test.index.get_level_values("timestamp").max())
 
-        # Check if the predictor is already set, if not, initialize it
-        if self.predictor is None:
-            logging.warning("Predictor has not been fitted yet. Attempting to create a zero-shot predictor.")
-            self.predictor = self.model(**self.model_kwargs)
-
         # Run the prediction
         logging.info("Running prediction using the model: %s", self.predictor.__class__.__name__)
         predictions = self.predictor.predict(data=data_test, previous_context_data=data_previous_context)
@@ -430,6 +424,8 @@ class ForecastingPipeline(AbstractPipeline):
 
         if train:
             self.train(data_train, data_val)
+        else:
+            logging.info("Skipping model training because `train=False`.")
 
         if self.postprocessors is not None:
             if calibration_based_on == "val":
