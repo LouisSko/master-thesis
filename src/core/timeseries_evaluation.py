@@ -309,7 +309,7 @@ class PredictionLeadTimes(BaseModel):
     def save(self, file_path: Path) -> None:
         """Save predictions to files"""
         joblib.dump(self, file_path)
-        print(f"Saved files to {file_path}")
+        print(f"Saved prediction file (PredictionLeadTimes) to {file_path}.")
 
     def get_crps(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, mean_time: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """Computes CRPS for selected lead times."""
