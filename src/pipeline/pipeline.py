@@ -67,7 +67,7 @@ class ForecastingPipeline(AbstractPipeline):
                 # TODO: storing should be done in the same way as for predictor
                 postprocessor.save(self.pipeline_dir_postprocessors / f"{name}.joblib")
 
-        logging.info("Pipeline saved successfully. Reload Pipeline using: ForecastingPipeline.from_pretrained(%s)", self.output_dir)
+        logging.info("Pipeline saved successfully. Reload Pipeline using: ForecastingPipeline.from_pretrained(\"%s\")", self.output_dir)
 
     @classmethod
     def from_pretrained(cls, path: Union[str, Path]) -> "ForecastingPipeline":
