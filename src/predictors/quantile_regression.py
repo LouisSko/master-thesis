@@ -9,16 +9,35 @@ from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTi
 from fastai.tabular.core import add_datepart
 import statsmodels.api as sm
 from pydantic import Field
+from pathlib import Path
 
 
 class QuantileRegression(AbstractPredictor):
+    """
+    Quantile Regression predictor for time series forecasting.
+
+    This model fits separate quantile regression models for each quantile, lead time, and item ID.
+
+    Parameters
+    ----------
+    quantiles : List[float], optional
+        List of quantiles to predict. Defaults to [0.1, 0.2, ..., 0.9].
+    lead_times : List[int], optional
+        List of lead times (forecast horizons) to predict. Defaults to [1, 2, 3].
+    freq : pd.Timedelta, optional
+        Frequency of the time series data. Defaults to 1 hour.
+    output_dir : Optional[Path], optional
+        Directory to save the fitted model. Defaults to None.
+    """
+
     def __init__(
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: pd.Timedelta = pd.Timedelta("1h"),
+        output_dir: Optional[Path] = None,
     ) -> None:
-        super().__init__(lead_times, freq)
+        super().__init__(lead_times, freq, output_dir)
 
         self.quantiles = quantiles
         self.models_qr = {}
@@ -48,9 +67,7 @@ class QuantileRegression(AbstractPredictor):
                     model = sm.QuantReg(y_train, x_train)
                     self.models_qr[(lt, item_id, q)] = model.fit(q=q)
 
-    def predict(
-        self, data_train: PredictionLeadTimes, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False
-    ) -> PredictionLeadTimes:
+    def predict(self, data: PredictionLeadTimes, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
 
         if self.models_qr is None:
             raise ValueError("Need to fit models first.")
@@ -59,7 +76,7 @@ class QuantileRegression(AbstractPredictor):
 
         for lt in tqdm(self.lead_times):
 
-            data_lt = self._create_cyclic_features(data_train, lt, dropna=False)
+            data_lt = self._create_cyclic_features(data, lt, dropna=False)
 
             # store results
             test_results = {}
@@ -85,7 +102,8 @@ class QuantileRegression(AbstractPredictor):
         return PredictionLeadTimes(results=results)
 
     def _add_cyclic_encoding(self, data: pd.DataFrame, colname: str, period: int, drop: bool = False):
-        """Adds sine and cosine encoding for a cyclical feature to a DataFrame.
+        """
+        Adds sine and cosine encoding for a cyclical feature to a DataFrame.
 
         Parameters:
         ----------
@@ -103,7 +121,6 @@ class QuantileRegression(AbstractPredictor):
         None
             Modifies the DataFrame in-place.
         """
-
         data[f"sin_{colname}"] = np.sin(2 * np.pi * data[colname] / period)
         data[f"cos_{colname}"] = np.cos(2 * np.pi * data[colname] / period)
 
@@ -111,7 +128,8 @@ class QuantileRegression(AbstractPredictor):
             data = data.drop(columns=[colname])
 
     def _create_cyclic_features(self, data: TimeSeriesDataFrame, lead_time: int = 1, freq: pd.Timedelta = pd.Timedelta("1h"), dropna: bool = True) -> TabularDataFrame:
-        """Generates timestamp-based and relative time delta features for prediction tasks.
+        """
+        Generates timestamp-based and relative time delta features for prediction tasks.
 
         Parameters:
         ----------
@@ -127,7 +145,6 @@ class QuantileRegression(AbstractPredictor):
         TabularDataFrame
             Tabular format of the input time series with created features.
         """
-
         data_w_features = []
 
         for i, data_subset in data.groupby("item_id"):

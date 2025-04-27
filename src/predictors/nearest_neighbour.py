@@ -1,13 +1,14 @@
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, Any, List, Optional
+from typing import Tuple, Dict, Any, List, Optional, Union
 import torch
 from tqdm import tqdm
 from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 from src.core.base import AbstractPredictor
 import logging
 from pydantic import Field
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -20,8 +21,9 @@ class NNPredictor(AbstractPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: pd.Timedelta = pd.Timedelta("1h"),
         last_n_samples: int = 10,
+        output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
-        super().__init__(lead_times, freq)
+        super().__init__(lead_times, freq, output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 

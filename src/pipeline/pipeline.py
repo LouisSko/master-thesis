@@ -10,13 +10,12 @@ from pathlib import Path
 import json
 import importlib
 from typing import Type
-import os
 import joblib
 
-DIR = Path("./data/pipeline")
+DIR_BACKTESTS = "backtest"
 DIR_MODELS = "models"
 DIR_POSTPROCESSORS = "postprocessors"
-PATH_PREDICTIONS = Path("./data/predictions/")
+PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
 
 
 class ForecastingPipeline(AbstractPipeline):
@@ -25,86 +24,97 @@ class ForecastingPipeline(AbstractPipeline):
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
+        output_dir: Optional[Union[Path, str]] = None,
     ):
-        super().__init__(model, model_kwargs, postprocessors)
+        super().__init__(model, model_kwargs, postprocessors, output_dir)
 
         # initialize None predictor
         self.predictor = None
         self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
 
-    def save(self, pipeline_name: Path) -> None:
-        """
-        Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib.
+        # define storage directory
+        self.pipeline_dir_models = self.output_dir / DIR_MODELS
+        self.pipeline_dir_postprocessors = self.output_dir / DIR_POSTPROCESSORS
+        self.pipeline_dir_backtests = self.output_dir / DIR_BACKTESTS
+        self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
 
-        Parameters:
-        -----------
-        pipeline_name : str
-            name of the pipeline directory.
-        """
+    def save(self) -> None:
+        """Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib."""
 
-        pipeline_dir = DIR / pipeline_name
-        pipeline_dir_models = pipeline_dir / DIR_MODELS
-        pipeline_dir_postprocessors = pipeline_dir / DIR_POSTPROCESSORS
-
-        create_dir(pipeline_dir)
-        create_dir(pipeline_dir_models)
-        create_dir(pipeline_dir_postprocessors)
+        create_dir(self.pipeline_dir_models)
+        create_dir(self.pipeline_dir_postprocessors)
 
         config = {
             "model": get_class_path(self.model),
             "model_kwargs": self.model_kwargs,
             "postprocessors": [get_class_path(postprocessor) for postprocessor in (self.postprocessors or [])],
         }
-        with open(pipeline_dir / "pipeline_config.json", "w") as f:
+        with open(self.output_dir / "pipeline_config.json", "w") as f:
             json.dump(config, f, indent=4, cls=CustomJSONEncoder)
 
         if self.predictor is not None:
-            self.predictor.save(pipeline_dir_models / f"{self.predictor.__class__.__name__}.joblib")
+            self.predictor.save()
 
         if self.postprocessor_dict is not None:
             for name, postprocessor in self.postprocessor_dict.items():
-                postprocessor.save(pipeline_dir_postprocessors / f"{name}.joblib")
+                # TODO: storing should be done in the same way as for predictor
+                postprocessor.save(self.pipeline_dir_postprocessors / f"{name}.joblib")
 
     @classmethod
-    def from_pretrained(cls, pipeline_name: Path) -> "ForecastingPipeline":
+    def from_pretrained(cls, path: Union[str, Path]) -> "ForecastingPipeline":
+        """
+        Load a ForecastingPipeline from a saved directory.
 
-        pipeline_dir = DIR / pipeline_name
+        Parameters
+        ----------
+        path : Union[str, Path]
+            Path to the directory containing the saved pipeline configuration, model, and postprocessors.
 
-        with open(pipeline_dir / "pipeline_config.json", "r") as f:
+        Returns
+        -------
+        ForecastingPipeline
+            The loaded ForecastingPipeline instance.
+        """
+        pipeline_dir = Path(path)
+
+        with open(pipeline_dir / PIPELINE_CONFIG_FILE_NAME, "r") as f:
             config: dict = json.load(f)
 
-        # Fix the config
+        # Load model class
         config["model"] = load_class_from_path(config["model"])
 
-        # Special handling for model_kwargs
+        # Handle special fields in model_kwargs
         model_kwargs = config.get("model_kwargs", {})
         if "freq" in model_kwargs:
             model_kwargs["freq"] = pd.Timedelta(model_kwargs["freq"])
-
         config["model_kwargs"] = model_kwargs
 
-        # Special handling for postprocessors
+        # Load postprocessor classes
         config["postprocessors"] = [load_class_from_path(pp) for pp in config.get("postprocessors", [])]
 
-        # recreate the pipeline
+        # Recreate the pipeline
         pipeline = ForecastingPipeline(
             model=config["model"],
             model_kwargs=config["model_kwargs"],
             postprocessors=config["postprocessors"],
+            output_dir=pipeline_dir,
         )
 
-        # loading predictors
-        models = os.listdir(pipeline_dir / DIR_MODELS)
-        if models is None:
-            print(f"No models in the directory {pipeline_dir/DIR_MODELS}. Skip.")
-        pipeline.predictor = joblib.load(pipeline_dir / DIR_MODELS / models[0])
+        # Load predictor
+        models = list((pipeline_dir / DIR_MODELS).glob("*.joblib"))
+        if not models:
+            print(f"No models found in {pipeline_dir / DIR_MODELS}. Skipping model loading.")
+        else:
+            pipeline.predictor = joblib.load(models[0])
 
-        # loading postprocessors
-        postprocessors = os.listdir(pipeline_dir / DIR_POSTPROCESSORS)
-        if postprocessors is None:
-            print(f"No postprocessors in the directory {pipeline_dir/DIR_POSTPROCESSORS}. Skip.")
-        for pp in postprocessors:
-            pipeline.postprocessor_dict[pp.split(".")[0]] = joblib.load(pipeline_dir / DIR_POSTPROCESSORS / pp)
+        # Load postprocessors
+        postprocessor_files = list((pipeline_dir / DIR_POSTPROCESSORS).glob("*.joblib"))
+        if not postprocessor_files:
+            print(f"No postprocessors found in {pipeline_dir / DIR_POSTPROCESSORS}. Skipping postprocessor loading.")
+        else:
+            for pp_file in postprocessor_files:
+                name = pp_file.stem
+                pipeline.postprocessor_dict[name] = joblib.load(pp_file)
 
         return pipeline
 
@@ -119,7 +129,7 @@ class ForecastingPipeline(AbstractPipeline):
         test_window_size: Optional[pd.DateOffset] = None,
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
-        output_dir: Optional[Path] = None,
+        save_results: bool = False,
     ) -> PredictionLeadTimes:
         """
         Run a backtest over the specified time period.
@@ -144,8 +154,8 @@ class ForecastingPipeline(AbstractPipeline):
             Whether to train the model during backtesting. Defaults to False.
         calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], optional
             Strategy for calibrating postprocessors. Defaults to None.
-        output_dir : Optional[Path], optional
-            Directory to save backtest results. Defaults to None.
+        save_results : bool
+            Whether to save backtest results. Defaults to False.
 
         Returns
         -------
@@ -170,7 +180,7 @@ class ForecastingPipeline(AbstractPipeline):
         else:
             results = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
 
-        if output_dir:
+        if save_results:
             backtest_params = {
                 "test_start_date": test_start_date,
                 "test_end_date": test_end_date,
@@ -181,7 +191,7 @@ class ForecastingPipeline(AbstractPipeline):
                 "train": train,
                 "calibration_based_on": calibration_based_on,
             }
-            self._save_backtest_results(results, output_dir, backtest_params)
+            self._save_backtest_results(results, backtest_params)
 
         return results
 
@@ -245,7 +255,6 @@ class ForecastingPipeline(AbstractPipeline):
         -------
         None
         """
-
         self.predictor = self.model(**self.model_kwargs)
         print(f"Training from {data_train.index.get_level_values('timestamp').min()} to {data_train.index.get_level_values('timestamp').max()}")
         if data_val is not None:
@@ -397,15 +406,13 @@ class ForecastingPipeline(AbstractPipeline):
 
         return results_all
 
-    def _save_backtest_results(self, results: Dict[str, PredictionLeadTimes], output_dir: Path, backtest_params: Dict) -> None:
+    def _save_backtest_results(self, results: Dict[str, PredictionLeadTimes], backtest_params: Dict) -> None:
         """Save backtest results and config."""
 
         for method, result in results.items():
-            save_path = PATH_PREDICTIONS / output_dir / method
+            save_path = self.pipeline_dir_backtests / method
 
-            if not save_path.exists():
-                save_path.mkdir(parents=True)
-                print(f"Created new directory: {save_path}")
+            create_dir(save_path)
 
             # Add information
             eval_config_info = {}

@@ -167,6 +167,8 @@ class Chronos(AbstractPredictor):
         Whether to perform hyperparameter search during fine-tuning. Defaults to False.
     finetuning_hp_search_trials : int, optional
         Number of trials for hyperparameter search. Defaults to 10.
+    output_dir : Path, optional
+        Directory to store results. Defaults to Path("./models/").
     """
 
     def __init__(
@@ -179,8 +181,9 @@ class Chronos(AbstractPredictor):
         finetuning_type: Literal["full", "last_layer", "LoRa"] = "full",
         finetuning_hp_search: Optional[bool] = False,
         finetuning_hp_search_trials: Optional[int] = 10,
+        output_dir: Optional[Path] = Path("./models/"),
     ) -> None:
-        super().__init__(lead_times, freq)
+        super().__init__(lead_times, freq, output_dir)
         self.context_length = context_length
         self.prediction_length = max(self.lead_times)
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
@@ -201,7 +204,7 @@ class Chronos(AbstractPredictor):
             print("Load LoRa weights.")
 
             with open(Path(self.pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
-                adapter_config = json.load(f)
+                adapter_config: dict = json.load(f)
 
             base_model_name = adapter_config.get("base_model_name_or_path")
 
@@ -287,19 +290,19 @@ class Chronos(AbstractPredictor):
         if self.lora:
             raise ValueError("Not supported to fine tune model when LoRa is enabled.")
 
-        fine_tuned_model_dir = Path(f"./models/finetuned-{self.finetuning_type}/")
+        output_dir_fine_tuning = self.output_dir / f"finetuned-{self.finetuning_type}"
 
         fine_tune(
             model_init=finetuning_options[self.finetuning_type],
             data_train=data_train,
             data_val=data_val,
-            path=fine_tuned_model_dir,
+            output_dir=output_dir_fine_tuning,
             hp_tuning=self.finetuning_hp_search,
             n_trials=self.finetuning_hp_search_trials,
         )
 
-        # load saved model
-        self.pipeline = self._pipeline_init(fine_tuned_model_dir / "fine-tuned-ckpt")
+        # load saved model from best checkpoint
+        self.pipeline = self._pipeline_init(output_dir_fine_tuning / "fine-tuned-ckpt")
         print(f"Trained model is automatically loaded.")
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame) -> TimeSeriesDataFrame:
@@ -429,7 +432,7 @@ def fine_tune(
     model_init: Callable[[], PreTrainedModel],
     data_train: TimeSeriesDataFrame,
     data_val: Optional[TimeSeriesDataFrame] = None,
-    path: Path = Path("./models/test-full-finetuning/"),
+    output_dir: Union[str, Path] = Path("./models/test-finetuning/"),
     hp_tuning: bool = False,
     n_trials: Optional[int] = None,
 ):
@@ -444,8 +447,8 @@ def fine_tune(
         Training data in Chronos-compatible format.
     data_val : Optional[TimeSeriesDataFrame], default=None
         Validation data. Required if `hp_tuning` is True or if evaluation during training is desired.
-    path : Path, default=Path("./models/test-full-finetuning/")
-        Path to save the trained model and optionally intermediate checkpoints.
+    output_dir : Union[str, Path], default=Path("./models/test-full-finetuning/")
+        Path to save the model and optionally intermediate checkpoints.
     hp_tuning : bool, default=False
         Whether to perform hyperparameter tuning using Optuna.
     n_trials : Optional[int], default=None
@@ -482,7 +485,7 @@ def fine_tune(
         )
 
     # Create separate directory for final training
-    final_training_path = path / "training"
+    final_training_path = output_dir / "training"
     final_training_path.mkdir(exist_ok=True, parents=True)
 
     # Create args for final training with best hyperparameters
@@ -490,7 +493,7 @@ def fine_tune(
 
     print(50 * "-")
     print("Training results are going to be logged in tensorboard.")
-    print("Run `tensorboard --logdir models/` in the terminal to start.")
+    print(f"Run `tensorboard --logdir {output_dir}` in the terminal to start.")
     print(50 * "-")
 
     if hp_tuning:
@@ -500,7 +503,7 @@ def fine_tune(
             raise ValueError("n_trials must be specified when hp_tuning is enabled.")
 
         # Create separate path for hyperparameter tuning logs
-        hp_tuning_path = path / "hp_tuning"
+        hp_tuning_path = output_dir / "hp_tuning"
         hp_tuning_path.mkdir(exist_ok=True, parents=True)
 
         # Args for hyperparameter tuning phase
@@ -542,7 +545,7 @@ def fine_tune(
 
     trainer.train()
 
-    final_model_path = path / "fine-tuned-ckpt"
+    final_model_path = output_dir / "fine-tuned-ckpt"
     trainer.model.save_pretrained(final_model_path)
     print(f"Saved model to {final_model_path}.")
 

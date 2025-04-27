@@ -9,10 +9,16 @@ import joblib
 
 
 class AbstractPredictor(ABC):
-    def __init__(self, lead_times: List[int] = [1, 2, 3], freq: pd.Timedelta = pd.Timedelta("1h")) -> None:
+    def __init__(
+        self,
+        lead_times: List[int] = [1, 2, 3],
+        freq: pd.Timedelta = pd.Timedelta("1h"),
+        output_dir: Optional[Union[str, Path]] = None,
+    ) -> None:
 
         self.lead_times = lead_times
         self.freq = freq
+        self.output_dir = Path(output_dir)
 
     @abstractmethod
     def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
@@ -22,8 +28,13 @@ class AbstractPredictor(ABC):
     def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
         pass
 
-    def save(self, file_path: Path) -> None:
-        joblib.dump(self, file_path)
+    def save(self, file_path: Optional[Path] = None) -> None:
+        if file_path is not None:
+            joblib.dump(self, file_path)
+        elif self.output_dir is not None:
+            joblib.dump(self, self.output_dir / f"{self.__class__.__name__}.joblib")
+        else:
+            raise ValueError("No file path provided and no default output_dir set.")
 
 
 class AbstractPostprocessor(ABC):
@@ -48,6 +59,7 @@ class AbstractPipeline(ABC):
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
+        output_dir: Optional[Union[str, Path]] = None,
     ):
         """Initialize the pipeline with model, data, and optional postprocessor.
 
@@ -59,8 +71,11 @@ class AbstractPipeline(ABC):
             Keyword arguments to pass to the model constructor
         postprocessors : Optional[List[Type[AbstractPostprocessor]]], default=None
             Optional list of postprocessors for refining predictions
+        output_dir : Optional[Union[str, Path]], default=None
+            output directory for the pipeline.
         """
 
+        self.output_dir = Path(output_dir)
         self.model = model
         self.model_kwargs = model_kwargs
         self.postprocessors = postprocessors
@@ -77,7 +92,7 @@ class AbstractPipeline(ABC):
         test_window_size: Optional[pd.DateOffset] = None,
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
-        output_dir: Optional[str] = None,
+        save_results: bool = False,
     ) -> PredictionLeadTimes:
         """
         Run a backtest over the specified time period.
@@ -102,8 +117,8 @@ class AbstractPipeline(ABC):
             Whether to train the model during backtesting. Defaults to False.
         calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], optional
             Strategy for calibrating postprocessors. Defaults to None.
-        output_dir : Optional[Path], optional
-            Directory to save backtest results. Defaults to None.
+        save_results : bool
+            Whether to save backtest prediction results. Defaults to False.
 
         Returns
         -------
