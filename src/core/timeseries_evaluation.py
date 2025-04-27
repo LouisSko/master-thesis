@@ -13,7 +13,6 @@ import math
 import matplotlib.dates as mdates
 from pathlib import Path
 import joblib
-import os
 import logging
 
 ITEMID = "item_id"
@@ -671,29 +670,75 @@ def get_crps_by_period(
     return pd.DataFrame(results).T
 
 
-# TODO: change prediction_dir
-def load_predictions(prediction_dir: str = "data/predictions/realisierter_stromverbrauch") -> Dict[str, PredictionLeadTimes]:
+def load_predictions(
+    prediction_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
+    prediction_files: Union[List[Union[Path, str]], Path, str, None] = None,
+) -> Dict[str, object]:
     """
-    Load all saved prediction files from a directory.
+    Load saved prediction files from specified files or recursively from directories.
+
+    You can either:
+    - Provide a list of prediction files to load, or
+    - Provide one or more directories. The function will recursively search for 'predictions.joblib' files inside them.
+
+    If directories are used, the key for each loaded prediction will be constructed as 'parentfolder_filename'
+    to make them distinguishable.
 
     Parameters
     ----------
-    - prediction_dir: str
-        The path to the directory containing saved prediction files.
-        Defaults to "data/predictions/realisierter_stromverbrauch".
+    prediction_dirs : str, Path, or list of str/Path, optional
+        One or multiple directories to search for prediction files.
+    prediction_files : str, Path, or list of str/Path, optional
+        Specific prediction files to load directly.
 
     Returns
     -------
-    Dict[str, PredictionLeadTimes]
-        A dictionary mapping filenames (without extension) to loaded PredictionLeadTimes objects.
+    Dict[str, object]
+        A dictionary mapping generated keys to loaded prediction objects.
     """
 
     all_predictions = {}
-    for filename in os.listdir(prediction_dir):
-        filepath = os.path.join(prediction_dir, filename)
-        if os.path.isfile(filepath) and filepath.endswith(".joblib"):
-            all_predictions[filepath.split("/")[-1].split(".")[0]] = joblib.load(filepath)
 
-    logging.info("Loaded the following predictions:\n%s", "\n".join(all_predictions.keys()))
+    if prediction_files:
+        logging.info("Loading predictions from provided file list...")
+
+        if isinstance(prediction_files, (str, Path)):
+            prediction_files = [prediction_files]
+
+        for file in prediction_files:
+            file = Path(file)
+            if file.is_file() and file.suffix == ".joblib":
+                key = file.stem
+                all_predictions[key] = joblib.load(file)
+                logging.info(f"Loaded prediction file: {file} as key: {key}")
+            else:
+                logging.warning(f"Skipping invalid or non-joblib file: {file}")
+
+    elif prediction_dirs:
+        logging.info("Loading predictions by searching in provided directories...")
+
+        if isinstance(prediction_dirs, (str, Path)):
+            prediction_dirs = [prediction_dirs]
+
+        for prediction_dir in prediction_dirs:
+            prediction_dir = Path(prediction_dir)
+            if not prediction_dir.is_dir():
+                logging.warning(f"Skipping non-directory path: `{prediction_dir}`")
+                continue
+
+            for filepath in prediction_dir.rglob("predictions.joblib"):
+                parent_name = filepath.parent.name
+                key = f"{parent_name}_{filepath.stem}"
+                all_predictions[key] = joblib.load(filepath)
+                logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
+
+    else:
+        raise ValueError("Either prediction_files or prediction_dirs must be provided.")
+
+    if all_predictions:
+        formatted_keys = "\n      - " + "\n      - ".join(all_predictions.keys())
+        logging.info("Finished loading predictions. \n \n  Loaded keys:%s", formatted_keys)
+    else:
+        logging.warning("No prediction files were loaded.")
 
     return all_predictions
