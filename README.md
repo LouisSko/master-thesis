@@ -72,7 +72,7 @@ predictions = pipeline.apply_postprocessing(predictions)
 
 # save and reload pipeline
 pipeline.save()
-pipeline = ForecastingPipeline.from_pretrained(path="./results/pipeline/nearest_neighbour")
+pipeline = ForecastingPipeline.from_pretrained(path="./results/pipeline/chronos")
 ```
 
 ### Evaluation of Predictions on Test Dataset
