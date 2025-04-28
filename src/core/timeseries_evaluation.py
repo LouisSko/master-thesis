@@ -82,6 +82,10 @@ class TabularDataFrame(pd.DataFrame):
         after = TabularDataFrame(data_after)
         return before, after
 
+    def __deepcopy__(self, memo):
+        copied = self.copy(deep=True)
+        return self.__class__(copied)
+
 
 class PredictionLeadTime(BaseModel):
     """
