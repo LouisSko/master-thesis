@@ -41,17 +41,16 @@ class PostprocessorQR(AbstractPostprocessor):
 
         # Fit model for each lead time, timeseries (item_id) and quantile
         self.qr_models = {}  # Reset the models
-        lead_times = data.results.keys()
-        for lt in tqdm(lead_times):
+        for lt, results in tqdm(data.results.items()):
 
             # extract quantiles and item_ids
-            quantiles = data.results[lt].quantiles
-            item_ids = data.results[lt].data.item_ids
+            quantiles = results.quantiles
+            item_ids = results.data.item_ids
 
             for item_id in item_ids:
                 for q in quantiles:
                     # Prepare the training data
-                    train_data = self._prepare_dataframe(data.results[lt], item_id, quantiles)
+                    train_data = self._prepare_dataframe(results, item_id, quantiles)
 
                     y_train = np.log(train_data["target"].values + self.epsilon)
                     x_train = self._create_features(train_data, q)
@@ -64,14 +63,13 @@ class PostprocessorQR(AbstractPostprocessor):
         """Apply the fitted quantile regression models to generate predictions on the test data."""
 
         postprocessing_results = {}
-        lead_times = list(data.results.keys())
 
-        for lt in tqdm(lead_times):
+        for lt, results in tqdm(data.results.items()):
 
             # extract quantiles and item_ids
-            quantiles = data.results[lt].quantiles
-            item_ids = data.results[lt].data.item_ids
-            freq = data.results[lt].freq
+            quantiles = results.quantiles
+            item_ids = results.data.item_ids
+            freq = results.freq
 
             # use lists to store results
             predictions_item_ids = []
@@ -79,7 +77,7 @@ class PostprocessorQR(AbstractPostprocessor):
 
             for item_id in item_ids:
 
-                test_data = self._prepare_dataframe(data.results[lt], item_id, quantiles)
+                test_data = self._prepare_dataframe(results, item_id, quantiles)
 
                 test_results = {}
 
