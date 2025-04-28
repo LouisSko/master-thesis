@@ -6,6 +6,7 @@ from tqdm import tqdm
 from src.core.base import AbstractPostprocessor
 from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
 import pandas as pd
+from typing import List
 
 
 class PostprocessorQR(AbstractPostprocessor):
@@ -14,6 +15,26 @@ class PostprocessorQR(AbstractPostprocessor):
         self.ignore_first_n_train_entries = 500
         self.epsilon = 100_000
         self.qr_models = {}
+
+    def _create_features(self, data: TabularDataFrame, q: float) -> np.ndarray:
+
+        log_q = np.log(data[f"feature_{q}"] + self.epsilon)
+        log_iqr = np.log(data["feature_0.8"] - data["feature_0.2"])
+        x_train = np.column_stack((log_q, log_iqr))
+
+        # x_train = np.log(data[f"feature_{q}"].values.reshape(-1, 1) + self.epsilon)
+        x_train = sm.add_constant(x_train)
+        return x_train
+
+    def _prepare_dataframe(self, result_lead_time: PredictionLeadTime, item_id: int, quantiles: List[float]) -> TabularDataFrame:
+
+        data = result_lead_time.to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].dropna()
+        cols_rename = {q: f"feature_{q}" for q in quantiles}
+        data = data.rename(columns=cols_rename)
+        cols_to_keep = list(cols_rename.values()) + ["target"]
+        data = data[cols_to_keep]
+
+        return TabularDataFrame(data)
 
     def fit(self, data: PredictionLeadTimes) -> None:
         """Fit the quantile regression models for each lead time and quantile."""
@@ -30,18 +51,10 @@ class PostprocessorQR(AbstractPostprocessor):
             for item_id in item_ids:
                 for q in quantiles:
                     # Prepare the training data
-                    df_train = data.results[lt].to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].dropna()
-                    df_train = df_train.dropna()
-                    cols_rename = {q: f"feature_{q}" for q in quantiles}
-                    df_train = df_train.rename(columns=cols_rename)
-                    cols_to_keep = list(cols_rename.values()) + ["target"]
-                    df_train = df_train[cols_to_keep]
-                    # df_train.index = pd.MultiIndex.from_arrays([[item_id] * len(df_train), df_train.index], names=["item_id", df_train.index.name])
-                    train_data = TabularDataFrame(df_train)
+                    train_data = self._prepare_dataframe(data.results[lt], item_id, quantiles)
 
-                    x_train = np.log(train_data[f"feature_{q}"].values.reshape(-1, 1) + self.epsilon)
                     y_train = np.log(train_data["target"].values + self.epsilon)
-                    x_train = sm.add_constant(x_train)
+                    x_train = self._create_features(train_data, q)
 
                     # Fit quantile regression model for each quantile
                     model = sm.QuantReg(y_train, x_train)
@@ -65,27 +78,21 @@ class PostprocessorQR(AbstractPostprocessor):
             test_data_item_ids = []
 
             for item_id in item_ids:
-                # prepare the test data
-                df_test = data.results[lt].to_dataframe(item_ids=[item_id])
-                cols_rename = {q: f"feature_{q}" for q in quantiles}
-                df_test = df_test.rename(columns=cols_rename)
-                cols_to_keep = list(cols_rename.values()) + ["target"]
-                # df_test.index = pd.MultiIndex.from_arrays([[item_id] * len(df_test), df_test.index], names=["item_id", df_test.index.name])
-                test_data = TabularDataFrame(df_test[cols_to_keep])
+
+                test_data = self._prepare_dataframe(data.results[lt], item_id, quantiles)
 
                 test_results = {}
 
                 for q in quantiles:
-                    x_test = np.log(test_data[f"feature_{q}"].values.reshape(-1, 1) + self.epsilon)
-                    x_test = sm.add_constant(x_test)
+                    x_test = self._create_features(test_data, q)
 
                     # Retrieve the fitted model for the quantile and lead time
-                    model = self.qr_models.get((lt, item_id, q))
-                    if model is not None:
-                        predictions = model.predict(x_test)
-                        test_results[q] = np.exp(predictions) - self.epsilon
+                    model: sm.QuantReg = self.qr_models.get((lt, item_id, q))
                     if model is None:
                         raise ValueError(f"No model for lead time:{lt}, item_id: {item_id}, quantile:{q}.")
+                    else:
+                        predictions = model.predict(x_test)
+                        test_results[q] = np.exp(predictions) - self.epsilon
 
                 predictions = np.array(list(test_results.values())).T
                 predictions_item_ids.append(predictions)
