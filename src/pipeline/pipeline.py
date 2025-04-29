@@ -330,7 +330,9 @@ class ForecastingPipeline(AbstractPipeline):
 
         return {self.predictor.__class__.__name__: predictions}
 
-    def train_postprocessors(self, calibration_data: Union[TimeSeriesDataFrame, TabularDataFrame]) -> None:
+    def train_postprocessors(
+        self, calibration_data: Union[TimeSeriesDataFrame, TabularDataFrame], previous_context_data: Union[TimeSeriesDataFrame, TabularDataFrame, None] = None
+    ) -> None:
         """
         Fit the postprocessors based on calibration data.
 
@@ -353,7 +355,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # Generate calibration predictions
         logging.info("Running prediction on calibration data using the model: %s", self.predictor.__class__.__name__)
-        calibration_predictions = self.predictor.predict(calibration_data)
+        calibration_predictions = self.predictor.predict(calibration_data, previous_context_data)
         logging.info("Calibration predictions completed successfully.")
 
         # Fit postprocessors
