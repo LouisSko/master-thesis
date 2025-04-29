@@ -1,7 +1,7 @@
 from tqdm import tqdm
 import torch
 from autogluon.timeseries import TimeSeriesDataFrame
-from typing import List, Optional
+from typing import List, Optional, Dict, Literal
 import pandas as pd
 import numpy as np
 from src.core.base import AbstractPredictor
@@ -13,6 +13,25 @@ from pydantic import Field
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+
+
+class TargetScaler:
+    def __init__(self, method: Optional[Literal["log"]] = None, epsilon: float = 1e-6):
+        self.method = method
+        self.epsilon = epsilon
+        self.last_values: Dict[str, float] = {}  # for differencing
+
+    def transform(self, target: np.ndarray, item_id: Optional[str] = None) -> np.ndarray:
+        if self.method == "log":
+            return np.log(target + self.epsilon)
+        else:
+            return target
+
+    def inverse_transform(self, transformed: np.ndarray, item_id: Optional[str] = None) -> np.ndarray:
+        if self.method == "log":
+            return np.exp(transformed) - self.epsilon
+        else:
+            return transformed
 
 
 class QuantileRegression(AbstractPredictor):
@@ -45,6 +64,7 @@ class QuantileRegression(AbstractPredictor):
         self.quantiles = quantiles
         self.models_qr = {}
         self.epsilon = 100_000
+        self.target_scaler = TargetScaler(method="log", epsilon=100_000)
 
     def fit(self, data_train: PredictionLeadTimes, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
 
@@ -63,7 +83,7 @@ class QuantileRegression(AbstractPredictor):
                 for q in self.quantiles:
 
                     x_train = data_lt_item.drop(columns="target").astype(float).to_numpy()
-                    y_train = np.log(data_lt_item["target"].values + self.epsilon)
+                    y_train = self.target_scaler.transform(data_lt_item["target"].values)
                     # Add constant for intercept
                     x_train = sm.add_constant(x_train)
                     # fit model
@@ -94,7 +114,7 @@ class QuantileRegression(AbstractPredictor):
                     x_test = data_lt_item.drop(columns="target").astype(float).to_numpy()
                     x_test = sm.add_constant(x_test)
                     predictions = self.models_qr[(lt, item_id, q)].predict(x_test)
-                    test_results[q] = np.exp(predictions) - self.epsilon
+                    test_results[q] = self.target_scaler.inverse_transform(predictions)
 
                 predictions_complete = np.array(list(test_results.values())).T
                 predictions_item_ids.append(predictions_complete)
