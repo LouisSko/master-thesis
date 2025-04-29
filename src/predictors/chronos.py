@@ -196,9 +196,9 @@ class Chronos(AbstractPredictor):
         self.finetuning_hp_search_trials = finetuning_hp_search_trials
         self.lora = False
 
-        if self.prediction_length > 64:
-            logging.error("Maximum supported lead time is 64 currently.")
-            raise ValueError("Maximum supported lead time is 64 currently.")
+        #if self.prediction_length > 64:
+        #    logging.error("Maximum supported lead time is 64 currently.")
+        #    raise ValueError("Maximum supported lead time is 64 currently.")
 
         self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
