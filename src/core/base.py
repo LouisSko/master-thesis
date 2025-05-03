@@ -66,7 +66,7 @@ class AbstractPredictor(ABC):
 
             expected_next_time = last_prev_time + self.freq
             if expected_next_time != first_curr_time:
-                raise ValueError(f"Data for item_id '{item_id}' is not consecutive. " f"Expected {expected_next_time}, got {first_curr_time}.")
+                logging.warning(f"Data for item_id '{item_id}' is not consecutive. " f"Expected {expected_next_time}, got {first_curr_time}.")
 
         # add the context length to data
         previous_context_data = previous_context_data.loc[data.item_ids]
@@ -125,7 +125,8 @@ class AbstractPipeline(ABC):
             output directory for the pipeline.
         """
 
-        self.output_dir = Path(output_dir)
+        if output_dir:
+            self.output_dir = Path(output_dir)
         self.model = model
         self.model_kwargs = model_kwargs
         self.postprocessors = postprocessors
