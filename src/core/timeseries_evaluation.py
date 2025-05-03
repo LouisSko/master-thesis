@@ -104,7 +104,7 @@ class PredictionLeadTime(BaseModel):
     lead_time: int
     predictions: torch.Tensor  # Shape [num_samples, num_quantiles]
     quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
-    freq: pd.Timedelta
+    freq: Union[pd.Timedelta, pd.tseries.offsets.DateOffset]
     target: Optional[torch.Tensor] = None
     data: Union[TimeSeriesDataFrame, TabularDataFrame]
 
@@ -123,7 +123,8 @@ class PredictionLeadTime(BaseModel):
         """
 
         result = pd.DataFrame(self.predictions, index=self.data.index, columns=self.quantiles)
-        result["prediction_date"] = result.index.get_level_values("timestamp") + self.lead_time * self.freq
+
+        result["prediction_date"] = result.index.get_level_values("timestamp") + pd.tseries.frequencies.to_offset(self.freq) * self.lead_time
 
         # Reset index to turn MultiIndex into columns
         result_reset = result.reset_index()
@@ -676,7 +677,7 @@ def get_crps_by_period(
         subset_df = df[(df["timestamp"] > first_date) & (df["timestamp"] <= d)]
 
         # after = df[df["timestamp"] >= d]
-        results[f"{first_date}_to_{d}"] = subset_df.drop(columns=["item_id", "timestamp"]).mean()
+        results[f"{first_date.strftime("%d-%m-%Y")}_to_{d.strftime("%d-%m-%Y")}"] = subset_df.drop(columns=["item_id", "timestamp"]).mean()
         first_date = d
 
     return pd.DataFrame(results).T.round(3)

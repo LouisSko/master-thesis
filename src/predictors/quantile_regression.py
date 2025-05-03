@@ -185,7 +185,7 @@ class QuantileRegression(AbstractPredictor):
             self._add_cyclic_encoding(data_subset, "timestamp_Hour", 24)
 
             # === Features from PREDICTION date ===
-            data_subset["prediction_date"] = data_subset["timestamp"] + lead_time * freq
+            data_subset["prediction_date"] = data_subset["timestamp"] + lead_time * pd.tseries.frequencies.to_offset(freq)
             add_datepart(data_subset, "prediction_date", prefix="prediction_date_", drop=False)
             data_subset["prediction_date_Hour"] = data_subset["prediction_date"].dt.hour
             self._add_cyclic_encoding(data_subset, "prediction_date_Hour", 24)
