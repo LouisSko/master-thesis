@@ -9,7 +9,8 @@ from src.core.base import AbstractPredictor
 import logging
 from pydantic import Field
 from pathlib import Path
-
+from pandas.tseries.offsets import DateOffset
+from pandas.tseries.frequencies import to_offset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -21,172 +22,159 @@ class NNPredictor(AbstractPredictor):
     Parameters
     ----------
     quantiles : List[float], optional
-        List of quantiles to predict. Defaults to [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9].
+        List of quantiles to predict.
     lead_times : List[int], optional
-        List of lead times (in steps) for forecasting. Defaults to [1, 2, 3].
-    freq : pd.Timedelta, optional
-        Frequency of the time series data. Defaults to 1 hour.
+        List of lead times (in steps) for forecasting.
+    freq : Union[str, pd.Timedelta, DateOffset], optional
+        Frequency of the time series data; can be a pandas‐parsable string
+        (e.g. "1h","1D","1B","15T"), a Timedelta, or a DateOffset.
     last_n_samples : int, optional
-        Number of past samples to consider for prediction. Defaults to 10.
+        Number of past samples to consider for prediction.
     output_dir : Optional[Union[str, Path]], optional
-        Directory to store outputs. Defaults to None.
+        Directory to store outputs.
     """
 
     def __init__(
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: pd.Timedelta = pd.Timedelta("1h"),
+        freq: Union[str, pd.Timedelta, DateOffset] = "1h",
         last_n_samples: int = 10,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
-
-        super().__init__(lead_times, freq, output_dir)
+        # Normalize freq into a pandas DateOffset
+        self.offset = to_offset(freq)
+        super().__init__(lead_times=lead_times, freq=self.offset, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
-    def fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
-        """Fits the model by analyzing historical weekday-hour patterns in the time series data.
+        # Prepare bucket keys and key‐making function based on freq
+        self._setup_buckets()
 
-        Parameters
-        ----------
-        data_train : TimeSeriesDataFrame
-            time series data, indexed by item_id and timestamp.
-        data_val : TimeSeriesDataFrame
-            time series data, indexed by item_id and timestamp.
+    def _setup_buckets(self) -> None:
         """
-
-        logging.info("No fit needed. Can call predict directly. Only provide previous_context_data when calling predict().")
-
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
-        """Generates predictions for the specified future lead times using historical weekday-hour patterns.
-
-        Parameters
-        ----------
-        data : TimeSeriesDataFrame
-            Time series data for which to generate forecasts.
-        previous_context_data : TimeSeriesDataFrame, optional
-            Historical context data preceding `data`.
-        predict_only_last_timestep : bool, optional
-            Whether to predict only for the last timestamp of each series, by default False.
-
-        Returns
-        -------
-        PredictionLeadTimes
-            Object containing predictions for each lead time.
+        Build the list of all possible "bucket" keys and a function to
+        map any timestamp into its bucket, depending on self.offset.
         """
+        fstr = self.offset.freqstr  # e.g. "1H","B","15T","D"
+        code = fstr[-1]
 
-        if previous_context_data is not None:
-            logging.info("previous_context_data provided. Use this to build the weekday-hour dictionary.")
-            weekday_hour_value_dict = self._build_weekday_hour_dict(previous_context_data)
+        if code.upper() in ("D", "B"):
+            # daily or business‐day: bucket by weekday only
+            self._make_key = lambda ts: str(ts.weekday())
+            self.bucket_keys = [str(d) for d in range(7)]
+
+        elif code.upper() == "H":
+            # hourly: bucket by weekday_hour
+            self._make_key = lambda ts: f"{ts.weekday()}_{ts.hour}"
+            self.bucket_keys = [f"{d}_{h}" for d in range(7) for h in range(24)]
+
+        elif code.upper() == "T":
+            # minute frequency, e.g. 15T, 5T, etc.
+            n = self.offset.n  # number of minutes
+
+            def make_minute_key(ts: pd.Timestamp) -> str:
+                slot = ts.minute // n
+                return f"{ts.weekday()}_{ts.hour}_{slot}"
+
+            self._make_key = make_minute_key
+
+            slots_per_hour = 60 // n
+            self.bucket_keys = [f"{d}_{h}_{slot}" for d in range(7) for h in range(24) for slot in range(slots_per_hour)]
+
         else:
-            logging.info("No previous_context_data provided. Initialize empty weekday-hour dictionary.")
-            weekday_hour_value_dict = self._initialize_weekday_hour_dict(data.item_ids)
+            raise ValueError(f"Unsupported frequency '{fstr}' for NNPredictor")
 
-        predictions, self.weekday_hour_value_dict = self._forecast_from_weekday_hour_patterns(data, weekday_hour_value_dict)
+    def _initialize_history(self, item_ids: List[Any]) -> Dict[Any, Dict[str, np.ndarray]]:
+        """
+        Initialize an empty history dict for each item_id and bucket key.
+        """
+        return {item_id: {key: np.array([], dtype=float) for key in self.bucket_keys} for item_id in item_ids}
 
-        return predictions
+    def _build_history_from_context(self, context_data: TimeSeriesDataFrame) -> Dict[Any, Dict[str, np.ndarray]]:
+        """
+        Build initial history from provided context_data by grouping past targets
+        into buckets defined by self._make_key.
+        """
+        df = context_data.reset_index()
+        df["bucket"] = df["timestamp"].apply(self._make_key)
+        grouped = df.groupby(["item_id", "bucket"])["target"]
 
-    def _forecast_from_weekday_hour_patterns(
+        history = self._initialize_history(context_data.item_ids)
+        for (item_id, bucket), vals in grouped:
+            vals = vals.to_numpy()
+            history[item_id][bucket] = vals[~np.isnan(vals)]
+
+        return history
+
+    def fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+    ) -> None:
+        """
+        No fitting required—this predictor uses only historical patterns at predict time.
+        """
+        logging.info("NNPredictor: no fit step; predict() will build or update history.")
+
+    def predict(
         self,
         data: TimeSeriesDataFrame,
-        weekday_hour_value_dict: Dict[Any, Dict[str, np.ndarray]],
-    ) -> Tuple[PredictionLeadTimes, dict]:
-        """Forecasts values for each lead time by using past values that occurred in the same weekday-hour bucket.
-
-        It also updates the weekday_hour_value_dict
-
-        Parameters
-        ----------
-        data : TimeSeriesDataFrame
-            The input time series data to update internal state and generate forecasts.
-        weekday_hour_value_dict : Dict[Any, Dict[str, np.ndarray]]
-            Dictionary mapping each item ID to weekday-hour patterns of observed values.
-
-        Returns
-        -------
-        Tuple[PredictionLeadTimes, dict]
-            A tuple containing:
-            - PredictionLeadTimes object with forecasts for each lead time.
-            - Updated weekday_hour_value_dict containing the latest observed values.
+        previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        predict_only_last_timestep: bool = False,
+    ) -> PredictionLeadTimes:
         """
+        Generate quantile forecasts for each lead time based on nearest‐neighbour
+        bucketed by the normalized frequency offset.
+        """
+        if previous_context_data is not None:
+            logging.info("Building history from provided context_data.")
+            history = self._build_history_from_context(previous_context_data)
+        else:
+            logging.info("Initializing empty history.")
+            history = self._initialize_history(data.item_ids)
 
-        forecasts = {lt: [] for lt in self.lead_times}
-        results = {lt: {} for lt in self.lead_times}
+        forecasts, updated_history = self._forecast_from_history(data, history)
+        return forecasts
+
+    def _forecast_from_history(
+        self,
+        data: TimeSeriesDataFrame,
+        history: Dict[Any, Dict[str, np.ndarray]],
+    ) -> Tuple[PredictionLeadTimes, Dict[Any, Dict[str, np.ndarray]]]:
+        """
+        For each (item_id, timestamp), append the observed value to its bucket,
+        then predict future buckets at lead times via empirical quantiles.
+        """
+        forecasts: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
-        self.last_train_date = data.index.get_level_values("timestamp").max()
+        for (item_id, ts), row in tqdm(data.iterrows(), total=len(data)):
+            # update history now
+            if not np.isnan(row["target"].item()):
+                key_now = self._make_key(ts)
+                history[item_id][key_now] = np.append(history[item_id][key_now], row["target"].item())
 
-        for (item_id, timestamp), row in tqdm(data.iterrows(), total=len(data)):
+            # forecast for each lead time
+            for lt in self.lead_times:
+                pred_ts = ts + self.offset * lt
+                key_pred = self._make_key(pred_ts)
+                arr = history[item_id].get(key_pred, np.array([], dtype=float))
+                if arr.size == 0:
+                    q_vals = np.full(len(self.quantiles), np.nan)
+                else:
+                    recent = arr[-self.last_n_samples :] if self.last_n_samples else arr
+                    q_vals = np.percentile(recent, percentiles)
+                forecasts[lt].append(q_vals)
 
-            current_timestamp_id = f"{timestamp.weekday()}_{timestamp.hour}"
-            weekday_hour_value_dict[item_id][current_timestamp_id] = np.append(weekday_hour_value_dict[item_id][current_timestamp_id], row["target"].item())
-
-            for lt in forecasts.keys():
-                prediction_timestamp = timestamp + self.freq * lt
-                prediction_timestamp_id = f"{prediction_timestamp.weekday()}_{prediction_timestamp.hour}"
-
-                try:
-                    if self.last_n_samples:
-                        forecast = np.percentile(
-                            weekday_hour_value_dict[item_id][prediction_timestamp_id][-self.last_n_samples :],
-                            q=percentiles,
-                        )
-                    else:
-                        forecast = np.percentile(
-                            weekday_hour_value_dict[item_id][prediction_timestamp_id],
-                            q=percentiles,
-                        )
-                except:
-                    forecast = np.array(len(percentiles) * [np.nan])
-
-                forecasts[lt].append(forecast)
-
-        for lt in forecasts.keys():
+        # wrap into PredictionLeadTimes
+        results: Dict[int, PredictionLeadTime] = {}
+        for lt, fc_list in forecasts.items():
             results[lt] = PredictionLeadTime(
                 lead_time=lt,
-                predictions=torch.tensor(np.vstack(forecasts[lt])),
-                freq=self.freq,
+                predictions=torch.tensor(np.vstack(fc_list)),
+                freq=self.offset,
                 data=data,
             )
 
-        return PredictionLeadTimes(results=results), weekday_hour_value_dict
-
-    def _initialize_weekday_hour_dict(self, item_ids: list) -> Dict[str, Dict[str, np.ndarray]]:
-        """Initializes a dictionary with keys for each item and weekday-hour combination
-        (e.g., "0_0" to "6_23"), each mapping to an empty numpy array.
-
-        Parameters
-        ----------
-        item_ids : list
-            List of item IDs for which to create the dictionary.
-
-        Returns
-        -------
-        Dict[str, np.ndarray]
-            Dictionary where each item ID maps to another dictionary of weekday-hour keys and empty arrays.
-        """
-
-        hours = 24
-        weekdays = 7
-        weekday_hour_dict = {item_id: None for item_id in item_ids}
-        for item_id in item_ids:
-            weekday_hour_dict[item_id] = {f"{weekday}_{hour}": np.array([]) for weekday in range(weekdays) for hour in range(hours)}
-        return weekday_hour_dict
-
-    def _build_weekday_hour_dict(self, context_data: TimeSeriesDataFrame) -> Dict[str, Dict[str, np.ndarray]]:
-        """Builds a nested dictionary of past values grouped by item_id and weekday-hour."""
-
-        # Reset index to access item_id and timestamp easily
-        df = context_data.reset_index()
-        df["weekday_hour"] = df["timestamp"].dt.weekday.astype(str) + "_" + df["timestamp"].dt.hour.astype(str)
-
-        # Group by item_id and weekday_hour
-        grouped = df.groupby(["item_id", "weekday_hour"])["target"]
-
-        # Build the nested dictionary
-        result = self._initialize_weekday_hour_dict(context_data.item_ids)
-        for (item_id, wh), targets in grouped:
-            result[item_id][wh] = targets.to_numpy()
-
-        return result
+        return PredictionLeadTimes(results=results), history
