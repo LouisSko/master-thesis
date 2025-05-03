@@ -11,19 +11,37 @@ It supports:
 
 ## Setup
 
-### 1. Create Virtual Environment
+### 1. Clone repository
 ```bash
-python3.12 -m venv .venv
+git clone git@github.com:LouisSko/master-thesis.git
+cd master-thesis
 ```
 
-### 2. Activate Environment
+### 2. Create and Activate Virtual Environment
 ```bash
+python3.12 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Install Requirements
+### 3. Upgrade pip (optional but recommended)
+```bash
+pip install --upgrade pip
+```
+
+### 4. Install Requirements
 ```bash
 pip install -r requirements.txt
+```
+
+### 5. Clone Chronos-bolt on the `feature/sampling` branch
+```bash
+git clone --branch feature/sampling \
+  git@github.com:LouisSko/chronos-forecasting.git
+```
+
+### 6. Install in editable mode with extra training dependencies
+```bash
+cd chronos-forecasting && pip install --editable ".[training]"
 ```
 
 
@@ -58,6 +76,7 @@ pipeline = ForecastingPipeline(model=Chronos,
 ### Train, Predict, Postprocess 
 
 ```python
+
 data_train, data_val, data_test = pipeline.split_data(data=data, 
                                                       test_start_date=pd.Timestamp("01-01-2022"), 
                                                       train_window_size=None,
