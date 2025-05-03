@@ -162,6 +162,8 @@ class Chronos(AbstractPredictor):
         Number of timesteps used as context for prediction. Defaults to 2048.
     lead_times : List[int], optional
         List of prediction steps ahead (lead times). Defaults to [1, 2, 3].
+    sampling: bool, optional
+        Whether to sample multiple trajectories. Defaults to False.
     freq : pd.Timedelta, optional
         Frequency of the time series data. Defaults to 1 hour.
     finetuning_type : {"full", "last_layer", "LoRa"}, optional
@@ -180,6 +182,7 @@ class Chronos(AbstractPredictor):
         device_map: str = "mps",
         context_length: int = 2048,
         lead_times: List[int] = [1, 2, 3],
+        sampling: bool = False,
         freq: pd.Timedelta = pd.Timedelta("1h"),
         finetuning_type: Literal["full", "last_layer", "LoRa"] = "full",
         finetuning_hp_search: Optional[bool] = False,
@@ -195,6 +198,7 @@ class Chronos(AbstractPredictor):
         self.finetuning_hp_search = finetuning_hp_search
         self.finetuning_hp_search_trials = finetuning_hp_search_trials
         self.lora = False
+        self.sampling = sampling
 
         #if self.prediction_length > 64:
         #    logging.error("Maximum supported lead time is 64 currently.")
@@ -349,13 +353,16 @@ class Chronos(AbstractPredictor):
             # Make predictions for all timestamps of the test data
             ds = ChronosBacktestingDataset(data_merged, self.context_length)
 
-        dl = DataLoader(ds, batch_size=64)
+        dl = DataLoader(ds, batch_size=16)
 
         results = {ld: None for ld in self.lead_times}
         forecasts = []
 
         for batch in tqdm(dl, desc="Predicting"):
-            forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
+            if self.sampling:
+                forecast = self.pipeline.predict_sampling(context=batch, prediction_length=self.prediction_length)
+            else:
+                forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
             forecasts.append(forecast)
 
         forecasts = torch.vstack(forecasts)
