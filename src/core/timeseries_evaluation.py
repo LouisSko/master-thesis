@@ -552,6 +552,7 @@ def get_crps_scores(
     scores = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, item_ids=item_ids) for pred in predictions.values()], axis=0).T
     scores.columns = [key for key in predictions.keys()]
     scores.index.name = "lead times"
+    scores.loc["mean CRPS", :] = scores.mean(axis=0)
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
     return scores.round(3)
