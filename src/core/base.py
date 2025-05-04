@@ -22,7 +22,7 @@ class AbstractPredictor(ABC):
         self.lead_times = lead_times
         self.freq = freq
         self.output_dir = None
-        if self.output_dir:
+        if output_dir:
             self.output_dir = Path(output_dir)
 
     @abstractmethod
