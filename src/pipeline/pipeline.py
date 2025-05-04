@@ -426,6 +426,8 @@ class ForecastingPipeline(AbstractPipeline):
         else:
             logging.info("Skipping model training because `train=False`.")
 
+        predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
+
         if self.postprocessors is not None:
             if calibration_based_on == "val":
                 calibration_data = data_val
@@ -437,7 +439,6 @@ class ForecastingPipeline(AbstractPipeline):
                 raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
 
             self.train_postprocessors(calibration_data)
-            predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
             predictions = self.apply_postprocessing(predictions)
 
         return predictions
