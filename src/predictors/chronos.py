@@ -617,7 +617,7 @@ def create_trainer_kwargs(path: str = Path("./models/test/"), eval_during_fine_t
         "save_steps": save_eval_steps if save_checkpoints else None,
         "save_only_model": True,
         "save_total_limit": 5,
-        "evaluation_strategy": "steps" if eval_during_fine_tune else "no",
+        "eval_strategy": "steps" if eval_during_fine_tune else "no",
         "eval_steps": save_eval_steps if eval_during_fine_tune else None,
         "eval_on_start": True if eval_during_fine_tune else False,
         "load_best_model_at_end": True if eval_during_fine_tune else False,
