@@ -4,7 +4,7 @@ from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTi
 import torch
 from typing import Dict
 from copy import deepcopy
-
+from tqdm import tqdm
 
 class PostprocessorEQC(AbstractPostprocessor):
     """
@@ -66,7 +66,7 @@ class PostprocessorEQC(AbstractPostprocessor):
         """
 
         data = deepcopy(data)
-        for lt, preds in data.results.items():
+        for lt, preds in tqdm(data.results.items(), desc="Fitting EQC Postprocessor"):
             self.conf_thresholds_lt[lt] = self._empirical_quantile_offset(preds)
 
     def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:

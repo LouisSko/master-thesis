@@ -36,7 +36,7 @@ class PostprocessorMLE(AbstractPostprocessor):
 
         lead_times = data.results.keys()
 
-        for lt in tqdm(lead_times):
+        for lt in tqdm(lead_times, desc="Fitting MLE Postprocessor"):
             self.params[lt] = {}
             for item_id in data.results[lt].data.item_ids:
                 df = data.results[lt].to_dataframe(item_ids=[item_id]).iloc[ignore_first_n:].dropna()

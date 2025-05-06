@@ -41,7 +41,7 @@ class PostprocessorQR(AbstractPostprocessor):
 
         # Fit model for each lead time, timeseries (item_id) and quantile
         self.qr_models = {}  # Reset the models
-        for lt, results in tqdm(data.results.items()):
+        for lt, results in tqdm(data.results.items(), desc="Fitting QR Postprocessor"):
 
             # extract quantiles and item_ids
             quantiles = results.quantiles
