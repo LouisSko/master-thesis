@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scoringrules as sr
 from scipy.interpolate import interp1d
+from pydantic import BaseModel, Field, field_validator
 from autogluon.timeseries import TimeSeriesDataFrame
 import math
 import matplotlib.dates as mdates
@@ -109,6 +110,18 @@ class PredictionLeadTime(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+    @field_validator("predictions")
+    @classmethod
+    def make_predictions_contiguous(cls, pred: torch.Tensor) -> torch.Tensor:
+        return pred.contiguous() if not pred.is_contiguous() else pred
+
+    @field_validator("target")
+    @classmethod
+    def make_target_contiguous(cls, target: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if target is not None and not target.is_contiguous():
+            return target.contiguous()
+        return target
 
     def to_dataframe(self, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """
@@ -330,7 +343,7 @@ class PredictionLeadTimes(BaseModel):
         if mean_lead_times:
             crps_scores = pd.DataFrame(crps_scores.mean(axis=1), columns=["Mean CRPS"])
         else:
-            crps_scores.loc[:,"Mean CRPS"] = crps_scores.mean(axis=1)
+            crps_scores.loc[:, "Mean CRPS"] = crps_scores.mean(axis=1)
 
         return crps_scores.round(2)
 
