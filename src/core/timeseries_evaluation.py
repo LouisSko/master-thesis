@@ -7,7 +7,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scoringrules as sr
 from scipy.interpolate import interp1d
-from pydantic import BaseModel, Field
 from autogluon.timeseries import TimeSeriesDataFrame
 import math
 import matplotlib.dates as mdates
@@ -330,6 +329,8 @@ class PredictionLeadTimes(BaseModel):
 
         if mean_lead_times:
             crps_scores = pd.DataFrame(crps_scores.mean(axis=1), columns=["Mean CRPS"])
+        else:
+            crps_scores.loc[:,"Mean CRPS"] = crps_scores.mean(axis=1)
 
         return crps_scores.round(2)
 
@@ -552,7 +553,6 @@ def get_crps_scores(
     scores = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, item_ids=item_ids) for pred in predictions.values()], axis=0).T
     scores.columns = [key for key in predictions.keys()]
     scores.index.name = "lead times"
-    scores.loc["mean CRPS", :] = scores.mean(axis=0)
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
     return scores.round(3)

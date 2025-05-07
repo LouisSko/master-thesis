@@ -501,7 +501,7 @@ class ForecastingPipeline(AbstractPipeline):
             # Add information
             eval_config_info = {}
             eval_config_info = {"applied_postprocessor": None if method == "raw" else method}
-            eval_config_info.update(result.get_crps(mean_lead_times=True, mean_time=True).to_dict())
+            eval_config_info.update(result.get_crps(mean_time=True).to_dict())
             eval_config_info.update(result.get_empirical_coverage_rates(mean_lead_times=True).to_dict())
             eval_config_info.update(result.get_quantile_scores(mean_lead_times=True).to_dict())
             config = self.get_config(backtest_params, eval_config_info)
