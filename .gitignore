@@ -121,7 +121,7 @@ Icon?
 # Environment
 *.env
 .env.*
-.venv.*
+.venv*
 *.venv
 
 config.txt
