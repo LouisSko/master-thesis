@@ -42,16 +42,12 @@ class PostprocessorEQC(AbstractPostprocessor):
         for item_id in predictions.data.item_ids:
             conformalized_thresholds[item_id] = {}
 
-            df = predictions.to_dataframe(item_ids=[item_id]).copy()
+            df = predictions.to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].copy()
             df = df.dropna()
 
             for q in predictions.quantiles:
                 scores = df["target"] - df[q]
                 conformalized_thresholds[item_id][q] = np.quantile(scores, q=q)
-
-                # q_preds_conf = q_pred + threshold
-                # scores = y_true-q_preds_conf
-                # coverage = (scores>0).mean()
 
         return conformalized_thresholds
 
@@ -65,7 +61,6 @@ class PostprocessorEQC(AbstractPostprocessor):
             Predictions used for calibration.
         """
 
-        data = deepcopy(data)
         for lt, preds in tqdm(data.results.items(), desc="Fitting EQC Postprocessor"):
             self.conf_thresholds_lt[lt] = self._empirical_quantile_offset(preds)
 

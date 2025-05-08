@@ -12,12 +12,11 @@ from typing import List
 class PostprocessorQR(AbstractPostprocessor):
     def __init__(self) -> None:
         super().__init__()
-        self.ignore_first_n_train_entries = 500
         self.epsilon = 100_000
         self.qr_models = {}
 
-    def _create_features(self, data: TabularDataFrame, q: float) -> np.ndarray:
-
+    def _create_features2(self, data: TabularDataFrame, q: float) -> np.ndarray:
+        """Creates Features for Quantile Regression"""
         log_q = np.log(data[f"feature_{q}"] + self.epsilon)
         log_iqr = np.log(data["feature_0.8"] - data["feature_0.2"])
         x_train = np.column_stack((log_q, log_iqr))
@@ -26,9 +25,20 @@ class PostprocessorQR(AbstractPostprocessor):
         x_train = sm.add_constant(x_train)
         return x_train
 
-    def _prepare_dataframe(self, result_lead_time: PredictionLeadTime, item_id: int, quantiles: List[float]) -> TabularDataFrame:
+    def _create_features(self, data: TabularDataFrame, q: float) -> np.ndarray:
+        """Creates Features for Quantile Regression"""
+        log_q = np.log(data[f"feature_{q}"] + self.epsilon)
+        x_train = np.array(log_q).reshape(-1,1)
+        x_train = sm.add_constant(x_train)
+        return x_train
+    
+    def _prepare_dataframe(self, result_lead_time: PredictionLeadTime, item_id: int, quantiles: List[float], train: bool = False) -> TabularDataFrame:
+        """Creates Dataframe from Predictions"""
+        if train:
+            data = result_lead_time.to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].dropna()
+        else:
+            data = result_lead_time.to_dataframe(item_ids=[item_id])
 
-        data = result_lead_time.to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].dropna()
         cols_rename = {q: f"feature_{q}" for q in quantiles}
         data = data.rename(columns=cols_rename)
         cols_to_keep = list(cols_rename.values()) + ["target"]
@@ -50,7 +60,7 @@ class PostprocessorQR(AbstractPostprocessor):
             for item_id in item_ids:
                 for q in quantiles:
                     # Prepare the training data
-                    train_data = self._prepare_dataframe(results, item_id, quantiles)
+                    train_data = self._prepare_dataframe(results, item_id, quantiles, True)
 
                     y_train = np.log(train_data["target"].values + self.epsilon)
                     x_train = self._create_features(train_data, q)
@@ -77,7 +87,7 @@ class PostprocessorQR(AbstractPostprocessor):
 
             for item_id in item_ids:
 
-                test_data = self._prepare_dataframe(results, item_id, quantiles)
+                test_data = self._prepare_dataframe(results, item_id, quantiles, False)
 
                 test_results = {}
 

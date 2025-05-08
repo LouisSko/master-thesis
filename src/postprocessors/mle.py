@@ -32,14 +32,13 @@ class PostprocessorMLE(AbstractPostprocessor):
             including quantile predictions and true target values.
         """
         self.params = {}
-        ignore_first_n = 500
 
         lead_times = data.results.keys()
 
         for lt in tqdm(lead_times, desc="Fitting MLE Postprocessor"):
             self.params[lt] = {}
             for item_id in data.results[lt].data.item_ids:
-                df = data.results[lt].to_dataframe(item_ids=[item_id]).iloc[ignore_first_n:].dropna()
+                df = data.results[lt].to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries:].dropna()
                 quantiles = data.results[lt].quantiles
 
                 log_df = np.log(df[quantiles + ["target"]] + self.epsilon)

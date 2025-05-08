@@ -90,7 +90,7 @@ class AbstractPredictor(ABC):
 
 class AbstractPostprocessor(ABC):
     def __init__(self) -> None:
-        pass
+        self.ignore_first_n_train_entries = 500
 
     @abstractmethod
     def fit(self, data: PredictionLeadTimes) -> None:
