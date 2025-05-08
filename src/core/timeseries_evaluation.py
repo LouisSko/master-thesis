@@ -114,7 +114,10 @@ class PredictionLeadTime(BaseModel):
     @field_validator("predictions")
     @classmethod
     def make_predictions_contiguous(cls, pred: torch.Tensor) -> torch.Tensor:
-        return pred.contiguous() if not pred.is_contiguous() else pred
+        pred = pred.contiguous() if not pred.is_contiguous() else pred
+        pred = pred.sort(dim=1)[0] # avoid quantile crossing. TODO: could be improved
+        
+        return pred
 
     @field_validator("target")
     @classmethod
