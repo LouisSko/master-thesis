@@ -358,7 +358,7 @@ class Chronos(AbstractPredictor):
         results = {ld: None for ld in self.lead_times}
         forecasts = []
 
-        for batch in tqdm(dl, desc="Predicting"):
+        for batch in tqdm(dl, desc="Predicting using Chronos"):
             if self.sampling:
                 forecast = self.pipeline.predict_sampling(context=batch, prediction_length=self.prediction_length)
             else:

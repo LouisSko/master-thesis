@@ -149,7 +149,7 @@ class NNPredictor(AbstractPredictor):
         forecasts: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
-        for (item_id, ts), row in tqdm(data.iterrows(), total=len(data)):
+        for (item_id, ts), row in tqdm(data.iterrows(), total=len(data), desc= "Predicting using Nearest Neighbour"):
             # update history now
             if not np.isnan(row["target"].item()):
                 key_now = self._make_key(ts)

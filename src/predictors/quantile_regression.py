@@ -71,7 +71,7 @@ class QuantileRegression(AbstractPredictor):
         if data_val is not None:
             logging.info("data_val is not used. No Hyperparameter tuning is applied.")
 
-        for lt in tqdm(self.lead_times):
+        for lt in tqdm(self.lead_times, desc="Fitting Quantile Regression"):
 
             data_lt = self._create_cyclic_features(data_train, lt, dropna=True)
 
@@ -97,7 +97,7 @@ class QuantileRegression(AbstractPredictor):
 
         results = {ld: None for ld in self.lead_times}
 
-        for lt in tqdm(self.lead_times):
+        for lt in tqdm(self.lead_times, desc="Predicting using Quantile Regression"):
 
             data_lt = self._create_cyclic_features(data, lt, dropna=False)
 
