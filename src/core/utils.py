@@ -103,7 +103,6 @@ class CustomJSONEncoder(json.JSONEncoder):
             return o.kwds
 
         if isinstance(o, Path):
-            # Serialize DateOffset as its keyword arguments
             return str(o)
 
         return super().default(o)
