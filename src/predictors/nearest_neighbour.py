@@ -9,8 +9,8 @@ from src.core.base import AbstractPredictor
 import logging
 from pydantic import Field
 from pathlib import Path
-from pandas.tseries.offsets import DateOffset
 from pandas.tseries.frequencies import to_offset
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -38,13 +38,13 @@ class NNPredictor(AbstractPredictor):
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[str, pd.Timedelta, DateOffset] = "1h",
+        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         last_n_samples: int = 10,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
         # Normalize freq into a pandas DateOffset
         self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, freq=self.offset, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
@@ -149,7 +149,7 @@ class NNPredictor(AbstractPredictor):
         forecasts: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
-        for (item_id, ts), row in tqdm(data.iterrows(), total=len(data), desc= "Predicting using Nearest Neighbour"):
+        for (item_id, ts), row in tqdm(data.iterrows(), total=len(data), desc="Predicting using Nearest Neighbour"):
             # update history now
             if not np.isnan(row["target"].item()):
                 key_now = self._make_key(ts)

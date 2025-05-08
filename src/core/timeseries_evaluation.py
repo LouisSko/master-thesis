@@ -104,7 +104,7 @@ class PredictionLeadTime(BaseModel):
     lead_time: int
     predictions: torch.Tensor  # Shape [num_samples, num_quantiles]
     quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
-    freq: Union[pd.Timedelta, pd.tseries.offsets.DateOffset]
+    freq: Union[pd.Timedelta, pd.DateOffset]
     target: Optional[torch.Tensor] = None
     data: Union[TimeSeriesDataFrame, TabularDataFrame]
 
@@ -113,10 +113,9 @@ class PredictionLeadTime(BaseModel):
 
     @field_validator("predictions")
     @classmethod
-    def make_predictions_contiguous(cls, pred: torch.Tensor) -> torch.Tensor:
+    def check_predictions(cls, pred: torch.Tensor) -> torch.Tensor:
         pred = pred.contiguous() if not pred.is_contiguous() else pred
-        pred = pred.sort(dim=1)[0] # avoid quantile crossing. TODO: could be improved
-        
+        pred = pred.sort(dim=1)[0]  # avoid quantile crossing. TODO: potentially shouldn't be done silently
         return pred
 
     @field_validator("target")
@@ -139,7 +138,7 @@ class PredictionLeadTime(BaseModel):
 
         result = pd.DataFrame(self.predictions, index=self.data.index, columns=self.quantiles)
 
-        result["prediction_date"] = result.index.get_level_values("timestamp") + pd.tseries.frequencies.to_offset(self.freq) * self.lead_time
+        result["prediction_date"] = result.index.get_level_values("timestamp") + self.freq * self.lead_time
 
         # Reset index to turn MultiIndex into columns
         result_reset = result.reset_index()

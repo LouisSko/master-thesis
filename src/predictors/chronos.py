@@ -183,7 +183,7 @@ class Chronos(AbstractPredictor):
         context_length: int = 2048,
         lead_times: List[int] = [1, 2, 3],
         sampling: bool = False,
-        freq: pd.Timedelta = pd.Timedelta("1h"),
+        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         finetuning_type: Literal["full", "last_layer", "LoRa"] = "full",
         finetuning_hp_search: Optional[bool] = False,
         finetuning_hp_search_trials: Optional[int] = 10,

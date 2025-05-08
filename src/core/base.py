@@ -15,7 +15,7 @@ class AbstractPredictor(ABC):
     def __init__(
         self,
         lead_times: List[int] = [1, 2, 3],
-        freq: pd.Timedelta = pd.Timedelta("1h"),
+        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
 
