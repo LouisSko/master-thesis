@@ -22,14 +22,14 @@ class PostprocessorQR(AbstractPostprocessor):
         x_train = np.column_stack((log_q, log_iqr))
 
         # x_train = np.log(data[f"feature_{q}"].values.reshape(-1, 1) + self.epsilon)
-        x_train = sm.add_constant(x_train)
+        x_train = sm.add_constant(x_train, has_constant="add")
         return x_train
 
     def _create_features(self, data: TabularDataFrame, q: float) -> np.ndarray:
         """Creates Features for Quantile Regression"""
         log_q = np.log(data[f"feature_{q}"] + self.epsilon)
         x_train = np.array(log_q).reshape(-1,1)
-        x_train = sm.add_constant(x_train)
+        x_train = sm.add_constant(x_train, has_constant="add")
         return x_train
     
     def _prepare_dataframe(self, result_lead_time: PredictionLeadTime, item_id: int, quantiles: List[float], train: bool = False) -> TabularDataFrame:
