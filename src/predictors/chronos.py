@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 import numpy as np
 from src.core.base import AbstractPredictor
 import logging
-from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
 from optuna.trial import Trial
 from pathlib import Path
 from transformers.trainer import TrainingArguments
@@ -200,7 +200,7 @@ class Chronos(AbstractPredictor):
         self.lora = False
         self.sampling = sampling
 
-        #if self.prediction_length > 64:
+        # if self.prediction_length > 64:
         #    logging.error("Maximum supported lead time is 64 currently.")
         #    raise ValueError("Maximum supported lead time is 64 currently.")
 
@@ -323,12 +323,12 @@ class Chronos(AbstractPredictor):
         self.pipeline = self._pipeline_init(output_dir_fine_tuning / "fine-tuned-ckpt")
         logging.info("Trained model is automatically loaded from checkpoint.")
 
-    def predict(
+    def predict2(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         predict_only_last_timestep: bool = False,
-    ) -> PredictionLeadTimes:
+    ) -> ForecastCollection:
         """Predicts future values for the given time series data using a pretrained Chronos model.
 
         Parameters:
@@ -337,7 +337,7 @@ class Chronos(AbstractPredictor):
             previous_context_data (Optional[TimeSeriesDataFrame]): Optional preceding data to provide context.
 
         Returns:
-            PredictionLeadTimes: A dictionary-like object containing lead-time-specific predictions.
+            ForecastCollection: A dictionary-like object containing lead-time-specific predictions.
         """
 
         # Add previous context to test data if available
@@ -373,9 +373,69 @@ class Chronos(AbstractPredictor):
             forecasts = forecasts[mask, ...]
 
         for lt in self.lead_times:
-            results[lt] = PredictionLeadTime(lead_time=lt, predictions=forecasts[..., lt - 1], freq=self.freq, data=data)
+            results[lt] = TimeSeriesForecast(lead_time=lt, predictions=forecasts[..., lt - 1], freq=self.freq, data=data)
 
-        return PredictionLeadTimes(results=results)
+        return ForecastCollection(results=results)
+
+    def predict(
+        self,
+        data: TimeSeriesDataFrame,
+        previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        predict_only_last_timestep: bool = False,
+    ) -> ForecastCollection:
+        """Predicts future values for the given time series data using a pretrained Chronos model.
+
+        Parameters:
+            data (TimeSeriesDataFrame): The target data to forecast.
+            predict_only_last_timestep (bool): Whether to forecast only the last timestep of each series.
+            previous_context_data (Optional[TimeSeriesDataFrame]): Optional preceding data to provide context.
+
+        Returns:
+            PredictionCollection: A nested dict structure holding item_id -> lead_time -> TimeSeriesForecast.
+        """
+
+        if previous_context_data is not None:
+            data_merged = self._merge_data(data, previous_context_data, self.context_length)
+        else:
+            data_merged = data
+
+        if predict_only_last_timestep:
+            ds = ChronosInferenceDataset(data_merged, self.context_length)
+            data = data.slice_by_timestep(start_index=-1)
+        else:
+            ds = ChronosBacktestingDataset(data_merged, self.context_length)
+
+        dl = DataLoader(ds, batch_size=16)
+
+        forecasts = []
+        for batch in tqdm(dl, desc="Predicting using Chronos"):
+            if self.sampling:
+                forecast = self.pipeline.predict_sampling(context=batch, prediction_length=self.prediction_length)
+            else:
+                forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
+            forecasts.append(forecast)
+
+        forecasts = torch.vstack(forecasts)
+
+        if not predict_only_last_timestep:
+            mask = data_merged.index.isin(data.index)
+            forecasts = forecasts[mask, ...]
+
+        ts_forecast: Dict[int, TimeSeriesForecast] = {}
+
+        for item_id in data.item_ids:
+            lt_forcast: Dict[int, HorizonForecast] = {}
+            item_mask = data.index.get_level_values("item_id") == item_id
+            for lt in self.lead_times:
+                lt_forcast[lt] = HorizonForecast(
+                    lead_time=lt,
+                    predictions=forecasts[item_mask, :, lt - 1],
+                    freq=self.freq,
+                    data=data.loc[item_mask].copy(),
+                )
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast)
+
+        return ForecastCollection(items=ts_forecast)
 
 
 ############## Functions for fine tuning and hp optimization ##############

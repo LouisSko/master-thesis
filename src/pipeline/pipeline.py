@@ -1,6 +1,6 @@
 import torch
 from typing import Dict, Any, List, Optional, Type, Union, Literal, Tuple
-from src.core.timeseries_evaluation import PredictionLeadTime, PredictionLeadTimes, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS
 from src.core.base import AbstractPostprocessor, AbstractPredictor
 from src.core.utils import CustomJSONEncoder
 from autogluon.timeseries import TimeSeriesDataFrame
@@ -135,7 +135,7 @@ class ForecastingPipeline(AbstractPipeline):
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         save_results: bool = False,
-    ) -> PredictionLeadTimes:
+    ) -> Dict[str, ForecastCollection]:
         """
         Run a backtest over the specified time period.
 
@@ -164,7 +164,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         Returns
         -------
-        PredictionLeadTimes
+        ForecastCollection
             The predictions over the backtest period.
         """
 
@@ -301,7 +301,7 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-    ) -> Dict[str, PredictionLeadTimes]:
+    ) -> Dict[str, ForecastCollection]:
         """
         predict on the test data.
 
@@ -313,7 +313,7 @@ class ForecastingPipeline(AbstractPipeline):
             The previous context data. This is used by some predictors.
         Returns
         -------
-        Dict[str, PredictionLeadTimes]
+        Dict[str, ForecastCollection]
             Dictionary with raw predictions.
         """
 
@@ -373,18 +373,18 @@ class ForecastingPipeline(AbstractPipeline):
         end_time = pd.Timestamp.now()
         logging.info("Postprocessors training completed in %s seconds.", (end_time - start_time).total_seconds())
 
-    def apply_postprocessing(self, predictions: Dict[str, PredictionLeadTimes]) -> Dict[str, PredictionLeadTimes]:
+    def apply_postprocessing(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
         """
         Apply postprocessing to predictions.
 
         Parameters
         ----------
-        predictions : Dict[str, PredictionLeadTimes]
+        predictions : Dict[str, ForecastCollection]
             The predictions. Keys correspond to the utilized model, e.g. `Chronos` or `QuantileRegression`
 
         Returns
         -------
-        Dict[str, PredictionLeadTimes]
+        Dict[str, ForecastCollection]
             Dictionary with processed predictions.
         """
         if not self.postprocessors:
@@ -416,7 +416,7 @@ class ForecastingPipeline(AbstractPipeline):
         val_window_size: Optional[pd.DateOffset],
         test_window_size: Optional[pd.DateOffset],
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
-    ) -> Dict[str, PredictionLeadTimes]:
+    ) -> Dict[str, ForecastCollection]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
 
         data_train, data_val, data_test = self.split_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
@@ -443,7 +443,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         return predictions
 
-    def _merge_results(self, results: Dict[pd.Timestamp, Dict[str, PredictionLeadTimes]]) -> Dict[str, PredictionLeadTimes]:
+    def _merge_results(self, results: Dict[pd.Timestamp, Dict[str, ForecastCollection]]) -> Dict[str, ForecastCollection]:
 
         logging.info("Merging test results from the %s different runs: %s", len(results.keys()), list(results.keys()))
 
@@ -465,7 +465,7 @@ class ForecastingPipeline(AbstractPipeline):
 
             results_merged = {}
 
-            # create merged PredictionLeadTimes object by merging individual PredictionLeadTime objects
+            # create merged ForecastCollection object by merging individual TimeSeriesForecast objects
             for lt in lead_times:
                 results_lead_time = [result.results[lt] for result in pp_results.values()]
 
@@ -480,15 +480,15 @@ class ForecastingPipeline(AbstractPipeline):
                 elif all(isinstance(result.data, TimeSeriesDataFrame) for result in results_lead_time):
                     d = TimeSeriesDataFrame(d)
 
-                results_merged[lt] = PredictionLeadTime(lead_time=l, freq=f, quantiles=q, predictions=p, data=d)
+                results_merged[lt] = TimeSeriesForecast(lead_time=l, freq=f, quantiles=q, predictions=p, data=d)
 
-                results_all[postprocessor_name] = PredictionLeadTimes(results=results_merged)
+                results_all[postprocessor_name] = ForecastCollection(results=results_merged)
 
         logging.info("Merging completed")
 
         return results_all
 
-    def _save_backtest_results(self, results: Dict[str, PredictionLeadTimes], backtest_params: Dict) -> None:
+    def _save_backtest_results(self, results: Dict[str, ForecastCollection], backtest_params: Dict) -> None:
         """Save backtest results and config."""
 
         logging.info("Storing backtest results...")
@@ -516,7 +516,7 @@ class ForecastingPipeline(AbstractPipeline):
 
 
 # check if all lead times, quantiles and freq are the same
-def _get_common_attr(results: List[PredictionLeadTime], attr: str) -> Any:
+def _get_common_attr(results: List[TimeSeriesForecast], attr: str) -> Any:
     values = [getattr(result, attr) for result in results]
     if all(val == values[0] for val in values):
         return values[0]
@@ -524,15 +524,15 @@ def _get_common_attr(results: List[PredictionLeadTime], attr: str) -> Any:
         raise ValueError(f"Not all {attr}s match.")
 
 
-def _get_lead_time(results: List[PredictionLeadTime]) -> int:
+def _get_lead_time(results: List[TimeSeriesForecast]) -> int:
     return _get_common_attr(results, "lead_time")
 
 
-def _get_freq(results: List[PredictionLeadTime]) -> pd.Timedelta:
+def _get_freq(results: List[TimeSeriesForecast]) -> pd.Timedelta:
     return _get_common_attr(results, "freq")
 
 
-def _get_quantiles(results: List[PredictionLeadTime]) -> List[float]:
+def _get_quantiles(results: List[TimeSeriesForecast]) -> List[float]:
     return _get_common_attr(results, "quantiles")
 
 

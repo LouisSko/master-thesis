@@ -1,11 +1,9 @@
 import numpy as np
 import statsmodels.api as sm
-from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 import torch
 from tqdm import tqdm
 from src.core.base import AbstractPostprocessor
-from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
-import pandas as pd
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame
 from typing import List
 
 
@@ -14,6 +12,13 @@ class PostprocessorQR(AbstractPostprocessor):
         super().__init__()
         self.epsilon = 100_000
         self.qr_models = {}
+
+    def _create_features(self, data: TabularDataFrame, q: float) -> np.ndarray:
+        """Creates Features for Quantile Regression"""
+        log_q = np.log(data[f"feature_{q}"] + self.epsilon)
+        x_train = np.array(log_q).reshape(-1, 1)
+        x_train = sm.add_constant(x_train, has_constant="add")
+        return x_train
 
     def _create_features2(self, data: TabularDataFrame, q: float) -> np.ndarray:
         """Creates Features for Quantile Regression"""
@@ -25,19 +30,12 @@ class PostprocessorQR(AbstractPostprocessor):
         x_train = sm.add_constant(x_train, has_constant="add")
         return x_train
 
-    def _create_features(self, data: TabularDataFrame, q: float) -> np.ndarray:
-        """Creates Features for Quantile Regression"""
-        log_q = np.log(data[f"feature_{q}"] + self.epsilon)
-        x_train = np.array(log_q).reshape(-1,1)
-        x_train = sm.add_constant(x_train, has_constant="add")
-        return x_train
-    
-    def _prepare_dataframe(self, result_lead_time: PredictionLeadTime, item_id: int, quantiles: List[float], train: bool = False) -> TabularDataFrame:
+    def _prepare_dataframe(self, result_lead_time: HorizonForecast, quantiles: List[float], train: bool = False) -> TabularDataFrame:
         """Creates Dataframe from Predictions"""
         if train:
-            data = result_lead_time.to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].dropna()
+            data = result_lead_time.to_dataframe().iloc[self.ignore_first_n_train_entries :].dropna()
         else:
-            data = result_lead_time.to_dataframe(item_ids=[item_id])
+            data = result_lead_time.to_dataframe()
 
         cols_rename = {q: f"feature_{q}" for q in quantiles}
         data = data.rename(columns=cols_rename)
@@ -46,71 +44,64 @@ class PostprocessorQR(AbstractPostprocessor):
 
         return TabularDataFrame(data)
 
-    def fit(self, data: PredictionLeadTimes) -> None:
+    def fit(self, data: ForecastCollection) -> None:
         """Fit the quantile regression models for each lead time and quantile."""
 
         # Fit model for each lead time, timeseries (item_id) and quantile
-        self.qr_models = {}  # Reset the models
-        for lt, results in tqdm(data.results.items(), desc="Fitting QR Postprocessor"):
+        self.qr_models = {}
+        for item_id in tqdm(data.get_item_ids(), desc="Fitting QR Postprocessor for each time series (item)"):
+            self.qr_models[item_id] = {}
+            item = data.get_time_series_forecast(item_id)
+            for lead_time in item.get_lead_times():
+                self.qr_models[item_id][lead_time] = {}
+                lt_item = item.get_lead_time_forecast(lead_time)
 
-            # extract quantiles and item_ids
-            quantiles = results.quantiles
-            item_ids = results.data.item_ids
-
-            for item_id in item_ids:
-                for q in quantiles:
+                #### specific code #####
+                for q in lt_item.quantiles:
                     # Prepare the training data
-                    train_data = self._prepare_dataframe(results, item_id, quantiles, True)
-
+                    train_data = self._prepare_dataframe(lt_item, lt_item.quantiles, True)
                     y_train = np.log(train_data["target"].values + self.epsilon)
                     x_train = self._create_features(train_data, q)
-
                     # Fit quantile regression model for each quantile
                     model = sm.QuantReg(y_train, x_train)
-                    self.qr_models[(lt, item_id, q)] = model.fit(q=q, max_iter=2000)
+                    self.qr_models[item_id][lead_time][q] = model.fit(q=q, max_iter=2000)
+                #### specific code #####
 
-    def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:
+    def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """Apply the fitted quantile regression models to generate predictions on the test data."""
 
-        postprocessing_results = {}
+        results_item_ids = {}
 
-        for lt, results in tqdm(data.results.items()):
+        for item_id in tqdm(data.get_item_ids(), desc="Updating Forecasts using QR Postprocessor."):
+            results_lt = {}
+            item = data.get_time_series_forecast(item_id)
+            for lead_time in item.get_lead_times():
+                lt_item = item.get_lead_time_forecast(lead_time)
 
-            # extract quantiles and item_ids
-            quantiles = results.quantiles
-            item_ids = results.data.item_ids
-            freq = results.freq
-
-            # use lists to store results
-            predictions_item_ids = []
-            test_data_item_ids = []
-
-            for item_id in item_ids:
-
-                test_data = self._prepare_dataframe(results, item_id, quantiles, False)
-
-                test_results = {}
-
-                for q in quantiles:
-                    x_test = self._create_features(test_data, q)
-
+                #### specific code #####
+                df = self._prepare_dataframe(lt_item, lt_item.quantiles)
+                adjusted_predictions = []
+                for quantile in lt_item.quantiles:
+                    x_test = self._create_features(df, quantile)
                     # Retrieve the fitted model for the quantile and lead time
-                    model: sm.QuantReg = self.qr_models.get((lt, item_id, q))
-                    if model is None:
-                        raise ValueError(f"No model for lead time:{lt}, item_id: {item_id}, quantile:{q}.")
+                    try:
+                        model: sm.QuantReg = self.qr_models[item_id][lead_time][quantile]
+                    except:
+                        raise ValueError(f"No model for item_id: {item_id}, lead time:{lead_time}, quantile:{q}.")
                     else:
                         predictions = model.predict(x_test)
-                        test_results[q] = np.exp(predictions) - self.epsilon
+                        adjusted_predictions.append(np.exp(predictions) - self.epsilon)
+                adjusted_predictions = np.column_stack(adjusted_predictions)
+                #### specific code #####
 
-                predictions = np.array(list(test_results.values())).T
-                predictions_item_ids.append(predictions)
-                test_data_item_ids.append(test_data)
+                results_lt[lead_time] = HorizonForecast(
+                    lead_time=lt_item.lead_time,
+                    predictions=torch.tensor(adjusted_predictions),
+                    quantiles=lt_item.quantiles,
+                    freq=lt_item.freq,
+                    data=lt_item.data,
+                )
 
-            combined_prediction_data = np.vstack(predictions_item_ids)
-            combined_test_data = TabularDataFrame(pd.concat(test_data_item_ids))
+            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt)
 
-            postprocessing_results[lt] = PredictionLeadTime(
-                lead_time=lt, predictions=torch.tensor(combined_prediction_data), quantiles=quantiles, freq=freq, data=combined_test_data
-            )
-
-        return PredictionLeadTimes(results=postprocessing_results)
+        return ForecastCollection(items=results_item_ids)

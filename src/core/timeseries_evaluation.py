@@ -87,13 +87,12 @@ class TabularDataFrame(pd.DataFrame):
         return self.__class__(copied)
 
 
-class PredictionLeadTime(BaseModel):
+class HorizonForecast(BaseModel):
     """
-    A class for handling probabilistic forecasts at multiple quantiles.
+    Stores quantile forecasts for a single time series (item id) and a single forecasting horizon.
 
     Attributes:
         lead_time (int): Forecast lead time in hours.
-        item_id (int): Identifier for the item being forecasted.
         timestamps (List[pd.Timestamp]): List of timestamps corresponding to the forecast.
         predictions (torch.Tensor): Tensor of shape [num_samples, num_quantiles] containing forecasted quantiles.
         quantiles (List[float]): List of quantile levels (default: [0.1, ..., 0.9]).
@@ -105,7 +104,6 @@ class PredictionLeadTime(BaseModel):
     predictions: torch.Tensor  # Shape [num_samples, num_quantiles]
     quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
     freq: Union[pd.Timedelta, pd.DateOffset]
-    target: Optional[torch.Tensor] = None
     data: Union[TimeSeriesDataFrame, TabularDataFrame]
 
     class Config:
@@ -117,13 +115,6 @@ class PredictionLeadTime(BaseModel):
         pred = pred.contiguous() if not pred.is_contiguous() else pred
         pred = pred.sort(dim=1)[0]  # avoid quantile crossing. TODO: potentially shouldn't be done silently
         return pred
-
-    @field_validator("target")
-    @classmethod
-    def make_target_contiguous(cls, target: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-        if target is not None and not target.is_contiguous():
-            return target.contiguous()
-        return target
 
     def to_dataframe(self, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """
@@ -219,7 +210,7 @@ class PredictionLeadTime(BaseModel):
         Returns:
             np.ndarray: Array of PIT values, where PIT values should follow a uniform [0,1] distribution.
         """
-        targets = self.to_dataframe(item_ids=item_ids)["target"].to_numpy()  # Shape [num_samples]
+        targets = self.to_dataframe(item_ids=item_ids).dropna()["target"].to_numpy()  # Shape [num_samples]
 
         # Compute PIT values for each target
         pit_values = []
@@ -252,7 +243,7 @@ class PredictionLeadTime(BaseModel):
 
     def get_empirical_coverage_rates(self, item_ids: Optional[List[int]] = None) -> Dict[float, float]:
 
-        results = self.to_dataframe(item_ids=item_ids)
+        results = self.to_dataframe(item_ids=item_ids).dropna()
         empirical_coverage_rates = {q: (results[q] >= results["target"]).mean() for q in self.quantiles}
 
         return empirical_coverage_rates
@@ -318,86 +309,166 @@ class PredictionLeadTime(BaseModel):
         plt.show()
 
 
-class PredictionLeadTimes(BaseModel):
-    """
-    A container class for multiple PredictionLeadTime instances, providing aggregate metrics and plots.
+class TimeSeriesForecast(BaseModel):
+    item_id: int
+    lead_time_forecasts: Dict[int, HorizonForecast]  # {lead_time: HorizonForecast}
 
-    Attributes:
-        results (Dict[int, PredictionLeadTime]): Dictionary mapping lead times to PredictionLeadTime instances.
-    """
+    def get_lead_times(self) -> List[int]:
+        return list(self.lead_time_forecasts.keys())
 
-    results: Dict[int, PredictionLeadTime]
+    def get_quantiles(self) -> List[float]:
+        return sorted({item.quantiles for item in self.lead_time_forecasts.values()})
+
+    def get_lead_time_forecast(self, lead_time: int) -> HorizonForecast:
+        return self.lead_time_forecasts[lead_time]
+
+    def get_all_lead_time_forecast(self) -> List[HorizonForecast]:
+        return self.lead_time_forecasts
+
+    def add_lead_time_forecast(self, lead_time: int, prediction: HorizonForecast) -> None:
+        self.lead_time_forecasts[lead_time] = prediction
+
+
+class ForecastCollection(BaseModel):
+    items: Dict[int, TimeSeriesForecast]  # item_id -> TimeSeriesForecast
 
     class Config:
         arbitrary_types_allowed = True
 
-    def save(self, file_path: Path) -> None:
-        """Save predictions to files"""
-        joblib.dump(self, file_path)
-        logging.info("Saved prediction file (PredictionLeadTimes) to %s", file_path)
+    def get_item_ids(self) -> List[int]:
+        return list(self.items.keys())
 
-    def get_crps(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, mean_time: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """Computes CRPS for selected lead times."""
-        lead_times = lead_times or list(self.results.keys())
-        crps_scores = {lt: self.results[lt].get_crps(item_ids, mean_time=mean_time) for lt in lead_times}
-        crps_scores = pd.DataFrame(data=crps_scores, index=["mean"] if mean_time else self.results[lead_times[0]].to_dataframe(item_ids=item_ids).index)  # TODO: make this nicer
+    def get_lead_times(self, item_id: Optional[int] = None) -> List[int]:
+        if item_id is not None:
+            return self.items[item_id].get_lead_times()
+        return sorted({lt for item in self.items.values() for lt in item.get_lead_times()})
+
+    def get_time_series_forecast(self, item_id: int) -> TimeSeriesForecast:
+        return self.items[item_id]
+
+    def get_all_time_series_forecast(self) -> List[TimeSeriesForecast]:
+        return self.items
+
+    def add_time_series_forecast(self, forecast: TimeSeriesForecast) -> None:
+        self.items[forecast.item_id] = forecast
+
+    def get_crps(
+        self,
+        item_ids: Optional[List[int]] = None,
+        lead_times: Optional[List[int]] = None,
+        mean_time: bool = True,
+        mean_item_ids: bool = False,
+        mean_lead_times: bool = False,
+    ) -> pd.DataFrame:
+        item_ids = item_ids or self.get_item_ids()
+        lead_times = lead_times or self.get_lead_times()
+
+        all_scores = []
+        for item_id in item_ids:
+            scores = []
+            item = self.get_time_series_forecast(item_id)
+            for lt in lead_times:
+                if lt in item.lead_time_forecasts:
+                    crps = item.get_lead_time_forecast(lt).get_crps(item_ids=[item_id], mean_time=mean_time)
+                    scores.append(crps)
+
+            scores = np.vstack(scores).T
+            idx = [item_id] if mean_time else item.get_lead_time_forecast(lt).to_dataframe().index  # TODO: make this nicer
+            all_scores.append(pd.DataFrame(scores, index=idx, columns=lead_times))
+
+        crps_scores = pd.concat(all_scores)
 
         if mean_lead_times:
             crps_scores = pd.DataFrame(crps_scores.mean(axis=1), columns=["Mean CRPS"])
-        else:
-            crps_scores.loc[:, "Mean CRPS"] = crps_scores.mean(axis=1)
+        if mean_item_ids:
+            if mean_time:
+                crps_scores = pd.DataFrame(crps_scores.mean(axis=0), columns=["Mean CRPS"]).T
+            else:
+                crps_scores = crps_scores.groupby(level=TIMESTAMP).mean()
+        if mean_time:
+            crps_scores.index.name = ITEMID
 
-        return crps_scores.round(2)
+        # if add_mean:
+        #     if not mean_time:
+        #         crps_scores.loc["Mean CRPS", :] = crps_scores.mean(axis=0)
+        #     if not mean_lead_times:
+        #         crps_scores.loc[:, "Mean CRPS"] = crps_scores.mean(axis=1)
 
-    def get_quantile_scores(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """Computes quantile scores for selected lead times."""
-        lead_times = lead_times or list(self.results.keys())
-        quantile_scores = {lt: self.results[lt].get_quantile_score(item_ids, mean_time=True) for lt in lead_times}
+        return crps_scores.round(3)
 
-        quantile_scores = pd.DataFrame(quantile_scores)
-        mean_scores = quantile_scores.mean(axis=1)
+    def get_empirical_coverage_rates(self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False) -> pd.DataFrame:
+        item_ids = item_ids or self.get_item_ids()
+        lead_times = lead_times or self.get_lead_times()
+
+        rates = {lt: [] for lt in lead_times}
+
+        for item_id in item_ids:
+            item = self.get_time_series_forecast(item_id)
+            for lt in lead_times:
+                if lt in item.lead_time_forecasts:
+                    val = item.get_lead_time_forecast(lt).get_empirical_coverage_rates()
+                    rates[lt].append(pd.Series(val))
+
+        coverage_df = pd.DataFrame({lt: pd.concat(rates[lt], axis=1).mean(axis=1) for lt in lead_times if rates[lt]})
 
         if mean_lead_times:
-            quantile_scores = pd.DataFrame(mean_scores, columns=["QS averaged over all lead times"])
+            coverage_df = pd.DataFrame(coverage_df.mean(axis=1), columns=["Empirical coverage rates averaged over all lead times"])
         else:
-            quantile_scores.loc[:, "QS averaged over all lead times"] = mean_scores
+            coverage_df.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_df.mean(axis=1)
 
-        quantile_scores.loc["Mean (CRPS/2)", :] = quantile_scores.mean()
-        quantile_scores.index.name = "quantile"
-        return quantile_scores.round(2)
+        coverage_df.index.name = "quantile"
+        return coverage_df.round(3)
 
-    def get_empirical_coverage_rates(self, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """Computes empirical coverage rates for selected lead times."""
-        lead_times = lead_times or list(self.results.keys())
+    def get_quantile_scores(self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False) -> pd.DataFrame:
+        item_ids = item_ids or self.get_item_ids()
+        lead_times = lead_times or self.get_lead_times()
 
-        coverage_rates = pd.DataFrame({lt: self.results[lt].get_empirical_coverage_rates(item_ids) for lt in lead_times})
+        scores = {}
+        for lt in lead_times:
+            values = []
+            for item_id in item_ids:
+                val = self.get_time_series_forecast(item_id).get_lead_time_forecast(lt).get_quantile_score(item_ids=[item_id], mean_time=True)
+                values.append(val)
+            if values:
+                scores[lt] = pd.DataFrame(values).mean(axis=0)
 
+        df = pd.DataFrame(scores)
         if mean_lead_times:
-            coverage_rates = pd.DataFrame(coverage_rates).mean(axis=1)
-            coverage_rates = pd.DataFrame(coverage_rates, columns=["Empirical coverage rates averaged over all lead times"])
+            df = pd.DataFrame(df.mean(axis=1), columns=["QS averaged over all lead times"])
         else:
-            coverage_rates.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_rates.mean(axis=1)
+            df.loc[:, "QS averaged over all lead times"] = df.mean(axis=1)
 
-        coverage_rates.index.name = "quantile"
-        return coverage_rates.round(2)
+        df.loc["Mean (CRPS/2)", :] = df.mean()
+        df.index.name = "quantile"
+        return df.round(3)
 
     def get_pit_values(self, lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> Dict[int, np.ndarray]:
-        """Computes PIT values for selected lead times."""
-        lead_times = lead_times or list(self.results.keys())
-        return {lt: self.results[lt].get_pit_values(item_ids) for lt in lead_times}
+        item_ids = item_ids or self.get_item_ids()
+        lead_times = lead_times or self.get_lead_times()
+        result = {}
+        for lt in lead_times:
+            values = []
+            for item_id in item_ids:
+                item = self.get_time_series_forecast(item_id)
+                if lt in item.lead_time_forecasts:
+                    values.append(item.get_lead_time_forecast(lt).get_pit_values(item_ids=[item_id]))
+            if values:
+                result[lt] = np.concatenate(values)
+        return result
 
     def get_pit_histogram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
-        """Plots PIT histograms for selected lead times."""
-        lead_times = lead_times or list(self.results.keys())
+        lead_times = lead_times or self.get_lead_times()
+        pit_data = self.get_pit_values(lead_times=lead_times, item_ids=item_ids)
 
+        if item_ids:
+            first_item = item_ids[0]
+        else:
+            first_item = self.items.keys()[0]
+        bins = self.get_time_series_forecast(first_item).get_quantiles()
         if overlay:
             plt.figure(figsize=(10, 6))
-            bins = len(next(iter(self.results.values())).quantiles)
-
-            for lt in lead_times:
-                pit_values = self.results[lt].get_pit_values(item_ids)
+            for lt, pit_values in pit_data.items():
                 plt.hist(pit_values, bins=bins, alpha=0.5, label=f"Lead time {lt}")
-
             plt.axhline(len(pit_values) / bins, color="red", linestyle="dashed", label="Uniform(0,1) reference")
             plt.xlabel("PIT Values")
             plt.ylabel("Observed Frequency")
@@ -406,15 +477,12 @@ class PredictionLeadTimes(BaseModel):
             plt.show()
 
         else:
-            num_plots = len(lead_times)
+            num_plots = len(pit_data)
             cols = math.ceil(np.sqrt(num_plots))
             rows = (num_plots + cols - 1) // cols
             fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
             axes = axes.flatten() if num_plots > 1 else [axes]
-            for ax, lt in zip(axes, lead_times):
-                pred = self.results[lt]
-                pit_values = pred.get_pit_values()
-                bins = len(pred.quantiles)
+            for ax, (lt, pit_values) in zip(axes, pit_data.items()):
                 ax.hist(pit_values, bins=bins, range=(0, 1), density=False, alpha=0.7, edgecolor="black")
                 ax.axhline(len(pit_values) / bins, color="red", linestyle="dashed", label="Uniform(0,1) reference")
                 ax.set_xlabel("PIT Values")
@@ -425,20 +493,23 @@ class PredictionLeadTimes(BaseModel):
             plt.show()
 
     def get_reliability_diagram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
-        """Plots reliability diagrams for selected lead times."""
-        lead_times = lead_times or list(self.results.keys())
-        plt.figure(figsize=(8, 8))
+        lead_times = lead_times or self.get_lead_times()
 
         if overlay:
+            plt.figure(figsize=(8, 8))
             for lt in lead_times:
-                pred = self.results[lt]
-                empirical_coverage_rates = pred.get_empirical_coverage_rates(item_ids)
-                quantile_levels = sorted(empirical_coverage_rates.keys())
-                empirical_coverages = [empirical_coverage_rates[q] for q in quantile_levels]
-                plt.plot(quantile_levels, empirical_coverages, "o-", label=f"Lead time {lt}")
-
+                values = []
+                for item_id in self.get_item_ids():
+                    if item_ids and item_id not in item_ids:
+                        continue
+                    item = self.get_time_series_forecast(item_id)
+                    if lt in item.lead_time_forecasts:
+                        val = item.get_lead_time_forecast(lt).get_empirical_coverage_rates(item_ids=[item_id])
+                        values.append(pd.Series(val))
+                if values:
+                    emp = pd.concat(values, axis=1).mean(axis=1)
+                    plt.plot(emp.index, emp.values, "o-", label=f"Lead time {lt}")
             plt.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
-            plt.xticks(quantile_levels)
             plt.xlabel("Nominal Quantile Level")
             plt.ylabel("Empirical Coverage")
             plt.title("Reliability Diagram for Quantile Forecasts")
@@ -453,23 +524,40 @@ class PredictionLeadTimes(BaseModel):
             fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
             axes = axes.flatten() if num_plots > 1 else [axes]
             for ax, lt in zip(axes, lead_times):
-                pred = self.results[lt]
-                empirical_coverage_rates = pred.get_empirical_coverage_rates(item_ids)
-                quantile_levels = sorted(empirical_coverage_rates.keys())
-                empirical_coverages = [empirical_coverage_rates[q] for q in quantile_levels]
-                ax.plot(quantile_levels, empirical_coverages, "o-", label=f"Lead time {lt}")
-                ax.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
-                ax.set_xlabel("Nominal Quantile Level")
-                ax.set_ylabel("Empirical Coverage")
-                ax.set_xticks(quantile_levels)
-                ax.set_title("Reliability Diagram for Quantile Forecasts")
-                ax.legend()
+                values = []
+                for item_id in self.get_item_ids():
+                    if item_ids and item_id not in item_ids:
+                        continue
+                    item = self.get_time_series_forecast(item_id)
+                    if lt in item.lead_time_forecasts:
+                        val = item.get_lead_time_forecast(lt).get_empirical_coverage_rates(item_ids=[item_id])
+                        values.append(pd.Series(val))
+                if values:
+                    emp = pd.concat(values, axis=1).mean(axis=1)
+                    ax.plot(emp.index, emp.values, "o-", label=f"Lead time {lt}")
+                    ax.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
+                    ax.set_xlabel("Nominal Quantile Level")
+                    ax.set_ylabel("Empirical Coverage")
+                    ax.set_xticks(emp.index)
+                    ax.set_title("Reliability Diagram")
+                    ax.legend()
             plt.tight_layout()
             plt.show()
 
+    def save(self, file_path: Path) -> None:
+        joblib.dump(self, file_path)
+        logging.info("Saved prediction collection to %s", file_path)
+
+    @classmethod
+    def load(cls, file_path: Path) -> "ForecastCollection":
+        obj = joblib.load(file_path)
+        if not isinstance(obj, cls):
+            raise ValueError("Loaded object is not a ForecastCollection")
+        return obj
+
 
 def get_quantile_scores(
-    predictions: Dict[str, PredictionLeadTimes],
+    predictions: Dict[str, ForecastCollection],
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
@@ -481,7 +569,7 @@ def get_quantile_scores(
 
     Parameters
     -----------
-    predictions : Dict[str, PredictionLeadTimes]
+    predictions : Dict[str, ForecastCollection]
         Dictionary of prediction objects, where each value provides a `get_crps` method
         that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
     lead_times : Optional[List[int]], default=None
@@ -508,13 +596,13 @@ def get_quantile_scores(
     return scores.round(3)
 
 
-def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
+def get_empirical_coverage_rates(predictions: Dict[str, ForecastCollection], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
     """Computes empirical coverage rates for different prediction sources,
     averaged across the specified lead times.
 
     Parameters
     -----------
-    predictions : Dict[str, PredictionLeadTimes]
+    predictions : Dict[str, ForecastCollection]
         Dictionary of prediction objects, where each value provides a `get_crps` method
         that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
     lead_times : Optional[List[int]], default=None
@@ -536,7 +624,7 @@ def get_empirical_coverage_rates(predictions: Dict[str, PredictionLeadTimes], le
 
 
 def get_crps_scores(
-    predictions: Dict[str, PredictionLeadTimes],
+    predictions: Dict[str, ForecastCollection],
     lead_times: Optional[List[int]] = None,
     mean_lead_times: bool = False,
     item_ids: Optional[List[int]] = None,
@@ -547,7 +635,7 @@ def get_crps_scores(
 
     Parameters
     -----------
-    predictions : Dict[str, PredictionLeadTimes]
+    predictions : Dict[str, ForecastCollection]
         Dictionary of prediction objects, where each value provides a `get_crps` method
         that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
     lead_times : Optional[List[int]], default=None
@@ -565,16 +653,20 @@ def get_crps_scores(
         Rows represent lead times (or a single row if mean_lead_times=True), and columns represent prediction sources.
     """
 
-    scores = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, item_ids=item_ids) for pred in predictions.values()], axis=0).T
+    scores = pd.concat(
+        [pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, mean_item_ids=True, item_ids=item_ids) for pred in predictions.values()], axis=0
+    ).T
     scores.columns = [key for key in predictions.keys()]
     scores.index.name = "lead times"
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
+
+    scores.loc["Mean CRPS", :] = scores.mean(axis=0)
     return scores.round(3)
 
 
 def plot_crps(
-    predictions: Dict[str, PredictionLeadTimes],
+    predictions: Dict[str, ForecastCollection],
     selected_keys: Optional[List] = None,
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
@@ -585,7 +677,7 @@ def plot_crps(
 
     Parameters
     -----------
-    predictions : Dict[str, PredictionLeadTimes]
+    predictions : Dict[str, ForecastCollection]
         Dictionary of prediction objects, where each value provides a `get_crps` method
         that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
     lead_times : Optional[List[int]], default=None
@@ -638,20 +730,23 @@ def plot_crps(
 
 
 def get_crps_by_period(
-    predictions: Dict[str, PredictionLeadTimes],
+    predictions: Dict[str, ForecastCollection],
+    date_splits: List[pd.Timestamp],
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
-    date_splits: Optional[List[pd.Timestamp]] = None,
 ) -> pd.DataFrame:
     """Computes the mean CRPS (Continuous Ranked Probability Score) over time periods
     defined by timestamp splits for different prediction sources.
 
     Parameters
     -----------
-    predictions : Dict[str, PredictionLeadTimes]
+    predictions : Dict[str, ForecastCollection]
         Dictionary of prediction objects, where each value provides a `get_crps` method
         that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    date_splits : List[pd.Timestamp]
+        List of timestamps to split the CRPS data into time-based segments.
+        The function calculates mean CRPS in each period between these dates.
     lead_times : Optional[List[int]], default=None
         List of lead times to filter CRPS scores. If None, all lead times are used.
     item_ids : Optional[List[int]], default=None
@@ -659,9 +754,6 @@ def get_crps_by_period(
     reference_predictions : Optional[str], default=None
         Key of a prediction set to be used as a reference for normalization.
         If provided, all CRPS values will be divided by the CRPS values from this prediction.
-    date_splits : Optional[List[pd.Timestamp]], default=None
-        List of timestamps to split the CRPS data into time-based segments.
-        The function calculates mean CRPS in each period between these dates.
 
     Returns
     --------
@@ -670,11 +762,9 @@ def get_crps_by_period(
         optionally normalized by a reference prediction. Each column corresponds to a prediction key.
     """
 
-    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
-    df.columns = [key for key in predictions.keys()]
+    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, mean_item_ids=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
 
-    if reference_predictions:
-        df = df.apply(lambda x: x / x[reference_predictions], axis=1)
+    df.columns = [key for key in predictions.keys()]
 
     df = df.reset_index()
 
@@ -696,13 +786,18 @@ def get_crps_by_period(
         results[f"{first_date.strftime("%d-%m-%Y")}_to_{d.strftime("%d-%m-%Y")}"] = subset_df.drop(columns=["item_id", "timestamp"]).mean()
         first_date = d
 
-    return pd.DataFrame(results).T.round(3)
+    results = pd.DataFrame(results).T
+
+    if reference_predictions:
+        results = results.apply(lambda x: x / x[reference_predictions], axis=1)
+
+    return results.round(3)
 
 
 def load_predictions(
     prediction_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
     prediction_files: Union[List[Union[Path, str]], Path, str, None] = None,
-) -> Dict[str, PredictionLeadTimes]:
+) -> Dict[str, ForecastCollection]:
     """
     Load saved prediction files from specified files or recursively from directories.
 
@@ -722,7 +817,7 @@ def load_predictions(
 
     Returns
     -------
-    Dict[str, PredictionLeadTimes]
+    Dict[str, ForecastCollection]
         A dictionary mapping generated keys to loaded prediction objects.
     """
 

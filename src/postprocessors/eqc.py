@@ -1,10 +1,10 @@
 import numpy as np
 from src.core.base import AbstractPostprocessor
-from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TARGET
 import torch
-from typing import Dict
 from copy import deepcopy
 from tqdm import tqdm
+
 
 class PostprocessorEQC(AbstractPostprocessor):
     """
@@ -15,92 +15,77 @@ class PostprocessorEQC(AbstractPostprocessor):
 
     def __init__(self) -> None:
         super().__init__()
-        self.conf_thresholds_lt = {}
+        self.conf_thresholds = {}
+        self.ignore_first_n_train_entries = 0
 
-    def _empirical_quantile_offset(self, predictions: PredictionLeadTime) -> Dict[int, Dict[float, float]]:
+    def fit(self, data: ForecastCollection):
         """
-        Computes empirical quantile offsets for each item ID and quantile.
+        Fits the calibrator to the prediction data by computing empirical quantile offsets.
 
         The method calculates how much each predicted quantile needs to be shifted
         to achieve the desired empirical coverage on the calibration data.
 
         Parameters:
         -----------
-        predictions : PredictionLeadTime
-            Object containing quantile predictions and true target values for a specific lead time.
-
-        Returns:
-        --------
-        Dict[int, Dict[float, float]]
-            A nested dictionary where the outer key is the item ID, the inner key is the quantile,
-            and the value is the computed empirical offset for that quantile.
-        """
-
-        conformalized_thresholds = {}
-        predictions = deepcopy(predictions)
-
-        for item_id in predictions.data.item_ids:
-            conformalized_thresholds[item_id] = {}
-
-            df = predictions.to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries :].copy()
-            df = df.dropna()
-
-            for q in predictions.quantiles:
-                scores = df["target"] - df[q]
-                conformalized_thresholds[item_id][q] = np.quantile(scores, q=q)
-
-        return conformalized_thresholds
-
-    def fit(self, data: PredictionLeadTimes):
-        """
-        Fits the calibrator to the prediction data by computing empirical quantile offsets.
-
-        Parameters:
-        -----------
         data : PredictionLeadTimes
             Predictions used for calibration.
         """
+        data = deepcopy(data)
 
-        for lt, preds in tqdm(data.results.items(), desc="Fitting EQC Postprocessor"):
-            self.conf_thresholds_lt[lt] = self._empirical_quantile_offset(preds)
+        for item_id in tqdm(data.get_item_ids(), desc="Fitting EQC Postprocessor for each time series (item)"):
+            self.conf_thresholds[item_id] = {}
+            item = data.get_time_series_forecast(item_id)
+            for lead_time in item.get_lead_times():
+                self.conf_thresholds[item_id][lead_time] = {}
+                lt_item = item.get_lead_time_forecast(lead_time)
+                # TODO: could be made more efficient by accessing the predictions directly
+                df = lt_item.to_dataframe().iloc[self.ignore_first_n_train_entries :].dropna().copy()
 
-    def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:
+                for q in lt_item.quantiles:
+                    scores = df[TARGET] - df[q]
+                    self.conf_thresholds[item_id][lead_time][q] = np.quantile(scores, q=q)
+
+    def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """
         Applies the empirical quantile offsets to adjust predictions.
 
         Parameters:
         -----------
-        data : PredictionLeadTimes
+        data : ForecastCollection
             Prediction data to be postprocessed, containing raw quantile predictions.
 
         Returns:
         --------
-        PredictionLeadTimes
-            A new `PredictionLeadTimes` object with calibrated quantile predictions.
+        ForecastCollection
+            A new `ForecastCollection` object with calibrated quantile predictions.
         """
-
         data = deepcopy(data)
-        postprocessing_results = {}
 
-        # iterate over different lead times
-        for lead_time, preds in data.results.items():
-            prediction_lead_time = []
+        results_item_ids = {}
 
-            # iterate over item ids (different time series)
-            for item_id in preds.data.item_ids:
-                predictions_item_id = []
-                test_data = preds.to_dataframe(item_ids=[item_id])
+        for item_id in tqdm(data.get_item_ids(), desc="Updating Forecasts using MLE Postprocessor."):
+            results_lt = {}
+            item = data.get_time_series_forecast(item_id)
+            for lead_time in item.get_lead_times():
+                lt_item = item.get_lead_time_forecast(lead_time)
 
-                # iterate over quantiles
-                for i, quantile in enumerate(preds.quantiles):
-                    conformalized_predictions = np.array(test_data[quantile] + self.conf_thresholds_lt[lead_time][item_id][quantile])
+                #### specific code #####
+                df = lt_item.to_dataframe()  # TODO: could be made more efficient by accessing the predictions directly
+                adjusted_predictions = []
+                for quantile in lt_item.quantiles:
+                    conformalized_predictions = np.array(df[quantile] + self.conf_thresholds[item_id][lead_time][quantile])
+                    adjusted_predictions.append(conformalized_predictions)
+                adjusted_predictions = np.column_stack(adjusted_predictions)
+                #### specific code #####
 
-                    predictions_item_id.append(conformalized_predictions)
-                prediction_lead_time.append(predictions_item_id)
-            combined_prediction_data = np.hstack(prediction_lead_time).T
+                results_lt[lead_time] = HorizonForecast(
+                    lead_time=lt_item.lead_time,
+                    predictions=torch.tensor(adjusted_predictions),
+                    quantiles=lt_item.quantiles,
+                    freq=lt_item.freq,
+                    data=lt_item.data,
+                )
 
-            postprocessing_results[lead_time] = PredictionLeadTime(
-                lead_time=lead_time, predictions=torch.tensor(combined_prediction_data), quantiles=preds.quantiles, freq=preds.freq, data=preds.data
-            )
+            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt)
 
-        return PredictionLeadTimes(results=postprocessing_results)
+        return ForecastCollection(items=results_item_ids)

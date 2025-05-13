@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from src.core.base import AbstractPredictor
 import logging
-from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime, TabularDataFrame
+from src.core.timeseries_evaluation import TabularDataFrame, ForecastCollection, TimeSeriesForecast, HorizonForecast
 from fastai.tabular.core import add_datepart
 import statsmodels.api as sm
 from pydantic import Field
@@ -66,63 +66,55 @@ class QuantileRegression(AbstractPredictor):
         self.epsilon = 100_000
         self.target_scaler = TargetScaler(method="log", epsilon=100_000)
 
-    def fit(self, data_train: PredictionLeadTimes, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
 
         if data_val is not None:
             logging.info("data_val is not used. No Hyperparameter tuning is applied.")
 
-        for lt in tqdm(self.lead_times, desc="Fitting Quantile Regression"):
-
-            data_lt = self._create_cyclic_features(data_train, lt, dropna=True)
-
-            # Postprocess each time series separately
-            for item_id in data_lt.item_ids:
-                # get data for the specific time series
-                data_lt_item = data_lt.loc[[item_id]]
+        for item_id in tqdm(data_train.item_ids, desc="Fitting Quantile Regression."):
+            data_sub = data_train.loc[[item_id]]
+            for lead_time in self.lead_times:
+                data_lt = self._create_cyclic_features(data_sub, lead_time, dropna=True)
                 # fit a quantile regression for each quantile and make predictions on test dataset
                 for q in self.quantiles:
-
-                    x_train = data_lt_item.drop(columns="target").astype(float).to_numpy()
-                    y_train = self.target_scaler.transform(data_lt_item["target"].values)
+                    x_train = data_lt.drop(columns="target").astype(float).to_numpy()
+                    y_train = self.target_scaler.transform(data_lt["target"].values)
                     # Add constant for intercept
                     x_train = sm.add_constant(x_train)
                     # fit model
                     model = sm.QuantReg(y_train, x_train)
-                    self.models_qr[(lt, item_id, q)] = model.fit(q=q)
+                    self.models_qr[(item_id, lead_time, q)] = model.fit(q=q)
 
-    def predict(self, data: PredictionLeadTimes, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
 
         if self.models_qr is None:
             raise ValueError("Need to fit models first.")
 
-        results = {ld: None for ld in self.lead_times}
+        results = {item_id: None for item_id in data.item_ids}
 
-        for lt in tqdm(self.lead_times, desc="Predicting using Quantile Regression"):
+        for item_id in tqdm(data.item_ids, desc="Predicting using Quantile Regression"):
+            results_lt = {lt: None for lt in self.lead_times}
+            data_sub = data.loc[[item_id]]
 
-            data_lt = self._create_cyclic_features(data, lt, dropna=False)
-
-            # store results
-            test_results = {}
-            predictions_item_ids = []
-
-            # Postprocess each time series separately
-            for item_id in data_lt.item_ids:
-                # get data for the specific time series
-                data_lt_item = data_lt.loc[[item_id]]
+            for lead_time in self.lead_times:
+                data_lt = self._create_cyclic_features(data_sub, lead_time, dropna=False)
+                predictions_q = []
                 # fit a quantile regression for each quantile and make predictions on test dataset
                 for q in self.quantiles:
-                    x_test = data_lt_item.drop(columns="target").astype(float).to_numpy()
+                    x_test = data_lt.drop(columns="target").astype(float).to_numpy()
                     x_test = sm.add_constant(x_test)
-                    predictions = self.models_qr[(lt, item_id, q)].predict(x_test)
-                    test_results[q] = self.target_scaler.inverse_transform(predictions)
+                    predictions = self.models_qr[(item_id, lead_time, q)].predict(x_test)
+                    predictions_q.append(self.target_scaler.inverse_transform(predictions))
 
-                predictions_complete = np.array(list(test_results.values())).T
-                predictions_item_ids.append(predictions_complete)
+                predictions_q = np.column_stack(predictions_q)
 
-            predictions_item_ids = np.vstack(predictions_item_ids)
-            results[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(predictions_item_ids), freq=self.freq, data=data_lt)
+                results_lt[lead_time] = HorizonForecast(
+                    lead_time=lead_time, predictions=torch.tensor(predictions_q), quantiles=self.quantiles, freq=self.freq, data=TimeSeriesDataFrame(data_sub)
+                )
 
-        return PredictionLeadTimes(results=results)
+            results[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt)
+
+        return ForecastCollection(items=results)
 
     def _add_cyclic_encoding(self, data: pd.DataFrame, colname: str, period: int, drop: bool = False):
         """

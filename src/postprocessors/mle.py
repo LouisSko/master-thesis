@@ -3,7 +3,7 @@ import statsmodels.api as sm
 import scipy.stats as stats
 from scipy.optimize import minimize
 from src.core.base import AbstractPostprocessor
-from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
 import torch
 from tqdm import tqdm
 from typing import Tuple
@@ -21,7 +21,7 @@ class PostprocessorMLE(AbstractPostprocessor):
         self.params = {}  # Store {lead_time: {item_id: (a, b, c, d)}}
         self.epsilon = 100_000
 
-    def fit(self, data: PredictionLeadTimes) -> None:
+    def fit(self, data: ForecastCollection) -> None:
         """
         Fits the MLE parameters to the provided prediction data.
 
@@ -33,15 +33,14 @@ class PostprocessorMLE(AbstractPostprocessor):
         """
         self.params = {}
 
-        lead_times = data.results.keys()
-
-        for lt in tqdm(lead_times, desc="Fitting MLE Postprocessor"):
-            self.params[lt] = {}
-            for item_id in data.results[lt].data.item_ids:
-                df = data.results[lt].to_dataframe(item_ids=[item_id]).iloc[self.ignore_first_n_train_entries:].dropna()
-                quantiles = data.results[lt].quantiles
-
-                log_df = np.log(df[quantiles + ["target"]] + self.epsilon)
+        for item_id in tqdm(data.get_item_ids(), desc="Fitting MLE Postprocessor for each time series (item)"):
+            self.params[item_id] = {}
+            item = data.get_time_series_forecast(item_id)
+            for lead_time in item.get_lead_times():
+                lt_item = item.get_lead_time_forecast(lead_time)
+                
+                df = lt_item.to_dataframe().iloc[self.ignore_first_n_train_entries :].dropna()
+                log_df = np.log(df[lt_item.quantiles + ["target"]] + self.epsilon)
                 log_df["std_target"] = log_df["target"].rolling(20, min_periods=20, center=True).std()
                 log_df = log_df.dropna()
 
@@ -54,50 +53,55 @@ class PostprocessorMLE(AbstractPostprocessor):
                 result = minimize(self._neg_log_likelihood, args=(M, IQR, y_mu), x0=init_params, method="Nelder-Mead")
 
                 if not result.success:
-                    raise ValueError(f"MLE failed for lt={lt}, item={item_id}")
+                    raise ValueError(f"MLE failed for lt={lead_time}, item={item_id}")
 
-                self.params[lt][item_id] = result.x
+                self.params[item_id][lead_time] = result.x
 
-    def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:
+    def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """
         Postprocesses the prediction data using the fitted MLE parameters.
 
         Parameters
         ----------
-        data : PredictionLeadTimes
+        data : ForecastCollection
             The prediction results to postprocess using the estimated parameters.
 
         Returns
         -------
-        PredictionLeadTimes
+        ForecastCollection
             The postprocessed prediction results with adjusted quantiles based on the MLE calibration.
         """
-        results = {}
-        lead_times = data.results.keys()
+        results_item_ids = {}
 
-        for lt in tqdm(lead_times):
-            quantiles = data.results[lt].quantiles
-            freq = data.results[lt].freq
-            all_preds = []
+        for item_id in tqdm(data.get_item_ids(), desc="Updating Forecasts using MLE Postprocessor."):
+            results_lt = {}
+            item = data.get_time_series_forecast(item_id)
+            for lead_time in item.get_lead_times():
+                lt_item = item.get_lead_time_forecast(lead_time)
 
-            for item_id in data.results[lt].data.item_ids:
-                df = data.results[lt].to_dataframe(item_ids=[item_id])
-
-                log_df = np.log(df[quantiles] + self.epsilon)
-
+                #### specific code #####
+                df = lt_item.to_dataframe()
+                log_df = np.log(df[lt_item.quantiles] + self.epsilon)
                 M = log_df[0.5].values
                 IQR = (log_df[0.9] - log_df[0.1]).values
-                a, b, c, d = self.params[lt][item_id]
-
+                a, b, c, d = self.params[item_id][lead_time]
                 mu = a + b * M
                 sigma = c + d * IQR
-                log_predictions = stats.norm.ppf(np.array(quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
-                all_preds.append(np.exp(log_predictions) - self.epsilon)
+                log_predictions = stats.norm.ppf(np.array(lt_item.quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
+                predictions = np.exp(log_predictions) - self.epsilon
+                #### specific code #####
 
-            preds_np = np.vstack(all_preds)
-            results[lt] = PredictionLeadTime(lead_time=lt, predictions=torch.tensor(preds_np), quantiles=quantiles, freq=freq, data=data.results[lt].data)
+                results_lt[lead_time] = HorizonForecast(
+                    lead_time=lt_item.lead_time,
+                    predictions=torch.tensor(predictions),
+                    quantiles=lt_item.quantiles,
+                    freq=lt_item.freq,
+                    data=lt_item.data,
+                )
 
-        return PredictionLeadTimes(results=results)
+            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt)
+
+        return ForecastCollection(items=results_item_ids)
 
     def _neg_log_likelihood(self, params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarray):
         """
