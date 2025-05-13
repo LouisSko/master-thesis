@@ -352,6 +352,87 @@ class TimeSeriesForecast(BaseModel):
         prediction.parent = self
         self.lead_time_forecasts[lead_time] = prediction
 
+    def plot_forecasts(self, start: Optional[Union[int, pd.Timestamp]] = None, q_lower: float = 0.2, q_upper: float = 0.8, context_length: int = 100) -> None:
+        """
+        Plot past data, true future values, and quantile forecasts for a given starting point.
+
+        Parameters
+        ----------
+        start : Optional[Union[int, pd.Timestamp]]
+            - If int: Index into the time series to start the forecast from.
+            - If pd.Timestamp: Timestamp to start the forecast from. Must exist in the time series index.
+            - If None: Defaults to the last available index.
+
+        q_lower : float
+            Lower quantile to use for the prediction interval shading (e.g., 0.2 for 20%).
+
+        q_upper : float
+            Upper quantile to use for the prediction interval shading (e.g., 0.8 for 80%).
+
+        context_length : int
+            Number of historical data points to include in the plot before the forecast start.
+
+        Returns
+        -------
+        None
+            Displays a matplotlib plot showing:
+            - Past true values
+            - Future true values
+            - Predicted quantiles (median and shaded interval)
+        """
+        lead_times = self.get_lead_times()
+        freq = self.get_freq()
+
+        timestamps = self.data.index.get_level_values("timestamp")
+
+        if isinstance(start, pd.Timestamp):
+            if start not in timestamps:
+                raise ValueError(f"Timestamp {start} not found in data index.")
+            start_idx = timestamps.get_loc(start)
+        elif isinstance(start, int):
+            start_idx = start % len(self.data)  # handle negative indexing
+        else:
+            start_idx = len(self.data) - 1
+
+        preds = torch.stack([hf.predictions for hf in self.lead_time_forecasts.values()], dim=1)  # shape: [num_samples, num_lead_times, num_quantiles]
+
+        historic_start_idx = max(0, start_idx - context_length) if start_idx >= 0 else start_idx - context_length
+
+        past = self.data[historic_start_idx:start_idx].reset_index(level=0, drop=True)
+        future = self.data[start_idx : start_idx + max(lead_times)].reset_index(level=0, drop=True)
+
+        current_date = timestamps[start_idx - 1]
+        prediction_dates = [current_date + pd.tseries.frequencies.to_offset(freq) * lt for lt in lead_times]
+
+        selected_predictions = pd.DataFrame(data=preds[start_idx].numpy(), columns=self.get_quantiles(), index=prediction_dates)  # shape: [num_lead_times, num_quantiles]
+
+        plt.figure(figsize=(12, 4))
+
+        plt.plot(past.index, past.values, label="Past", color="black", linestyle="--")
+        plt.plot(future.index, future.values, label="Future (true)", color="blue")
+
+        if 0.5 in selected_predictions.columns:
+            plt.plot(selected_predictions.index, selected_predictions[0.5], label="Prediction (median)", color="red")
+
+        if q_lower in selected_predictions.columns and q_upper in selected_predictions.columns:
+            plt.fill_between(
+                selected_predictions.index,
+                selected_predictions[q_lower],
+                selected_predictions[q_upper],
+                color="orange",
+                alpha=0.3,
+                label=f"{int(q_upper * 100)}–{int(q_lower * 100)}% interval",
+            )
+
+        plt.axvline(current_date, color="gray", linestyle=":", label="Prediction start")
+        plt.xlabel("Date")
+        plt.ylabel("Value")
+        plt.title(f"Forecast for item_id={self.item_id} from {current_date}")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
 
 class ForecastCollection(BaseModel):
     items: Dict[int, TimeSeriesForecast]  # item_id -> TimeSeriesForecast
