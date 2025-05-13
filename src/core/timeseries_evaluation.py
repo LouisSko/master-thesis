@@ -680,6 +680,8 @@ def plot_crps(
     predictions : Dict[str, ForecastCollection]
         Dictionary of prediction objects, where each value provides a `get_crps` method
         that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    selected_keys: Optional[List], default=None
+        List of ForecastCollection objects which sould be considered. If None, all ForecastCollections are displayed.
     lead_times : Optional[List[int]], default=None
         List of lead times to filter CRPS scores. If None, all lead times are used.
     item_ids : Optional[List[int]], default=None
@@ -726,6 +728,47 @@ def plot_crps(
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     plt.gca().xaxis.set_major_locator(mdates.AutoDateLocator())
 
+    plt.show()
+
+
+def plot_crps_across_lead_times(
+    predictions: Dict[str, ForecastCollection],
+    selected_keys: Optional[List] = None,
+    item_ids: Optional[List[int]] = None,
+    reference_predictions: Optional[str] = None,
+) -> None:
+    """Plots the mean CRPS score across various forecast lead times.
+
+    Parameters
+    -----------
+    predictions : Dict[str, ForecastCollection]
+        Dictionary of prediction objects, where each value provides a `get_crps` method
+        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    selected_keys: Optional[List], default=None
+        List of ForecastCollection objects which sould be considered. If None, all ForecastCollections are displayed.
+    item_ids : Optional[List[int]], default=None
+        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+    reference_predictions : Optional[str], default=None
+        Key of a prediction set to be used as a reference for normalization.
+        If provided, all CRPS values will be divided by the CRPS values from this prediction.
+
+    Returns
+    --------
+    None
+    """
+
+    if selected_keys:
+        predictions = {key: value for key, value in predictions.items() if key in selected_keys}
+
+    df = get_crps_scores(predictions, item_ids=item_ids, reference_predictions=reference_predictions)
+
+    ax = df.plot(figsize=(12, 8), legend=True)
+    ax.set_title("CRPS Scores Comparison across Forecasting Lead Times", fontsize=16)
+    ax.set_ylabel("CRPS Score", fontsize=14)
+    ax.set_xlabel("Lead Times", fontsize=14)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.7)
+
+    plt.tight_layout()
     plt.show()
 
 
