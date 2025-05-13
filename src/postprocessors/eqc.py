@@ -83,9 +83,8 @@ class PostprocessorEQC(AbstractPostprocessor):
                     predictions=torch.tensor(adjusted_predictions),
                     quantiles=lt_item.quantiles,
                     freq=lt_item.freq,
-                    data=lt_item.data,
                 )
 
-            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt)
+            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=item.data)
 
         return ForecastCollection(items=results_item_ids)

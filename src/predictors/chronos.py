@@ -323,60 +323,6 @@ class Chronos(AbstractPredictor):
         self.pipeline = self._pipeline_init(output_dir_fine_tuning / "fine-tuned-ckpt")
         logging.info("Trained model is automatically loaded from checkpoint.")
 
-    def predict2(
-        self,
-        data: TimeSeriesDataFrame,
-        previous_context_data: Optional[TimeSeriesDataFrame] = None,
-        predict_only_last_timestep: bool = False,
-    ) -> ForecastCollection:
-        """Predicts future values for the given time series data using a pretrained Chronos model.
-
-        Parameters:
-            data (TimeSeriesDataFrame): The target data to forecast.
-            predict_only_last_timestep (bool): Whether to forecast only the last timestep of each series.
-            previous_context_data (Optional[TimeSeriesDataFrame]): Optional preceding data to provide context.
-
-        Returns:
-            ForecastCollection: A dictionary-like object containing lead-time-specific predictions.
-        """
-
-        # Add previous context to test data if available
-        if previous_context_data is not None:
-            data_merged = self._merge_data(data, previous_context_data, self.context_length)
-        else:
-            data_merged = data
-
-        if predict_only_last_timestep:
-            ds = ChronosInferenceDataset(data_merged, self.context_length)
-            data = data.slice_by_timestep(start_index=-1)
-        else:
-            # Make predictions for all timestamps of the test data
-            ds = ChronosBacktestingDataset(data_merged, self.context_length)
-
-        dl = DataLoader(ds, batch_size=16)
-
-        results = {ld: None for ld in self.lead_times}
-        forecasts = []
-
-        for batch in tqdm(dl, desc="Predicting using Chronos"):
-            if self.sampling:
-                forecast = self.pipeline.predict_sampling(context=batch, prediction_length=self.prediction_length)
-            else:
-                forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
-            forecasts.append(forecast)
-
-        forecasts = torch.vstack(forecasts)
-
-        if predict_only_last_timestep is False:
-            # Mask to ensure we only return forecasts for the actual prediction set
-            mask = data_merged.index.isin(data.index)
-            forecasts = forecasts[mask, ...]
-
-        for lt in self.lead_times:
-            results[lt] = TimeSeriesForecast(lead_time=lt, predictions=forecasts[..., lt - 1], freq=self.freq, data=data)
-
-        return ForecastCollection(results=results)
-
     def predict(
         self,
         data: TimeSeriesDataFrame,
@@ -431,9 +377,8 @@ class Chronos(AbstractPredictor):
                     lead_time=lt,
                     predictions=forecasts[item_mask, :, lt - 1],
                     freq=self.freq,
-                    data=data.loc[item_mask].copy(),
                 )
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast)
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data.loc[item_mask].copy())
 
         return ForecastCollection(items=ts_forecast)
 

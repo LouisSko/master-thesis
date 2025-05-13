@@ -85,7 +85,7 @@ class QuantileRegression(AbstractPredictor):
                     model = sm.QuantReg(y_train, x_train)
                     self.models_qr[(item_id, lead_time, q)] = model.fit(q=q)
 
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> ForecastCollection:
 
         if self.models_qr is None:
             raise ValueError("Need to fit models first.")
@@ -108,11 +108,9 @@ class QuantileRegression(AbstractPredictor):
 
                 predictions_q = np.column_stack(predictions_q)
 
-                results_lt[lead_time] = HorizonForecast(
-                    lead_time=lead_time, predictions=torch.tensor(predictions_q), quantiles=self.quantiles, freq=self.freq, data=TimeSeriesDataFrame(data_sub)
-                )
+                results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(predictions_q), quantiles=self.quantiles, freq=self.freq)
 
-            results[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt)
+            results[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=data_sub.copy())
 
         return ForecastCollection(items=results)
 

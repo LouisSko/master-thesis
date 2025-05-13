@@ -38,7 +38,7 @@ class PostprocessorMLE(AbstractPostprocessor):
             item = data.get_time_series_forecast(item_id)
             for lead_time in item.get_lead_times():
                 lt_item = item.get_lead_time_forecast(lead_time)
-                
+
                 df = lt_item.to_dataframe().iloc[self.ignore_first_n_train_entries :].dropna()
                 log_df = np.log(df[lt_item.quantiles + ["target"]] + self.epsilon)
                 log_df["std_target"] = log_df["target"].rolling(20, min_periods=20, center=True).std()
@@ -96,10 +96,9 @@ class PostprocessorMLE(AbstractPostprocessor):
                     predictions=torch.tensor(predictions),
                     quantiles=lt_item.quantiles,
                     freq=lt_item.freq,
-                    data=lt_item.data,
                 )
 
-            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt)
+            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=item.data)
 
         return ForecastCollection(items=results_item_ids)
 

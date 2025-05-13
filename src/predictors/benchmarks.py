@@ -216,11 +216,11 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
             for lead_time in self.lead_times:
                 lt_forcast[lead_time] = HorizonForecast(
                     lead_time=lead_time,
+                    quantiles=self.quantiles,
                     predictions=torch.tensor(np.stack(forecasts[lead_time])),
                     freq=self.freq,
-                    data=data_sub.copy(),
                 )
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast)
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy())
 
         return ForecastCollection(items=ts_forecast)
 
@@ -371,10 +371,10 @@ class RollingQuantilePredictor(AbstractPredictor):
             for lead_time in self.lead_times:
                 lt_forcast[lead_time] = HorizonForecast(
                     lead_time=lead_time,
+                    quantiles=self.quantiles,
                     predictions=torch.tensor(forecasts),  # same trivial forecast for each lead time
                     freq=self.freq,
-                    data=data_sub.copy(),
                 )
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast)
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy())
 
         return ForecastCollection(items=ts_forecast)

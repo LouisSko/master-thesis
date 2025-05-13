@@ -104,7 +104,8 @@ class HorizonForecast(BaseModel):
     predictions: torch.Tensor  # Shape [num_samples, num_quantiles]
     quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
     freq: Union[pd.Timedelta, pd.DateOffset]
-    data: Union[TimeSeriesDataFrame, TabularDataFrame]
+    data: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None
+    parent: Optional["TimeSeriesForecast"] = None  # set this after construction
 
     class Config:
         arbitrary_types_allowed = True
@@ -115,6 +116,11 @@ class HorizonForecast(BaseModel):
         pred = pred.contiguous() if not pred.is_contiguous() else pred
         pred = pred.sort(dim=1)[0]  # avoid quantile crossing. TODO: potentially shouldn't be done silently
         return pred
+
+    def get_data(self) -> Union[TimeSeriesDataFrame, TabularDataFrame]:
+        if self.parent is None:
+            raise ValueError("HorizonForecast is not attached to a parent TimeSeriesForecast")
+        return self.parent.get_data()
 
     def to_dataframe(self, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
         """
@@ -127,22 +133,23 @@ class HorizonForecast(BaseModel):
             pd.DataFrame: DataFrame with timestamps, predicted quantiles, and corresponding target values.
         """
 
-        result = pd.DataFrame(self.predictions, index=self.data.index, columns=self.quantiles)
+        data = self.data or self.get_data()
+        result = pd.DataFrame(self.predictions, index=data.index, columns=self.quantiles)
 
         result["prediction_date"] = result.index.get_level_values("timestamp") + self.freq * self.lead_time
 
         # Reset index to turn MultiIndex into columns
         result_reset = result.reset_index()
-        data_reset = self.data.reset_index()
+        data_reset = data.reset_index()
 
         # add the target information.
-        if isinstance(self.data, TimeSeriesDataFrame):
+        if isinstance(data, TimeSeriesDataFrame):
             merged = result_reset.merge(
                 data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"]  # From result  # From preds.data
             )
 
         # add the target information. For tabular data frame, the target is already aligned
-        elif isinstance(self.data, TabularDataFrame):
+        elif isinstance(data, TabularDataFrame):
             merged = result_reset.merge(
                 data_reset, left_on=["item_id", "timestamp"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"]  # From result  # From preds.data
             )
@@ -312,12 +319,28 @@ class HorizonForecast(BaseModel):
 class TimeSeriesForecast(BaseModel):
     item_id: int
     lead_time_forecasts: Dict[int, HorizonForecast]  # {lead_time: HorizonForecast}
+    data: Union[TimeSeriesDataFrame, TabularDataFrame]
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def model_post_init(self, __context) -> None:
+        for hf in self.lead_time_forecasts.values():
+            hf.parent = self
+
+    def get_data(self) -> Union[TimeSeriesDataFrame, TabularDataFrame]:
+        return self.data
 
     def get_lead_times(self) -> List[int]:
         return list(self.lead_time_forecasts.keys())
 
     def get_quantiles(self) -> List[float]:
-        return sorted({item.quantiles for item in self.lead_time_forecasts.values()})
+        return sorted({q for item in self.lead_time_forecasts.values() for q in item.quantiles})
+
+    def get_freq(self) -> List[float]:
+        freqs = list({item.freq for item in self.lead_time_forecasts.values()})
+        assert len(freqs) == 1
+        return freqs[0]
 
     def get_lead_time_forecast(self, lead_time: int) -> HorizonForecast:
         return self.lead_time_forecasts[lead_time]
@@ -326,6 +349,7 @@ class TimeSeriesForecast(BaseModel):
         return self.lead_time_forecasts
 
     def add_lead_time_forecast(self, lead_time: int, prediction: HorizonForecast) -> None:
+        prediction.parent = self
         self.lead_time_forecasts[lead_time] = prediction
 
 
