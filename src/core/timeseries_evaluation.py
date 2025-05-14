@@ -464,6 +464,7 @@ class ForecastCollection(BaseModel):
         mean_time: bool = True,
         mean_item_ids: bool = False,
         mean_lead_times: bool = False,
+        decimal_places: Optional[int] = None,
     ) -> pd.DataFrame:
         item_ids = item_ids or self.get_item_ids()
         lead_times = lead_times or self.get_lead_times()
@@ -499,9 +500,15 @@ class ForecastCollection(BaseModel):
         #     if not mean_lead_times:
         #         crps_scores.loc[:, "Mean CRPS"] = crps_scores.mean(axis=1)
 
-        return crps_scores.round(3)
+        crps_scores = crps_scores.dropna()
 
-    def get_empirical_coverage_rates(self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False) -> pd.DataFrame:
+        if decimal_places:
+            return crps_scores.round(decimal_places)
+        return crps_scores
+
+    def get_empirical_coverage_rates(
+        self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, decimal_places: Optional[int] = None
+    ) -> pd.DataFrame:
         item_ids = item_ids or self.get_item_ids()
         lead_times = lead_times or self.get_lead_times()
 
@@ -522,9 +529,14 @@ class ForecastCollection(BaseModel):
             coverage_df.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_df.mean(axis=1)
 
         coverage_df.index.name = "quantile"
-        return coverage_df.round(3)
 
-    def get_quantile_scores(self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False) -> pd.DataFrame:
+        if decimal_places:
+            return coverage_df.round(decimal_places)
+        return coverage_df
+
+    def get_quantile_scores(
+        self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, decimal_places: Optional[int] = None
+    ) -> pd.DataFrame:
         item_ids = item_ids or self.get_item_ids()
         lead_times = lead_times or self.get_lead_times()
 
@@ -532,7 +544,7 @@ class ForecastCollection(BaseModel):
         for lt in lead_times:
             values = []
             for item_id in item_ids:
-                val = self.get_time_series_forecast(item_id).get_lead_time_forecast(lt).get_quantile_score(item_ids=[item_id], mean_time=True)
+                val = self.get_time_series_forecast(item_id).get_lead_time_forecast(lt).get_quantile_score(item_ids=[item_id], mean_time=True, decimal_places=decimal_places)
                 values.append(val)
             if values:
                 scores[lt] = pd.DataFrame(values).mean(axis=0)
@@ -545,7 +557,10 @@ class ForecastCollection(BaseModel):
 
         df.loc["Mean (CRPS/2)", :] = df.mean()
         df.index.name = "quantile"
-        return df.round(3)
+
+        if decimal_places:
+            return df.round(decimal_places)
+        return df
 
     def get_pit_values(self, lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> Dict[int, np.ndarray]:
         item_ids = item_ids or self.get_item_ids()
@@ -666,6 +681,7 @@ def get_quantile_scores(
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
+    decimal_places: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Computes quantile scores for different prediction sources,
@@ -684,6 +700,8 @@ def get_quantile_scores(
     reference_predictions : Optional[str], default=None
         Key of a prediction set to be used as a reference for normalization.
         If provided, all CRPS values will be divided by the CRPS values from this prediction.
+    decimal_places : Optional[int], default=None
+        Number of decimal places to round numerical values to. If None, no rounding is applied.
 
     Returns
     --------
@@ -698,10 +716,15 @@ def get_quantile_scores(
 
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
-    return scores.round(3)
+
+    if decimal_places:
+        return scores.round(decimal_places)
+    return scores
 
 
-def get_empirical_coverage_rates(predictions: Dict[str, ForecastCollection], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
+def get_empirical_coverage_rates(
+    predictions: Dict[str, ForecastCollection], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None, decimal_places: Optional[int] = None
+) -> pd.DataFrame:
     """Computes empirical coverage rates for different prediction sources,
     averaged across the specified lead times.
 
@@ -714,6 +737,8 @@ def get_empirical_coverage_rates(predictions: Dict[str, ForecastCollection], lea
         List of lead times to filter CRPS scores. If None, all lead times are used.
     item_ids : Optional[List[int]], default=None
         List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+    decimal_places : Optional[int], default=None
+        Number of decimal places to round numerical values to. If None, no rounding is applied.
 
     Returns
     --------
@@ -722,10 +747,14 @@ def get_empirical_coverage_rates(predictions: Dict[str, ForecastCollection], lea
         and values represent the empirical coverage rates averaged over the specified lead times.
     """
 
-    scores = pd.concat([pred.get_empirical_coverage_rates(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    scores = pd.concat(
+        [pred.get_empirical_coverage_rates(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids, decimal_places=decimal_places) for pred in predictions.values()], axis=1
+    )
     scores.columns = [key for key in predictions.keys()]
 
-    return scores.round(3)
+    if decimal_places:
+        return scores.round(decimal_places)
+    return scores
 
 
 def get_crps_scores(
@@ -734,6 +763,8 @@ def get_crps_scores(
     mean_lead_times: bool = False,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
+    add_mean: Optional[bool] = True,
+    decimal_places: Optional[int] = None,
 ) -> pd.DataFrame:
     """Computes and returns CRPS (Continuous Ranked Probability Score) values
     averaged across specified lead times and optionally normalized by a reference prediction.
@@ -750,6 +781,10 @@ def get_crps_scores(
     reference_predictions : Optional[str], default=None
         Key of a prediction set to be used as a reference for normalization.
         If provided, all CRPS values will be divided by the CRPS values from this prediction.
+    add_mean : Optional[bool], default=True
+        Adds additional row at the end of the dataframe containing the Mean CRPS score
+    decimal_places : Optional[int], default=None
+        Number of decimal places to round numerical values to. If None, no rounding is applied.
 
     Returns
     --------
@@ -759,15 +794,24 @@ def get_crps_scores(
     """
 
     scores = pd.concat(
-        [pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, mean_item_ids=True, item_ids=item_ids) for pred in predictions.values()], axis=0
+        [
+            pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, mean_item_ids=True, item_ids=item_ids, decimal_places=None)
+            for pred in predictions.values()
+        ],
+        axis=0,
     ).T
     scores.columns = [key for key in predictions.keys()]
     scores.index.name = "lead times"
+
+    if add_mean:
+        scores.loc["Mean CRPS", :] = scores.mean(axis=0)
+
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
 
-    scores.loc["Mean CRPS", :] = scores.mean(axis=0)
-    return scores.round(3)
+    if decimal_places:
+        return scores.round(decimal_places)
+    return scores
 
 
 def plot_crps(
@@ -806,17 +850,17 @@ def plot_crps(
         predictions = {key: value for key, value in predictions.items() if key in selected_keys}
 
     # Compute CRPS DataFrame
-    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids, decimal_places=None) for pred in predictions.values()], axis=1)
 
     df.columns = list(predictions.keys())
-
-    if reference_predictions:
-        df = df.apply(lambda x: x / x[reference_predictions], axis=1)
 
     df = df.reset_index(level=0, drop=True).groupby("timestamp").mean()
 
     if rolling_window_eval:
         df = df.rolling(window=rolling_window_eval).mean()
+
+    if reference_predictions:
+        df = df.apply(lambda x: x / x[reference_predictions], axis=1)
 
     # Plotting with matplotlib
     plt.figure(figsize=(12, 6))
@@ -865,7 +909,7 @@ def plot_crps_across_lead_times(
     if selected_keys:
         predictions = {key: value for key, value in predictions.items() if key in selected_keys}
 
-    df = get_crps_scores(predictions, item_ids=item_ids, reference_predictions=reference_predictions)
+    df = get_crps_scores(predictions, item_ids=item_ids, reference_predictions=reference_predictions, add_mean=False, decimal_places=None)
 
     ax = df.plot(figsize=(12, 8), legend=True)
     ax.set_title("CRPS Scores Comparison across Forecasting Lead Times", fontsize=16)
@@ -883,6 +927,7 @@ def get_crps_by_period(
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
+    decimal_places: Optional[int] = None,
 ) -> pd.DataFrame:
     """Computes the mean CRPS (Continuous Ranked Probability Score) over time periods
     defined by timestamp splits for different prediction sources.
@@ -902,6 +947,8 @@ def get_crps_by_period(
     reference_predictions : Optional[str], default=None
         Key of a prediction set to be used as a reference for normalization.
         If provided, all CRPS values will be divided by the CRPS values from this prediction.
+    decimal_places : Optional[int], default=None
+        Number of decimal places to round numerical values to. If None, no rounding is applied.
 
     Returns
     --------
@@ -910,7 +957,10 @@ def get_crps_by_period(
         optionally normalized by a reference prediction. Each column corresponds to a prediction key.
     """
 
-    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, mean_item_ids=False, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    df = pd.concat(
+        [pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, mean_item_ids=False, item_ids=item_ids, decimal_places=None) for pred in predictions.values()],
+        axis=1,
+    )
 
     df.columns = [key for key in predictions.keys()]
 
@@ -939,7 +989,9 @@ def get_crps_by_period(
     if reference_predictions:
         results = results.apply(lambda x: x / x[reference_predictions], axis=1)
 
-    return results.round(3)
+    if decimal_places:
+        return results.round(decimal_places)
+    return results
 
 
 def load_predictions(
