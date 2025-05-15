@@ -1,15 +1,16 @@
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Deque
 import torch
 from tqdm import tqdm
-from src.core.timeseries_evaluation import PredictionLeadTimes, PredictionLeadTime
 from src.core.base import AbstractPredictor
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
 import logging
 from pydantic import Field
 from pathlib import Path
 from pandas.tseries.frequencies import to_offset
+from collections import deque
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
@@ -95,7 +96,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         else:
             raise ValueError(f"Unsupported frequency '{fstr}' for NNPredictor")
 
-    def _initialize_history(self, item_ids: List[Any]) -> Dict[Any, Dict[str, np.ndarray]]:
+    def _initialize_history(self, item_ids: List[Any]) -> Dict[int, Dict[int, Deque[float]]]:
         """
         Initialize empty history for each item ID and each possible bucket.
 
@@ -106,13 +107,13 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
 
         Returns
         -------
-        Dict[Any, Dict[str, np.ndarray]]
+        Dict[int, Dict[int, Deque[float]]]
             A nested dictionary with item IDs and bucket keys as keys,
             mapping to arrays of past observed target values.
         """
-        return {item_id: {key: np.array([], dtype=float) for key in self.bucket_keys} for item_id in item_ids}
+        return {item_id: {key: deque(maxlen=self.last_n_samples) for key in self.bucket_keys} for item_id in item_ids}
 
-    def _build_history_from_context(self, context_data: TimeSeriesDataFrame) -> Dict[Any, Dict[str, np.ndarray]]:
+    def _build_history_from_context(self, context_data: TimeSeriesDataFrame) -> Dict[int, Dict[int, Deque[float]]]:
         """
         Build history from past context data by assigning each observation
         to a time-based bucket and filtering out NaN values.
@@ -124,7 +125,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
 
         Returns
         -------
-        Dict[Any, Dict[str, np.ndarray]]
+        Dict[int, Dict[int, Deque[float]]]
             Dictionary containing historical target values per item and bucket.
         """
         df = context_data.reset_index()
@@ -133,9 +134,8 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
 
         history = self._initialize_history(context_data.item_ids)
         for (item_id, bucket), vals in grouped:
-            vals = vals.to_numpy()
-            clean_vals = vals[~np.isnan(vals)]
-            history[item_id][bucket] = clean_vals[-self.last_n_samples :] if self.last_n_samples else clean_vals
+            clean_vals = vals.dropna().values[-self.last_n_samples :] if self.last_n_samples else vals.dropna().values
+            history[item_id][bucket].extend(clean_vals.tolist())  # extend with list of floats
 
         return history
 
@@ -147,17 +147,24 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         """
         No fitting required. This predictor uses only historical patterns at predict time.
         """
-        logging.info("NNPredictor: no fit step; predict() will build or update history.")
+        logging.info("RollingSeasonalQuantilePredictor: No fit step; predict() will build or update history.")
 
     def predict(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         predict_only_last_timestep: bool = False,
-    ) -> PredictionLeadTimes:
+    ) -> ForecastCollection:
         """
-        Generate quantile forecasts by matching each forecasted timestamp to its
-        nearest historical "bucket" and computing empirical quantiles.
+        Generate forecasts using rolling quantiles over past target values.
+
+        Forecast quantiles for each lead time using seasonal rolling history of target values.
+
+        Update historical buckets with new target values and compute forecasts.
+
+        For each (item_id, timestamp), the method:
+        - Updates the appropriate bucket with the latest observation.
+        - Computes quantile forecasts for each lead time based on the future timestamp's bucket.
 
         Parameters
         ----------
@@ -170,8 +177,8 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
 
         Returns
         -------
-        PredictionLeadTimes
-            Quantile forecasts for each lead time and item id.
+        ForecastCollection
+            Forecasted quantiles for each item and lead time.
         """
         if previous_context_data is not None:
             logging.info("Building history from provided context_data.")
@@ -180,67 +187,38 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
             logging.info("Initializing empty history.")
             history = self._initialize_history(data.item_ids)
 
-        forecasts, updated_history = self._forecast_from_history(data, history)
-        return forecasts
-
-    def _forecast_from_history(
-        self,
-        data: TimeSeriesDataFrame,
-        history: Dict[Any, Dict[str, np.ndarray]],
-    ) -> Tuple[PredictionLeadTimes, Dict[Any, Dict[str, np.ndarray]]]:
-        """
-        Update historical buckets with new target values and compute forecasts.
-
-        For each (item_id, timestamp), the method:
-        - Updates the appropriate bucket with the latest observation.
-        - Computes quantile forecasts for each lead time based on the future timestamp's bucket.
-
-        Parameters
-        ----------
-        data : TimeSeriesDataFrame
-            New data to incorporate into history and forecast.
-        history : Dict[Any, Dict[str, np.ndarray]]
-            Current history of past values per item and bucket.
-
-        Returns
-        -------
-        Tuple[PredictionLeadTimes, Dict[Any, Dict[str, np.ndarray]]]
-            - The predicted quantiles wrapped in a PredictionLeadTimes object.
-            - The updated history with new observations.
-        """
-        forecasts: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
+        ts_forecast: Dict[int, TimeSeriesForecast] = {}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
-        for (item_id, ts), row in tqdm(data.iterrows(), total=len(data), desc="Predicting using Nearest Neighbour"):
-            # update history now
-            if not np.isnan(row["target"].item()):
-                key_now = self._make_key(ts)
-                updated = np.append(history[item_id][key_now], row["target"].item())
-                history[item_id][key_now] = updated[-self.last_n_samples :] if self.last_n_samples else updated
+        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
+            data_sub = data.loc[[item_id]]
+            item_history = history[item_id]
+            forecasts = {lt: [] for lt in self.lead_times}
 
-            # forecast for each lead time
-            for lt in self.lead_times:
-                pred_ts = ts + self.offset * lt
-                key_pred = self._make_key(pred_ts)
-                arr = history[item_id].get(key_pred, np.array([], dtype=float))
-                if arr.size == 0:
-                    q_vals = np.full(len(self.quantiles), np.nan)
-                else:
-                    recent = arr[-self.last_n_samples :] if self.last_n_samples else arr
-                    q_vals = np.percentile(recent, percentiles)
-                forecasts[lt].append(q_vals)
+            timestamps = data_sub.index.get_level_values("timestamp")
+            target_vals = data_sub["target"].values
 
-        # wrap into PredictionLeadTimes
-        results: Dict[int, PredictionLeadTime] = {}
-        for lt, fc_list in forecasts.items():
-            results[lt] = PredictionLeadTime(
-                lead_time=lt,
-                predictions=torch.tensor(np.vstack(fc_list)),
-                freq=self.offset,
-                data=data,
-            )
+            for timestamp, target_val in zip(timestamps, target_vals):
+                if not np.isnan(target_val):
+                    key_now = self._make_key(timestamp)
+                    item_history[key_now].append(target_val)
 
-        return PredictionLeadTimes(results=results), history
+                for lead_time in self.lead_times:
+                    pred_timestamp = timestamp + self.offset * lead_time
+                    key_pred = self._make_key(pred_timestamp)
+                    arr = np.array(item_history.get(key_pred, []))
+                    if arr.size == 0:
+                        forecasts[lead_time].append(np.full(len(self.quantiles), np.nan))
+                    else:
+                        forecasts[lead_time].append(np.percentile(arr, percentiles))
+
+            lt_forcast: Dict[int, HorizonForecast] = {}
+            for lead_time in self.lead_times:
+                lt_forcast[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(np.stack(forecasts[lead_time])))
+
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
+
+        return ForecastCollection(item_ids=ts_forecast)
 
 
 class RollingQuantilePredictor(AbstractPredictor):
@@ -280,7 +258,7 @@ class RollingQuantilePredictor(AbstractPredictor):
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
-    def _initialize_history(self, item_ids: List[Any]) -> Dict[Any, Dict[str, np.ndarray]]:
+    def _initialize_history(self, item_ids: List[Any]) -> Dict[int, Deque[float]]:
         """
         Initialize an empty history dictionary for each item_id.
 
@@ -294,9 +272,9 @@ class RollingQuantilePredictor(AbstractPredictor):
         Dict[Any, np.ndarray]
             Dictionary mapping item IDs to empty arrays.
         """
-        return {item_id: np.array([], dtype=float) for item_id in item_ids}
+        return {item_id: deque(maxlen=self.last_n_samples) for item_id in item_ids}
 
-    def _build_history_from_context(self, context_data: TimeSeriesDataFrame) -> Dict[Union[int, str], np.ndarray]:
+    def _build_history_from_context(self, context_data: TimeSeriesDataFrame) -> Dict[int, Deque[float]]:
         """
         Build history from past context data by collecting non-NaN target values.
 
@@ -315,9 +293,8 @@ class RollingQuantilePredictor(AbstractPredictor):
         df = context_data.reset_index()
 
         for (item_id,), vals in df.groupby(["item_id"])["target"]:
-            vals = vals.to_numpy()
-            clean_vals = vals[~np.isnan(vals)]
-            history[item_id] = clean_vals[-self.last_n_samples :] if self.last_n_samples else clean_vals
+            clean_vals = vals.dropna().values[-self.last_n_samples :] if self.last_n_samples else vals.dropna().values
+            history[item_id].extend(clean_vals.tolist())  # extend with list of floats
 
         return history
 
@@ -336,9 +313,11 @@ class RollingQuantilePredictor(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         predict_only_last_timestep: bool = False,
-    ) -> PredictionLeadTimes:
+    ) -> ForecastCollection:
         """
         Generate forecasts using rolling quantiles over past target values.
+
+        Forecast quantiles for each lead time using rolling history of target values.
 
         Parameters
         ----------
@@ -351,7 +330,7 @@ class RollingQuantilePredictor(AbstractPredictor):
 
         Returns
         -------
-        PredictionLeadTimes
+        ForecastCollection
             Forecasted quantiles for each item and lead time.
         """
         if previous_context_data is not None:
@@ -361,54 +340,36 @@ class RollingQuantilePredictor(AbstractPredictor):
             logging.info("Initializing empty history.")
             history = self._initialize_history(data.item_ids)
 
-        forecasts, updated_history = self._forecast_from_history(data, history)
-        return forecasts
-
-    def _forecast_from_history(
-        self,
-        data: TimeSeriesDataFrame,
-        history: Dict[Any, Dict[str, np.ndarray]],
-    ) -> Tuple[PredictionLeadTimes, Dict[Any, Dict[str, np.ndarray]]]:
-        """
-        Forecast quantiles for each lead time using rolling history of target values.
-
-        Parameters
-        ----------
-        data : TimeSeriesDataFrame
-            New data to incorporate into history and forecast.
-        history : Dict[Any, Dict[str, np.ndarray]]
-            Current history of past values per item and bucket.
-
-        Returns
-        -------
-        Tuple[PredictionLeadTimes, Dict[Any, Dict[str, np.ndarray]]]
-            - The predicted quantiles wrapped in a PredictionLeadTimes object.
-            - The updated history with new observations.
-        """
-        forecasts: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
+        ts_forecast: Dict[int, TimeSeriesForecast] = {}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
-        for (item_id, ts), row in tqdm(data.iterrows(), total=len(data), desc="Predicting using Rolling Window Benchmark"):
-            if not np.isnan(row["target"].item()):
-                updated = np.append(history[item_id], row["target"].item())
-                history[item_id] = updated[-self.last_n_samples :] if self.last_n_samples else updated
+        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
+            data_sub = data.loc[[item_id]]
+            forecasts = []
+            item_history = history[item_id]
 
-            arr = history.get(item_id, np.array([], dtype=float))
-            if arr.size == 0:
-                q_vals = np.full(len(self.quantiles), np.nan)
-            else:
-                q_vals = np.percentile(arr, percentiles)
+            timestamps = data_sub.index.get_level_values("timestamp")
+            target_vals = data_sub["target"].values
 
-            for lt in self.lead_times:
-                forecasts[lt].append(q_vals)
+            for timestamp, target_val in zip(timestamps, target_vals):
+                if not np.isnan(target_val):
+                    item_history.append(target_val)
 
-        results: Dict[int, PredictionLeadTime] = {}
-        for lt, fc_list in forecasts.items():
-            results[lt] = PredictionLeadTime(
-                lead_time=lt,
-                predictions=torch.tensor(np.vstack(fc_list)),
-                freq=self.offset,
-                data=data,
-            )
+                arr = np.array(history.get(item_id, []))
+                if arr.size == 0:
+                    forecasts.append(np.full(len(self.quantiles), np.nan))
+                else:
+                    forecasts.append(np.percentile(arr, percentiles))
 
-        return PredictionLeadTimes(results=results), history
+            forecasts = np.stack(forecasts)
+            lt_forcast: Dict[int, HorizonForecast] = {}
+
+            for lead_time in self.lead_times:
+                lt_forcast[lead_time] = HorizonForecast(
+                    lead_time=lead_time,
+                    predictions=torch.tensor(forecasts),  # same trivial forecast for each lead time
+                )
+
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
+
+        return ForecastCollection(item_ids=ts_forecast)

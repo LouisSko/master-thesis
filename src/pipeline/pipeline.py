@@ -1,6 +1,6 @@
 import torch
-from typing import Dict, Any, List, Optional, Type, Union, Literal, Tuple
-from src.core.timeseries_evaluation import PredictionLeadTime, PredictionLeadTimes, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS
+from typing import Dict, List, Optional, Type, Union, Literal, Tuple
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS
 from src.core.base import AbstractPostprocessor, AbstractPredictor
 from src.core.utils import CustomJSONEncoder
 from autogluon.timeseries import TimeSeriesDataFrame
@@ -135,7 +135,7 @@ class ForecastingPipeline(AbstractPipeline):
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         save_results: bool = False,
-    ) -> PredictionLeadTimes:
+    ) -> Dict[str, ForecastCollection]:
         """
         Run a backtest over the specified time period.
 
@@ -164,7 +164,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         Returns
         -------
-        PredictionLeadTimes
+        ForecastCollection
             The predictions over the backtest period.
         """
 
@@ -301,7 +301,7 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-    ) -> Dict[str, PredictionLeadTimes]:
+    ) -> Dict[str, ForecastCollection]:
         """
         predict on the test data.
 
@@ -313,7 +313,7 @@ class ForecastingPipeline(AbstractPipeline):
             The previous context data. This is used by some predictors.
         Returns
         -------
-        Dict[str, PredictionLeadTimes]
+        Dict[str, ForecastCollection]
             Dictionary with raw predictions.
         """
 
@@ -373,18 +373,18 @@ class ForecastingPipeline(AbstractPipeline):
         end_time = pd.Timestamp.now()
         logging.info("Postprocessors training completed in %s seconds.", (end_time - start_time).total_seconds())
 
-    def apply_postprocessing(self, predictions: Dict[str, PredictionLeadTimes]) -> Dict[str, PredictionLeadTimes]:
+    def apply_postprocessing(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
         """
         Apply postprocessing to predictions.
 
         Parameters
         ----------
-        predictions : Dict[str, PredictionLeadTimes]
+        predictions : Dict[str, ForecastCollection]
             The predictions. Keys correspond to the utilized model, e.g. `Chronos` or `QuantileRegression`
 
         Returns
         -------
-        Dict[str, PredictionLeadTimes]
+        Dict[str, ForecastCollection]
             Dictionary with processed predictions.
         """
         if not self.postprocessors:
@@ -416,7 +416,7 @@ class ForecastingPipeline(AbstractPipeline):
         val_window_size: Optional[pd.DateOffset],
         test_window_size: Optional[pd.DateOffset],
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
-    ) -> Dict[str, PredictionLeadTimes]:
+    ) -> Dict[str, ForecastCollection]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
 
         data_train, data_val, data_test = self.split_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
@@ -443,97 +443,79 @@ class ForecastingPipeline(AbstractPipeline):
 
         return predictions
 
-    def _merge_results(self, results: Dict[pd.Timestamp, Dict[str, PredictionLeadTimes]]) -> Dict[str, PredictionLeadTimes]:
+    def _merge_results(self, backtest_results: Dict[pd.Timestamp, Dict[str, ForecastCollection]]) -> Dict[str, ForecastCollection]:
 
-        logging.info("Merging test results from the %s different runs: %s", len(results.keys()), list(results.keys()))
+        all_predictors = {key for result in backtest_results.values() for key in result}
 
-        results_all = {}
+        logging.info("Merge results for each of the following predictors/postprocessors %s", all_predictors)
 
-        # Collect all unique postprocessor names
-        all_postprocessors = set()
-        for result in results.values():
-            all_postprocessors.update(result.keys())
+        merged_results = {}
+        for predictor_name in all_predictors:
+            merged_results[predictor_name] = self.merge_predictor_backtest(backtest_results, predictor_name)
 
-        logging.info("Merge results for each of the following postprocessors %s", all_postprocessors)
+        logging.info("Merge completed.")
 
-        # extract results for each postprocessor and merge those
-        for postprocessor_name in all_postprocessors:
+        return merged_results
 
-            pp_results = {date: result[postprocessor_name] for date, result in results.items() if postprocessor_name in result}
-            # extract lead times
-            lead_times: List[int] = sorted({lt for prediction_lead_times in pp_results.values() for lt in prediction_lead_times.results.keys()})
+    def merge_predictor_backtest(
+        self,
+        backtest_results: Dict[pd.Timestamp, Dict[str, ForecastCollection]],
+        predictor_name: str,
+    ) -> ForecastCollection:
+        """
+        Merge a single predictor's backtest windows into one ForecastCollection.
 
-            results_merged = {}
+        Parameters
+        ----------
+        backtest_results : Dict[pd.Timestamp, Dict[str, ForecastCollection]]
+            mapping from window-start date to all predictors' ForecastCollection.
+        predictor_name : str
+            which predictor to merge.
 
-            # create merged PredictionLeadTimes object by merging individual PredictionLeadTime objects
+        Returns
+        -------
+            A ForecastCollection whose TimeSeriesForecasts have all windows stitched together.
+        """
+        # 1) sort by window-start date
+        dates = sorted(backtest_results.keys())
+
+        # 2) grab each window's ForecastCollection for this predictor
+        per_window_fc = [backtest_results[d][predictor_name] for d in dates]
+
+        # 3) identify all item_ids
+        item_ids = per_window_fc[0].get_item_ids()
+
+        merged_ts: Dict[int, TimeSeriesForecast] = {}
+
+        for item_id in item_ids:
+            # 4) collect this item’s TimeSeriesForecast from each window
+            ts_list = [fc.get_time_series_forecast(item_id) for fc in per_window_fc]
+
+            lead_times = ts_list[0].get_lead_times()
+            quantiles = ts_list[0].quantiles
+            freq = ts_list[0].freq
+
+            # 5) concatenate underlying dataframes
+            data_concat = pd.concat([ts.data for ts in ts_list])
+
+            # 6) for each lead time, stack predictions
+            lead_time_forecasts: Dict[int, HorizonForecast] = {}
             for lt in lead_times:
-                results_lead_time = [result.results[lt] for result in pp_results.values()]
+                # gather the raw prediction tensors in window order
+                preds = torch.vstack([ts.get_lead_time_forecast(lt).predictions for ts in ts_list])
+                # build a new HorizonForecast
+                lead_time_forecasts[lt] = HorizonForecast(lead_time=lt, predictions=preds)
 
-                q = _get_quantiles(results_lead_time)
-                f = _get_freq(results_lead_time)
-                l = _get_lead_time(results_lead_time)
-                p = torch.tensor(pd.concat([result.to_dataframe() for result in results_lead_time]).sort_index()[q].values)
-                d = pd.concat([result.data for result in results_lead_time]).sort_index()
+            # 7) re-create the merged TimeSeriesForecast
+            merged_ts[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=lead_time_forecasts,
+                data=data_concat,
+                quantiles=quantiles,
+                freq=freq,
+            )
 
-                if all(isinstance(result.data, TabularDataFrame) for result in results_lead_time):
-                    d = TabularDataFrame(d)
-                elif all(isinstance(result.data, TimeSeriesDataFrame) for result in results_lead_time):
-                    d = TimeSeriesDataFrame(d)
-
-                results_merged[lt] = PredictionLeadTime(lead_time=l, freq=f, quantiles=q, predictions=p, data=d)
-
-                results_all[postprocessor_name] = PredictionLeadTimes(results=results_merged)
-
-        logging.info("Merging completed")
-
-        return results_all
-
-    def _save_backtest_results(self, results: Dict[str, PredictionLeadTimes], backtest_params: Dict) -> None:
-        """Save backtest results and config."""
-
-        logging.info("Storing backtest results...")
-
-        for method, result in results.items():
-            save_path = self.pipeline_dir_backtests / method
-
-            create_dir(save_path)
-
-            # Add information
-            eval_config_info = {}
-            eval_config_info = {"applied_postprocessor": None if method == "raw" else method}
-            eval_config_info.update(result.get_crps(mean_time=True).to_dict())
-            eval_config_info.update(result.get_empirical_coverage_rates(mean_lead_times=True).to_dict())
-            eval_config_info.update(result.get_quantile_scores(mean_lead_times=True).to_dict())
-            config = self.get_config(backtest_params, eval_config_info)
-
-            # Save config
-            config_path = save_path / "config.json"
-            with open(config_path, "w") as f:
-                json.dump(config, f, indent=4, cls=CustomJSONEncoder)
-            logging.info("Saved backtest configuration for `%s` including evaluation results to: %s.", method, config_path)
-            # Save predictions
-            result.save(save_path / "predictions.joblib")
-
-
-# check if all lead times, quantiles and freq are the same
-def _get_common_attr(results: List[PredictionLeadTime], attr: str) -> Any:
-    values = [getattr(result, attr) for result in results]
-    if all(val == values[0] for val in values):
-        return values[0]
-    else:
-        raise ValueError(f"Not all {attr}s match.")
-
-
-def _get_lead_time(results: List[PredictionLeadTime]) -> int:
-    return _get_common_attr(results, "lead_time")
-
-
-def _get_freq(results: List[PredictionLeadTime]) -> pd.Timedelta:
-    return _get_common_attr(results, "freq")
-
-
-def _get_quantiles(results: List[PredictionLeadTime]) -> List[float]:
-    return _get_common_attr(results, "quantiles")
+        return ForecastCollection(item_ids=merged_ts)
 
 
 def create_dir(path: Path) -> None:

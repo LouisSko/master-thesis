@@ -1,12 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 import pandas as pd
-from src.core.timeseries_evaluation import PredictionLeadTimes, TabularDataFrame
+from src.core.timeseries_evaluation import ForecastCollection, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 from typing import Dict, List, Optional, Type, Union, Literal
 from pathlib import Path
 import joblib
 import logging
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -30,7 +31,7 @@ class AbstractPredictor(ABC):
         pass
 
     @abstractmethod
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> PredictionLeadTimes:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> ForecastCollection:
         pass
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
@@ -90,14 +91,14 @@ class AbstractPredictor(ABC):
 
 class AbstractPostprocessor(ABC):
     def __init__(self) -> None:
-        self.ignore_first_n_train_entries = 500
+        self.ignore_first_n_train_entries = 200
 
     @abstractmethod
-    def fit(self, data: PredictionLeadTimes) -> None:
+    def fit(self, data: ForecastCollection) -> None:
         pass
 
     @abstractmethod
-    def postprocess(self, data: PredictionLeadTimes) -> PredictionLeadTimes:
+    def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         pass
 
     def save(self, file_path: Path) -> None:
@@ -146,7 +147,7 @@ class AbstractPipeline(ABC):
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         save_results: bool = False,
-    ) -> PredictionLeadTimes:
+    ) -> ForecastCollection:
         """
         Run a backtest over the specified time period.
 
@@ -175,7 +176,7 @@ class AbstractPipeline(ABC):
 
         Returns
         -------
-        PredictionLeadTimes
+        ForecastCollection
             The predictions over the backtest period.
         """
 
@@ -205,7 +206,7 @@ class AbstractPipeline(ABC):
         self,
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-    ) -> Dict[str, PredictionLeadTimes]:
+    ) -> Dict[str, ForecastCollection]:
         """
         predict on the test data.
 
@@ -217,7 +218,7 @@ class AbstractPipeline(ABC):
             The previous context data. This is used by some predictors.
         Returns
         -------
-        Dict[str, PredictionLeadTimes]
+        Dict[str, ForecastCollection]
             Dictionary with raw predictions.
         """
 
@@ -233,18 +234,18 @@ class AbstractPipeline(ABC):
         """
 
     @abstractmethod
-    def apply_postprocessing(self, predictions: Dict[str, PredictionLeadTimes]) -> Dict[str, PredictionLeadTimes]:
+    def apply_postprocessing(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
         """
         Apply postprocessing to predictions.
 
         Parameters
         ----------
-        predictions : Dict[str, PredictionLeadTimes]
+        predictions : Dict[str, ForecastCollection]
             The predictions. Keys correspond to the utilized model, e.g. `Chronos` or `QuantileRegression`
 
         Returns
         -------
-        Dict[str, PredictionLeadTimes]
+        Dict[str, ForecastCollection]
             Dictionary with processed predictions.
         """
 
