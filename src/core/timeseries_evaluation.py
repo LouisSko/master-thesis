@@ -179,7 +179,14 @@ class TimeSeriesForecast(BaseModel):
             float: The mean CRPS score across all samples.
         """
         data = self.to_dataframe(forecast_horizon)
-        crps = sr.crps_quantile(data["target"].to_numpy(), data[self.quantiles].to_numpy(), self.quantiles)
+        quantile_predictions = data[self.quantiles].to_numpy()
+        target = data["target"].to_numpy()
+
+        if all(np.isnan(target)):
+            # logging.warning("No crps score can be calculated for lead time: %s", forecast_horizon)
+            return np.array([np.nan]) if mean_time else torch.full((len(target),), float("nan"))
+
+        crps = sr.crps_quantile(target, quantile_predictions, self.quantiles)
 
         if mean_time:
             return np.array([crps[~np.isnan(crps)].mean()])
@@ -443,7 +450,7 @@ class ForecastCollection(BaseModel):
                     scores.append(crps)
 
             scores = np.vstack(scores).T
-            idx = [item_id] if mean_time else item.to_dataframe(lt).index  # TODO: make this nicer
+            idx = [item_id] if mean_time else item.to_dataframe(lt).index
             all_scores.append(pd.DataFrame(scores, index=idx, columns=lead_times))
 
         crps_scores = pd.concat(all_scores)
@@ -464,7 +471,7 @@ class ForecastCollection(BaseModel):
         #     if not mean_lead_times:
         #         crps_scores.loc[:, "Mean CRPS"] = crps_scores.mean(axis=1)
 
-        crps_scores = crps_scores.dropna()
+        # crps_scores = crps_scores.dropna()
 
         if decimal_places:
             return crps_scores.round(decimal_places)
