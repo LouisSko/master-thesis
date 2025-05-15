@@ -102,10 +102,6 @@ class HorizonForecast(BaseModel):
 
     lead_time: int
     predictions: torch.Tensor  # Shape [num_samples, num_quantiles]
-    quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
-    freq: Union[pd.Timedelta, pd.DateOffset]
-    data: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None
-    parent: Optional["TimeSeriesForecast"] = None  # set this after construction
 
     class Config:
         arbitrary_types_allowed = True
@@ -117,12 +113,30 @@ class HorizonForecast(BaseModel):
         pred = pred.sort(dim=1)[0]  # avoid quantile crossing. TODO: potentially shouldn't be done silently
         return pred
 
-    def get_data(self) -> Union[TimeSeriesDataFrame, TabularDataFrame]:
-        if self.parent is None:
-            raise ValueError("HorizonForecast is not attached to a parent TimeSeriesForecast")
-        return self.parent.get_data()
 
-    def to_dataframe(self, item_ids: Optional[List[int]] = None) -> pd.DataFrame:
+class TimeSeriesForecast(BaseModel):
+    item_id: int
+    lead_time_forecasts: Dict[int, HorizonForecast]  # {lead_time: HorizonForecast}
+    data: TimeSeriesDataFrame
+    quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    freq: Union[pd.Timedelta, pd.DateOffset]
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def get_lead_times(self) -> List[int]:
+        return list(self.lead_time_forecasts.keys())
+
+    def get_lead_time_forecast(self, lead_time: int) -> HorizonForecast:
+        return self.lead_time_forecasts[lead_time]
+
+    def get_all_lead_time_forecast(self) -> List[HorizonForecast]:
+        return self.lead_time_forecasts
+
+    def add_lead_time_forecast(self, lead_time: int, prediction: HorizonForecast) -> None:
+        self.lead_time_forecasts[lead_time] = prediction
+
+    def to_dataframe(self, forecast_horizon: int) -> pd.DataFrame:
         """
         Converts the prediction data into a Pandas DataFrame and merges it with the actual target values.
 
@@ -133,26 +147,18 @@ class HorizonForecast(BaseModel):
             pd.DataFrame: DataFrame with timestamps, predicted quantiles, and corresponding target values.
         """
 
-        data = self.data or self.get_data()
-        result = pd.DataFrame(self.predictions, index=data.index, columns=self.quantiles)
+        horizon_fc = self.get_lead_time_forecast(forecast_horizon)
+        result = pd.DataFrame(horizon_fc.predictions, index=self.data.index, columns=self.quantiles)
 
-        result["prediction_date"] = result.index.get_level_values("timestamp") + self.freq * self.lead_time
+        # add prediction date information
+        result["prediction_date"] = result.index.get_level_values("timestamp") + self.freq * horizon_fc.lead_time
 
         # Reset index to turn MultiIndex into columns
         result_reset = result.reset_index()
-        data_reset = data.reset_index()
+        data_reset = self.data.reset_index()
 
         # add the target information.
-        if isinstance(data, TimeSeriesDataFrame):
-            merged = result_reset.merge(
-                data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"]  # From result  # From preds.data
-            )
-
-        # add the target information. For tabular data frame, the target is already aligned
-        elif isinstance(data, TabularDataFrame):
-            merged = result_reset.merge(
-                data_reset, left_on=["item_id", "timestamp"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"]  # From result  # From preds.data
-            )
+        merged = result_reset.merge(data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"])
 
         # remove unused columns
         merged = merged.drop(columns=[col for col in merged.columns if "_remove" in str(col) or "feature" in str(col)], errors="ignore")
@@ -160,15 +166,11 @@ class HorizonForecast(BaseModel):
         # restore original multi index
         merged.set_index(result.index.names, inplace=True)
 
-        # get only the specified item id
-        if item_ids is not None:
-            merged = merged.loc[item_ids].copy()
-
         return merged
 
-    def get_crps(self, item_ids: Optional[List[int]] = None, mean_time: bool = True) -> np.ndarray:
+    def get_crps(self, forecast_horizon: int, mean_time: bool = True) -> np.ndarray:
         """
-        Computes the Continuous Ranked Probability Score (CRPS) for the forecast.
+        Computes the Continuous Ranked Probability Score (CRPS) for a forecast horizon.
 
         Args:
             data (pd.DataFrame): DataFrame containing actual target values.
@@ -176,7 +178,7 @@ class HorizonForecast(BaseModel):
         Returns:
             float: The mean CRPS score across all samples.
         """
-        data = self.to_dataframe(item_ids=item_ids)
+        data = self.to_dataframe(forecast_horizon)
         crps = sr.crps_quantile(data["target"].to_numpy(), data[self.quantiles].to_numpy(), self.quantiles)
 
         if mean_time:
@@ -184,7 +186,7 @@ class HorizonForecast(BaseModel):
         else:
             return crps
 
-    def get_quantile_score(self, item_ids: Optional[List[int]] = None, mean_time: bool = True) -> Union[pd.DataFrame, pd.Series]:
+    def get_quantile_score(self, forecast_horizon: int, mean_time: bool = True) -> Union[pd.DataFrame, pd.Series]:
         """
         Computes the average quantile score (pinball loss) for the forecast.
 
@@ -194,18 +196,16 @@ class HorizonForecast(BaseModel):
         Returns:
             pd.Series: A Series with the mean pinball loss for each quantile.
         """
-        data = self.to_dataframe(item_ids=item_ids)
+        data = self.to_dataframe(forecast_horizon)
         quantile_scores = np.column_stack([sr.quantile_score(data["target"].to_numpy(), data[q].to_numpy(), q) for q in self.quantiles])
 
         quantile_scores = pd.DataFrame(quantile_scores, columns=self.quantiles, index=data.index)
         if mean_time:
-            # quantile_scores = pd.DataFrame(quantile_scores.mean(), columns=["Mean QS"])
-            # quantile_scores.index.name = "quantile"
             return quantile_scores.mean()
         else:
             return quantile_scores
 
-    def get_pit_values(self, item_ids: Optional[List[int]] = None) -> np.ndarray:
+    def get_pit_values(self, forecast_horizon: int) -> np.ndarray:
         """
         Computes the Probability Integral Transform (PIT) values for calibration analysis.
 
@@ -217,17 +217,19 @@ class HorizonForecast(BaseModel):
         Returns:
             np.ndarray: Array of PIT values, where PIT values should follow a uniform [0,1] distribution.
         """
-        targets = self.to_dataframe(item_ids=item_ids).dropna()["target"].to_numpy()  # Shape [num_samples]
+        df = self.to_dataframe(forecast_horizon).dropna()
+        targets = df["target"].to_numpy()  # Shape [num_samples]
+        predictions = df.drop("target").to_numpy()
 
         # Compute PIT values for each target
         pit_values = []
         for i in range(len(targets)):
-            interp_func = interp1d(self.predictions[i], self.quantiles, bounds_error=False, fill_value=(0, 1))
+            interp_func = interp1d(predictions[i], self.quantiles, bounds_error=False, fill_value=(0, 1))
             pit_values.append(interp_func(targets[i]))
 
         return np.array(pit_values)
 
-    def get_pit_histogram(self, item_ids: Optional[List[int]] = None) -> None:
+    def get_pit_histogram(self, forecast_horizon: int) -> None:
         """
         Plots a histogram of Probability Integral Transform (PIT) values to assess forecast calibration.
 
@@ -237,7 +239,7 @@ class HorizonForecast(BaseModel):
         Returns:
             None: Displays the histogram plot.
         """
-        pit_values = self.get_pit_values(item_ids=item_ids)
+        pit_values = self.get_pit_values(forecast_horizon)
         bins = len(self.quantiles)
 
         plt.hist(pit_values, bins=bins, range=(0, 1), density=False, alpha=0.7, edgecolor="black")
@@ -248,16 +250,16 @@ class HorizonForecast(BaseModel):
         plt.legend()
         plt.show()
 
-    def get_empirical_coverage_rates(self, item_ids: Optional[List[int]] = None) -> Dict[float, float]:
+    def get_empirical_coverage_rates(self, forecast_horizon: int) -> Dict[float, float]:
 
-        results = self.to_dataframe(item_ids=item_ids).dropna()
+        results = self.to_dataframe(forecast_horizon).dropna()
         empirical_coverage_rates = {q: (results[q] >= results["target"]).mean() for q in self.quantiles}
 
         return empirical_coverage_rates
 
-    def get_reliability_diagram(self, item_ids: Optional[List[int]] = None) -> None:
+    def get_reliability_diagram(self, forecast_horizon: int) -> None:
 
-        empirical_coverage_rates = self.get_empirical_coverage_rates(item_ids=item_ids)
+        empirical_coverage_rates = self.get_empirical_coverage_rates(forecast_horizon)
 
         quantile_levels = sorted(empirical_coverage_rates.keys())
         empirical_coverages = [empirical_coverage_rates[q] for q in quantile_levels]
@@ -272,85 +274,6 @@ class HorizonForecast(BaseModel):
         plt.legend()
         plt.grid(True)
         plt.show()
-
-    def get_random_plot(self, item_id: int = 0, q_lower: float = 0.1, q_upper: float = 0.9, ts_length: int = 100) -> None:
-        """Randomly plot data"""
-
-        subset = self.to_dataframe(item_ids=[item_id])
-        # subset = pred_df.xs(item_id, level="item_id")
-        rand_start_idx = np.random.randint(0, (len(subset) - ts_length))
-        subset = subset.iloc[rand_start_idx : rand_start_idx + ts_length]
-
-        # Plot settings
-        plt.figure(figsize=(15, 5))
-
-        # Plot median prediction
-        plt.plot(subset.index.get_level_values("timestamp"), subset[0.5], label="Median (50%)", color="C1", linestyle="-", linewidth=2)
-
-        # Plot confidence intervals as shaded regions
-        plt.fill_between(
-            subset.index.get_level_values("timestamp"),
-            subset[q_lower],
-            subset[q_upper],
-            color="C1",
-            alpha=0.2,
-            label=f"{(q_upper-q_lower) * 100:.0f}% Prediction Interval ({q_upper*100:.0f}%-{q_lower*100:.0f}%)",
-        )
-
-        # Plot target values
-        plt.plot(subset.index.get_level_values("timestamp"), subset["target"], label="Actual Target", color="C0", linestyle="-", linewidth=2)
-
-        # Formatting
-        plt.xlabel("Time", fontsize=14)
-        plt.ylabel("Value", fontsize=14)
-        plt.title(f"Prediction Intervals – item_id: {item_id} and lead time: {self.lead_time}", fontsize=16)
-        plt.legend(fontsize=8)
-
-        # Improve x-axis tick formatting
-        ax = plt.gca()
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())  # Automatically space ticks
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))  # Format as 'YYYY-MM-DD HH:MM'
-
-        plt.grid(True, which="both", linestyle="--", linewidth=0.5)  # Optional: Light grid
-
-        plt.show()
-
-
-class TimeSeriesForecast(BaseModel):
-    item_id: int
-    lead_time_forecasts: Dict[int, HorizonForecast]  # {lead_time: HorizonForecast}
-    data: Union[TimeSeriesDataFrame, TabularDataFrame]
-
-    class Config:
-        arbitrary_types_allowed = True
-
-    def model_post_init(self, __context) -> None:
-        for hf in self.lead_time_forecasts.values():
-            hf.parent = self
-
-    def get_data(self) -> Union[TimeSeriesDataFrame, TabularDataFrame]:
-        return self.data
-
-    def get_lead_times(self) -> List[int]:
-        return list(self.lead_time_forecasts.keys())
-
-    def get_quantiles(self) -> List[float]:
-        return sorted({q for item in self.lead_time_forecasts.values() for q in item.quantiles})
-
-    def get_freq(self) -> List[float]:
-        freqs = list({item.freq for item in self.lead_time_forecasts.values()})
-        assert len(freqs) == 1
-        return freqs[0]
-
-    def get_lead_time_forecast(self, lead_time: int) -> HorizonForecast:
-        return self.lead_time_forecasts[lead_time]
-
-    def get_all_lead_time_forecast(self) -> List[HorizonForecast]:
-        return self.lead_time_forecasts
-
-    def add_lead_time_forecast(self, lead_time: int, prediction: HorizonForecast) -> None:
-        prediction.parent = self
-        self.lead_time_forecasts[lead_time] = prediction
 
     def plot_forecasts(self, start: Optional[Union[int, pd.Timestamp]] = None, q_lower: float = 0.2, q_upper: float = 0.8, context_length: int = 100) -> None:
         """
@@ -381,7 +304,6 @@ class TimeSeriesForecast(BaseModel):
             - Predicted quantiles (median and shaded interval)
         """
         lead_times = self.get_lead_times()
-        freq = self.get_freq()
 
         timestamps = self.data.index.get_level_values("timestamp")
 
@@ -402,9 +324,9 @@ class TimeSeriesForecast(BaseModel):
         future = self.data[start_idx : start_idx + max(lead_times)].reset_index(level=0, drop=True)
 
         current_date = timestamps[start_idx - 1]
-        prediction_dates = [current_date + pd.tseries.frequencies.to_offset(freq) * lt for lt in lead_times]
+        prediction_dates = [current_date + pd.tseries.frequencies.to_offset(self.freq) * lt for lt in lead_times]
 
-        selected_predictions = pd.DataFrame(data=preds[start_idx].numpy(), columns=self.get_quantiles(), index=prediction_dates)  # shape: [num_lead_times, num_quantiles]
+        selected_predictions = pd.DataFrame(data=preds[start_idx].numpy(), columns=self.quantiles, index=prediction_dates)  # shape: [num_lead_times, num_quantiles]
 
         plt.figure(figsize=(12, 4))
 
@@ -433,29 +355,71 @@ class TimeSeriesForecast(BaseModel):
         plt.tight_layout()
         plt.show()
 
+    def get_random_plot(self, forecast_horizon: int = 1, q_lower: float = 0.1, q_upper: float = 0.9, ts_length: int = 100) -> None:
+        """Randomly plot data"""
+
+        subset = self.to_dataframe(forecast_horizon)
+        # subset = pred_df.xs(item_id, level="item_id")
+        rand_start_idx = np.random.randint(0, (len(subset) - ts_length))
+        subset = subset.iloc[rand_start_idx : rand_start_idx + ts_length]
+
+        # Plot settings
+        plt.figure(figsize=(15, 5))
+
+        # Plot median prediction
+        plt.plot(subset.index.get_level_values("timestamp"), subset[0.5], label="Median (50%)", color="C1", linestyle="-", linewidth=2)
+
+        # Plot confidence intervals as shaded regions
+        plt.fill_between(
+            subset.index.get_level_values("timestamp"),
+            subset[q_lower],
+            subset[q_upper],
+            color="C1",
+            alpha=0.2,
+            label=f"{(q_upper-q_lower) * 100:.0f}% Prediction Interval ({q_upper*100:.0f}%-{q_lower*100:.0f}%)",
+        )
+
+        # Plot target values
+        plt.plot(subset.index.get_level_values("timestamp"), subset["target"], label="Actual Target", color="C0", linestyle="-", linewidth=2)
+
+        # Formatting
+        plt.xlabel("Time", fontsize=14)
+        plt.ylabel("Value", fontsize=14)
+        plt.title(f"Prediction Intervals – item_id: {self.item_id} and lead time: {forecast_horizon}", fontsize=16)
+        plt.legend(fontsize=8)
+
+        # Improve x-axis tick formatting
+        ax = plt.gca()
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())  # Automatically space ticks
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))  # Format as 'YYYY-MM-DD HH:MM'
+
+        plt.grid(True, which="both", linestyle="--", linewidth=0.5)  # Optional: Light grid
+
+        plt.show()
+
 
 class ForecastCollection(BaseModel):
-    items: Dict[int, TimeSeriesForecast]  # item_id -> TimeSeriesForecast
+    item_ids: Dict[int, TimeSeriesForecast]  # item_id -> TimeSeriesForecast
 
     class Config:
         arbitrary_types_allowed = True
 
     def get_item_ids(self) -> List[int]:
-        return list(self.items.keys())
+        return list(self.item_ids.keys())
 
     def get_lead_times(self, item_id: Optional[int] = None) -> List[int]:
         if item_id is not None:
-            return self.items[item_id].get_lead_times()
-        return sorted({lt for item in self.items.values() for lt in item.get_lead_times()})
+            return self.item_ids[item_id].get_lead_times()
+        return sorted({lt for item in self.item_ids.values() for lt in item.get_lead_times()})
 
     def get_time_series_forecast(self, item_id: int) -> TimeSeriesForecast:
-        return self.items[item_id]
+        return self.item_ids[item_id]
 
     def get_all_time_series_forecast(self) -> List[TimeSeriesForecast]:
-        return self.items
+        return self.item_ids
 
     def add_time_series_forecast(self, forecast: TimeSeriesForecast) -> None:
-        self.items[forecast.item_id] = forecast
+        self.item_ids[forecast.item_id] = forecast
 
     def get_crps(
         self,
@@ -475,11 +439,11 @@ class ForecastCollection(BaseModel):
             item = self.get_time_series_forecast(item_id)
             for lt in lead_times:
                 if lt in item.lead_time_forecasts:
-                    crps = item.get_lead_time_forecast(lt).get_crps(item_ids=[item_id], mean_time=mean_time)
+                    crps = item.get_crps(forecast_horizon=lt, mean_time=mean_time)
                     scores.append(crps)
 
             scores = np.vstack(scores).T
-            idx = [item_id] if mean_time else item.get_lead_time_forecast(lt).to_dataframe().index  # TODO: make this nicer
+            idx = [item_id] if mean_time else item.to_dataframe(lt).index  # TODO: make this nicer
             all_scores.append(pd.DataFrame(scores, index=idx, columns=lead_times))
 
         crps_scores = pd.concat(all_scores)
@@ -518,7 +482,7 @@ class ForecastCollection(BaseModel):
             item = self.get_time_series_forecast(item_id)
             for lt in lead_times:
                 if lt in item.lead_time_forecasts:
-                    val = item.get_lead_time_forecast(lt).get_empirical_coverage_rates()
+                    val = item.get_empirical_coverage_rates(lt)
                     rates[lt].append(pd.Series(val))
 
         coverage_df = pd.DataFrame({lt: pd.concat(rates[lt], axis=1).mean(axis=1) for lt in lead_times if rates[lt]})
@@ -541,10 +505,11 @@ class ForecastCollection(BaseModel):
         lead_times = lead_times or self.get_lead_times()
 
         scores = {}
+
         for lt in lead_times:
             values = []
             for item_id in item_ids:
-                val = self.get_time_series_forecast(item_id).get_lead_time_forecast(lt).get_quantile_score(item_ids=[item_id], mean_time=True, decimal_places=decimal_places)
+                val = self.get_time_series_forecast(item_id).get_quantile_score(lt, mean_time=True, decimal_places=decimal_places)
                 values.append(val)
             if values:
                 scores[lt] = pd.DataFrame(values).mean(axis=0)
@@ -571,7 +536,7 @@ class ForecastCollection(BaseModel):
             for item_id in item_ids:
                 item = self.get_time_series_forecast(item_id)
                 if lt in item.lead_time_forecasts:
-                    values.append(item.get_lead_time_forecast(lt).get_pit_values(item_ids=[item_id]))
+                    values.append(item.get_pit_values(lt))
             if values:
                 result[lt] = np.concatenate(values)
         return result
@@ -584,7 +549,7 @@ class ForecastCollection(BaseModel):
             first_item = item_ids[0]
         else:
             first_item = self.items.keys()[0]
-        bins = self.get_time_series_forecast(first_item).get_quantiles()
+        bins = self.get_time_series_forecast(first_item).quantiles
         if overlay:
             plt.figure(figsize=(10, 6))
             for lt, pit_values in pit_data.items():
@@ -624,7 +589,7 @@ class ForecastCollection(BaseModel):
                         continue
                     item = self.get_time_series_forecast(item_id)
                     if lt in item.lead_time_forecasts:
-                        val = item.get_lead_time_forecast(lt).get_empirical_coverage_rates(item_ids=[item_id])
+                        val = item.get_empirical_coverage_rates(lt)
                         values.append(pd.Series(val))
                 if values:
                     emp = pd.concat(values, axis=1).mean(axis=1)
@@ -650,7 +615,7 @@ class ForecastCollection(BaseModel):
                         continue
                     item = self.get_time_series_forecast(item_id)
                     if lt in item.lead_time_forecasts:
-                        val = item.get_lead_time_forecast(lt).get_empirical_coverage_rates(item_ids=[item_id])
+                        val = item.get_empirical_coverage_rates(lt)
                         values.append(pd.Series(val))
                 if values:
                     emp = pd.concat(values, axis=1).mean(axis=1)

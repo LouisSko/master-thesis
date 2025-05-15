@@ -376,11 +376,10 @@ class Chronos(AbstractPredictor):
                 lt_forcast[lt] = HorizonForecast(
                     lead_time=lt,
                     predictions=forecasts[item_mask, :, lt - 1],
-                    freq=self.freq,
                 )
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data.loc[item_mask].copy())
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data.loc[item_mask].copy(), freq=self.freq)
 
-        return ForecastCollection(items=ts_forecast)
+        return ForecastCollection(item_ids=ts_forecast)
 
 
 ############## Functions for fine tuning and hp optimization ##############

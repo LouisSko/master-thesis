@@ -108,11 +108,11 @@ class QuantileRegression(AbstractPredictor):
 
                 predictions_q = np.column_stack(predictions_q)
 
-                results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(predictions_q), quantiles=self.quantiles, freq=self.freq)
+                results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(predictions_q))
 
-            results[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=data_sub.copy())
+            results[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=data_sub.copy(), quantiles=self.quantiles, freq=self.freq)
 
-        return ForecastCollection(items=results)
+        return ForecastCollection(item_ids=results)
 
     def _add_cyclic_encoding(self, data: pd.DataFrame, colname: str, period: int, drop: bool = False):
         """

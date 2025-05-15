@@ -7,6 +7,9 @@ from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecas
 import torch
 from tqdm import tqdm
 from typing import Tuple
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class PostprocessorMLE(AbstractPostprocessor):
@@ -37,10 +40,9 @@ class PostprocessorMLE(AbstractPostprocessor):
             self.params[item_id] = {}
             item = data.get_time_series_forecast(item_id)
             for lead_time in item.get_lead_times():
-                lt_item = item.get_lead_time_forecast(lead_time)
 
-                df = lt_item.to_dataframe().iloc[self.ignore_first_n_train_entries :].dropna()
-                log_df = np.log(df[lt_item.quantiles + ["target"]] + self.epsilon)
+                df = item.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna()
+                log_df = np.log(df[item.quantiles + ["target"]] + self.epsilon)
                 log_df["std_target"] = log_df["target"].rolling(20, min_periods=20, center=True).std()
                 log_df = log_df.dropna()
 
@@ -52,10 +54,11 @@ class PostprocessorMLE(AbstractPostprocessor):
                 init_params = self._estimate_init_params(M, IQR, y_mu, y_sigma)
                 result = minimize(self._neg_log_likelihood, args=(M, IQR, y_mu), x0=init_params, method="Nelder-Mead")
 
-                if not result.success:
-                    raise ValueError(f"MLE failed for lt={lead_time}, item={item_id}")
-
-                self.params[item_id][lead_time] = result.x
+                if result.success:
+                    self.params[item_id][lead_time] = result.x
+                else:
+                    logging.warning("MLE failed for forecast horizon=%s, item=%s. Predictions won't get postprocessed for this one.", lead_time, item_id)
+                    self.params[item_id][lead_time] = None
 
     def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """
@@ -77,30 +80,30 @@ class PostprocessorMLE(AbstractPostprocessor):
             results_lt = {}
             item = data.get_time_series_forecast(item_id)
             for lead_time in item.get_lead_times():
-                lt_item = item.get_lead_time_forecast(lead_time)
 
                 #### specific code #####
-                df = lt_item.to_dataframe()
-                log_df = np.log(df[lt_item.quantiles] + self.epsilon)
+                df = item.to_dataframe(lead_time)
+                log_df = np.log(df[item.quantiles] + self.epsilon)
                 M = log_df[0.5].values
                 IQR = (log_df[0.9] - log_df[0.1]).values
-                a, b, c, d = self.params[item_id][lead_time]
-                mu = a + b * M
-                sigma = c + d * IQR
-                log_predictions = stats.norm.ppf(np.array(lt_item.quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
-                predictions = np.exp(log_predictions) - self.epsilon
+                params = self.params[item_id][lead_time]
+                if params is None:
+                    # keeping original predictions
+                    logging.info("No params available for forecast horizon=%s, item=%s. Keeping original predictions.", lead_time, item_id)
+                    predictions = df[item.quantiles].to_numpy()
+                else:
+                    a, b, c, d = params
+                    mu = a + b * M
+                    sigma = c + d * IQR
+                    log_predictions = stats.norm.ppf(np.array(item.quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
+                    predictions = np.exp(log_predictions) - self.epsilon
                 #### specific code #####
 
-                results_lt[lead_time] = HorizonForecast(
-                    lead_time=lt_item.lead_time,
-                    predictions=torch.tensor(predictions),
-                    quantiles=lt_item.quantiles,
-                    freq=lt_item.freq,
-                )
+                results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(predictions))
 
-            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=item.data)
+            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=item.data, freq=item.freq, quantiles=item.quantiles)
 
-        return ForecastCollection(items=results_item_ids)
+        return ForecastCollection(item_ids=results_item_ids)
 
     def _neg_log_likelihood(self, params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarray):
         """

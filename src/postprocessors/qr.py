@@ -4,7 +4,6 @@ import torch
 from tqdm import tqdm
 from src.core.base import AbstractPostprocessor
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame
-from typing import List
 
 
 class PostprocessorQR(AbstractPostprocessor):
@@ -30,14 +29,14 @@ class PostprocessorQR(AbstractPostprocessor):
         x_train = sm.add_constant(x_train, has_constant="add")
         return x_train
 
-    def _prepare_dataframe(self, result_lead_time: HorizonForecast, quantiles: List[float], train: bool = False) -> TabularDataFrame:
+    def _prepare_dataframe(self, ts_forecast: TimeSeriesForecast, lead_time: int, train: bool = False) -> TabularDataFrame:
         """Creates Dataframe from Predictions"""
         if train:
-            data = result_lead_time.to_dataframe().iloc[self.ignore_first_n_train_entries :].dropna()
+            data = ts_forecast.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna()
         else:
-            data = result_lead_time.to_dataframe()
+            data = ts_forecast.to_dataframe(lead_time)
 
-        cols_rename = {q: f"feature_{q}" for q in quantiles}
+        cols_rename = {q: f"feature_{q}" for q in ts_forecast.quantiles}
         data = data.rename(columns=cols_rename)
         cols_to_keep = list(cols_rename.values()) + ["target"]
         data = data[cols_to_keep]
@@ -54,12 +53,11 @@ class PostprocessorQR(AbstractPostprocessor):
             item = data.get_time_series_forecast(item_id)
             for lead_time in item.get_lead_times():
                 self.qr_models[item_id][lead_time] = {}
-                lt_item = item.get_lead_time_forecast(lead_time)
 
                 #### specific code #####
-                for q in lt_item.quantiles:
+                for q in item.quantiles:
                     # Prepare the training data
-                    train_data = self._prepare_dataframe(lt_item, lt_item.quantiles, True)
+                    train_data = self._prepare_dataframe(item, lead_time, True)
                     y_train = np.log(train_data["target"].values + self.epsilon)
                     x_train = self._create_features(train_data, q)
                     # Fit quantile regression model for each quantile
@@ -76,31 +74,25 @@ class PostprocessorQR(AbstractPostprocessor):
             results_lt = {}
             item = data.get_time_series_forecast(item_id)
             for lead_time in item.get_lead_times():
-                lt_item = item.get_lead_time_forecast(lead_time)
 
                 #### specific code #####
-                df = self._prepare_dataframe(lt_item, lt_item.quantiles)
+                df = self._prepare_dataframe(item, lead_time, False)
                 adjusted_predictions = []
-                for quantile in lt_item.quantiles:
+                for quantile in item.quantiles:
                     x_test = self._create_features(df, quantile)
                     # Retrieve the fitted model for the quantile and lead time
                     try:
                         model: sm.QuantReg = self.qr_models[item_id][lead_time][quantile]
                     except:
-                        raise ValueError(f"No model for item_id: {item_id}, lead time:{lead_time}, quantile:{q}.")
+                        raise ValueError(f"No model for item_id: {item_id}, lead time:{lead_time}, quantile:{quantile}.")
                     else:
                         predictions = model.predict(x_test)
                         adjusted_predictions.append(np.exp(predictions) - self.epsilon)
                 adjusted_predictions = np.column_stack(adjusted_predictions)
                 #### specific code #####
 
-                results_lt[lead_time] = HorizonForecast(
-                    lead_time=lt_item.lead_time,
-                    predictions=torch.tensor(adjusted_predictions),
-                    quantiles=lt_item.quantiles,
-                    freq=lt_item.freq,
-                )
+                results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(adjusted_predictions))
 
-            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=item.data)
+            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=item.data, freq=item.freq, quantiles=item.quantiles)
 
-        return ForecastCollection(items=results_item_ids)
+        return ForecastCollection(item_ids=results_item_ids)
