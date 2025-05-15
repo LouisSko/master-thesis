@@ -1,6 +1,7 @@
 from tqdm import tqdm
 import torch
 from chronos import BaseChronosPipeline
+from chronos.chronos import ChronosTokenizer
 from autogluon.timeseries import TimeSeriesDataFrame
 from torch.utils.data import DataLoader
 from typing import Callable, List, Optional, Dict, Any, Literal, Union
@@ -8,6 +9,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
 from src.core.base import AbstractPredictor
+from src.core.timeseries_evaluation import TARGET
 import logging
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
 from optuna.trial import Trial
@@ -88,18 +90,20 @@ class ChronosBacktestingDataset(Dataset):
         target_column: str = "target",
         return_target: bool = False,
         prediction_length: Optional[int] = None,
+        tokenizer: Optional["ChronosTokenizer"] = None,
     ):
         assert context_length > 0, "context_length must be greater than 0"
         self.context_length = context_length
 
         self.return_target = return_target
         self.prediction_length = prediction_length
+        self.tokenizer = tokenizer
 
         if self.return_target:
             if self.prediction_length is None:
                 raise ValueError("prediction_length needs to be specified if return target is set to true.")
             # when target should be returned, the dataset is used for training/evaluation and we should reorder based on timestamps
-            # data = data.sort_values(by=["timestamp","item_id"])
+            data = data.sort_values(by=["timestamp", "item_id"])
 
         self.target_array = data[target_column].to_numpy(dtype=np.float32)
         self.freq = data.freq
@@ -130,10 +134,26 @@ class ChronosBacktestingDataset(Dataset):
             a = np.concatenate((a, pad))
         return a.astype(np.float32)
 
+    def to_chronos_format(self, context: np.ndarray, future_target: np.ndarray):
+
+        input_ids, attention_mask, scale = self.tokenizer.context_input_transform(torch.tensor(context).unsqueeze(0))
+        labels, labels_mask = self.tokenizer.label_input_transform(torch.tensor(future_target).unsqueeze(0), scale)
+        labels[labels_mask == 0] = -100
+
+        return {
+            "input_ids": input_ids.squeeze(0),
+            "attention_mask": attention_mask.squeeze(0),
+            "labels": labels.squeeze(0),
+        }
+
+    def to_chronos_bolt_format(self, context: np.ndarray, future_target: np.ndarray):
+        return {"context": context, "target": future_target}
+
     def __getitem__(self, idx) -> np.ndarray:
         """Retrieves the context window for the given index within its corresponding time series."""
         item_id = self.item_ids[idx]
         item_id_start_idx = self.indptr[item_id]
+        # idx in the target_array controlled for the item_id_start_idx
         start_idx = idx - item_id_start_idx
         # get array of corresponding item id
         target_sub_array = self.target_array[self.item_ids_mask[item_id]]
@@ -141,7 +161,11 @@ class ChronosBacktestingDataset(Dataset):
 
         if self.return_target:
             future_target = self._get_future_targets(target_sub_array[start_idx + 1 :])
-            return {"context": context, "target": future_target}
+
+            if self.tokenizer is not None:
+                return self.to_chronos_format(context, future_target)
+            else:
+                return self.to_chronos_bolt_format(context, future_target)
 
         return context
 
@@ -193,18 +217,36 @@ class Chronos(AbstractPredictor):
         self.context_length = context_length
         self.prediction_length = max(self.lead_times)
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
+        self.base_model_name = None
         self.device_map = device_map
         self.finetuning_type = finetuning_type
         self.finetuning_hp_search = finetuning_hp_search
         self.finetuning_hp_search_trials = finetuning_hp_search_trials
         self.lora = False
-        self.sampling = sampling
 
+        self.quantiles = np.arange(0.1, 1, 0.1).round(1)
         # if self.prediction_length > 64:
         #    logging.error("Maximum supported lead time is 64 currently.")
         #    raise ValueError("Maximum supported lead time is 64 currently.")
 
         self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+        if "chronos-bolt" in self.base_model_name:
+            if self.context_length > 2048:
+                logging.info("Contex length detected of: %s. Adapt context length to maximum of 2048", self.context_length)
+                self.context_length = 2048
+            if sampling:
+                logging.info("Sampling is turned on. Chronos-bolt will sample multiple trajectories to compute quantiles for prediction lengths >64.")
+            self.sampling = sampling
+        elif "chronos-t5" in self.base_model_name:
+            if self.context_length > 512:
+                logging.info("Contex length detected of: %s. Adapt context length to maximum of 512", self.context_length)
+                self.context_length = 512
+            if sampling:
+                logging.warning("Sampling does not need to be explicitly enabled for chronos-t5. It uses sampling by default.")
+            self.sampling = False
+        else:
+            raise ValueError("Unknown base_model_name: %s. Either needs to contain 'chronos-t5' or 'chronos-bolt'.", self.base_model_name)
 
     def _pipeline_init(self, pretrained_model_name_or_path: Union[str, Path]) -> BaseChronosPipeline:
         """Creates and returns an instance of the Chronos pipeline."""
@@ -218,11 +260,11 @@ class Chronos(AbstractPredictor):
             with open(Path(pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
                 adapter_config: dict = json.load(f)
 
-            base_model_name = adapter_config.get("base_model_name_or_path")
-            logging.info("Base model name: %s", base_model_name)
+            self.base_model_name = adapter_config.get("base_model_name_or_path")
+            logging.info("Base model name: %s", self.base_model_name)
 
-            logging.info("Initializing Chronos pipeline with model: %s", base_model_name)
-            pipeline = BaseChronosPipeline.from_pretrained(base_model_name, device_map=self.device_map)
+            logging.info("Initializing Chronos pipeline with model: %s", self.base_model_name)
+            pipeline = BaseChronosPipeline.from_pretrained(self.base_model_name, device_map=self.device_map)
 
             # Apply LoRA adapters
             pipeline.inner_model = PeftModel.from_pretrained(pipeline.inner_model, pretrained_model_name_or_path, is_trainable=False)
@@ -232,6 +274,12 @@ class Chronos(AbstractPredictor):
         else:
             logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
             pipeline = BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
+            self.base_model_name = self.pretrained_model_name_or_path
+
+        # only update prediction length for chronos-t5, not for chronos-bolt. TODO: Is there a nicer way to do this before instantiation?
+        if "chronos-t5" in self.base_model_name:
+            logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
+            pipeline.model.config.prediction_length = self.prediction_length
 
         return pipeline
 
@@ -310,6 +358,12 @@ class Chronos(AbstractPredictor):
         logging.info("Starting fine-tuning with type: %s", self.finetuning_type)
         output_dir_fine_tuning = self.output_dir / f"finetuned-{self.finetuning_type}"
 
+        if "chronos-bolt" in self.base_model_name and self.prediction_length > 64:
+            logging.info("Prediction length for chronos-bolt model will be set to 64 during training.")
+            prediction_length = min(self.prediction_length, 64)
+        else:
+            prediction_length = self.prediction_length
+
         fine_tune(
             model_init=finetuning_options[self.finetuning_type],
             data_train=data_train,
@@ -317,11 +371,14 @@ class Chronos(AbstractPredictor):
             output_dir=output_dir_fine_tuning,
             hp_tuning=self.finetuning_hp_search,
             n_trials=self.finetuning_hp_search_trials,
+            context_length=self.context_length,
+            prediction_length=prediction_length,
+            tokenizer=getattr(self.pipeline, "tokenizer", None),
         )
 
         # Load the fine-tuned model from the best checkpoint
         self.pipeline = self._pipeline_init(output_dir_fine_tuning / "fine-tuned-ckpt")
-        logging.info("Trained model is automatically loaded from checkpoint.")
+        logging.info("Trained model has been automatically loaded from checkpoint.")
 
     def predict(
         self,
@@ -355,13 +412,21 @@ class Chronos(AbstractPredictor):
 
         forecasts = []
         for batch in tqdm(dl, desc="Predicting using Chronos"):
+            # TODO: make this nicer by using chronos predict_quantiles function directly
+            # explicit sampling is done only for chronos-bolt. chronos-t5 does that by default behaviour
             if self.sampling:
                 forecast = self.pipeline.predict_sampling(context=batch, prediction_length=self.prediction_length)
             else:
                 forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
+
             forecasts.append(forecast)
 
         forecasts = torch.vstack(forecasts)
+
+        # chronos-bolt forecast output shape: [batch_size, quantiles, prediction_length]
+        # chronos-t5 forecast output shape: [batch_size, num_trajectories, prediction_length]
+        if "chronos-t5" in self.base_model_name:
+            forecasts = torch.quantile(forecasts, q=torch.tensor(self.quantiles, dtype=forecasts.dtype), dim=1).swapaxes(1, 0)
 
         if not predict_only_last_timestep:
             mask = data_merged.index.isin(data.index)
@@ -424,6 +489,9 @@ def fine_tune(
     output_dir: Union[str, Path] = Path("./models/test-finetuning/"),
     hp_tuning: bool = False,
     n_trials: Optional[int] = None,
+    context_length: int = 2048,
+    prediction_length: int = 64,
+    tokenizer: Optional["ChronosTokenizer"] = None,
 ):
     """
     Fine-tune a Chronos Bolt model (or other Hugging Face PreTrainedModel) on time series data.
@@ -442,6 +510,10 @@ def fine_tune(
         Whether to perform hyperparameter tuning using Optuna.
     n_trials : Optional[int], default=None
         Number of Optuna trials. Required if `hp_tuning` is True.
+    context_length : int, default=2048
+        Context length the model sees during training.
+    prediction_length : Optional[int], default=None
+        Number of timestamps the model is required to predict in the future.
     """
 
     def create_callbacks():
@@ -452,18 +524,14 @@ def fine_tune(
             logging.info("Validation data is available, setting early_stopping_patience=%s", patience)
         return callbacks
 
-    # TODO: provide this as parameter
-    context_length = 2048
-    prediction_length = 64
-    target_column = "target"
-
     logging.info("Preparing training dataset...")
     train_dataset = ChronosBacktestingDataset(
         data=data_train,
         context_length=context_length,
-        target_column=target_column,
+        target_column=TARGET,
         return_target=True,
         prediction_length=prediction_length,
+        tokenizer=tokenizer,
     )
 
     eval_dataset = None
@@ -472,9 +540,10 @@ def fine_tune(
         eval_dataset = ChronosBacktestingDataset(
             data=data_val,
             context_length=context_length,
-            target_column=target_column,
+            target_column=TARGET,
             return_target=True,
             prediction_length=prediction_length,
+            tokenizer=tokenizer,
         )
 
     # Create separate directory for final training
