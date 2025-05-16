@@ -419,14 +419,13 @@ class Chronos(AbstractPredictor):
             else:
                 forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
 
+                # chronos-t5 forecast output shape: [batch_size, num_trajectories, prediction_length]
+                if "chronos-t5" in self.base_model_name:
+                    forecast = torch.quantile(forecast, q=torch.tensor(self.quantiles, dtype=forecast.dtype), dim=1).swapaxes(1, 0)
+
             forecasts.append(forecast)
+        forecasts = torch.vstack(forecasts) #  output shape: [batch_size, quantiles, prediction_length]
 
-        forecasts = torch.vstack(forecasts)
-
-        # chronos-bolt forecast output shape: [batch_size, quantiles, prediction_length]
-        # chronos-t5 forecast output shape: [batch_size, num_trajectories, prediction_length]
-        if "chronos-t5" in self.base_model_name:
-            forecasts = torch.quantile(forecasts, q=torch.tensor(self.quantiles, dtype=forecasts.dtype), dim=1).swapaxes(1, 0)
 
         if not predict_only_last_timestep:
             mask = data_merged.index.isin(data.index)
