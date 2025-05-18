@@ -2,6 +2,7 @@ from typing import List, Tuple, Dict, Optional, Union
 from pathlib import Path
 import pandas as pd
 import logging
+from autogluon.timeseries import TimeSeriesDataFrame
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -27,6 +28,8 @@ def read_smard_data(file_paths: List[Path], selected_time_series: Optional[List[
     """
 
     logging.info("Reading SMARD data...")
+
+    freq = pd.Timedelta("1h")
 
     # Step 1: Read and concatenate all CSVs
     dfs = []
@@ -69,7 +72,7 @@ def read_smard_data(file_paths: List[Path], selected_time_series: Optional[List[
     mem_mb = df.memory_usage(deep=True).sum() / 1024**2
     logging.info(f"Final DataFrame memory usage: {mem_mb:.2f} MB")
 
-    return df, mapping
+    return TimeSeriesDataFrame(df), mapping, freq
 
 
 def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_rates/")) -> Tuple[pd.DataFrame, Dict[int, str]]:
@@ -92,6 +95,8 @@ def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_r
         files_dir = Path(files_dir)
 
     logging.info("Reading exchange rates data...")
+
+    freq = pd.tseries.offsets.BusinessDay(1)
 
     # Step 1: Read and preprocess each file
     ex_rates = {}
@@ -134,4 +139,4 @@ def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_r
 
     logging.info("Finished reading and preprocessing exchange rates data.")
 
-    return df, mapping
+    return TimeSeriesDataFrame(df), mapping, freq
