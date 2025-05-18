@@ -203,6 +203,32 @@ class ForecastingPipeline(AbstractPipeline):
 
         return results
 
+    def _save_backtest_results(self, results: Dict[str, ForecastCollection], backtest_params: Dict) -> None:
+        """Save backtest results and config."""
+
+        logging.info("Storing backtest results...")
+
+        for method, result in results.items():
+            save_path = self.pipeline_dir_backtests / method
+
+            create_dir(save_path)
+
+            # Add information
+            eval_config_info = {}
+            eval_config_info = {"applied_postprocessor": None if method == "raw" else method}
+            eval_config_info.update(result.get_crps(mean_time=True).to_dict())
+            eval_config_info.update(result.get_empirical_coverage_rates(mean_lead_times=True).to_dict())
+            eval_config_info.update(result.get_quantile_scores(mean_lead_times=True).to_dict())
+            config = self.get_config(backtest_params, eval_config_info)
+
+            # Save config
+            config_path = save_path / "config.json"
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=4, cls=CustomJSONEncoder)
+            logging.info("Saved backtest configuration for `%s` including evaluation results to: %s.", method, config_path)
+            # Save predictions
+            result.save(save_path / "predictions.joblib")
+
     def split_data(
         self,
         data: Union[TimeSeriesDataFrame, TabularDataFrame],
