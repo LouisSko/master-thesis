@@ -197,10 +197,12 @@ class TimeSeriesForecast(BaseModel):
         """
         Computes the average quantile score (pinball loss) for the forecast.
 
-        Args:
+        Parameters
+        ----------
             data (pd.DataFrame): DataFrame containing actual target values.
 
-        Returns:
+        Returns
+        -------
             pd.Series: A Series with the mean pinball loss for each quantile.
         """
         data = self.to_dataframe(forecast_horizon)
@@ -341,7 +343,7 @@ class TimeSeriesForecast(BaseModel):
         plt.plot(future.index, future.values, label="Future (true)", color="blue")
 
         if 0.5 in selected_predictions.columns:
-            plt.plot(selected_predictions.index, selected_predictions[0.5], label="Prediction (median)", color="red")
+            plt.plot(selected_predictions.index, selected_predictions[0.5].values, label="Prediction (median)", color="red")
 
         if q_lower in selected_predictions.columns and q_upper in selected_predictions.columns:
             plt.fill_between(
@@ -516,7 +518,7 @@ class ForecastCollection(BaseModel):
         for lt in lead_times:
             values = []
             for item_id in item_ids:
-                val = self.get_time_series_forecast(item_id).get_quantile_score(lt, mean_time=True, decimal_places=decimal_places)
+                val = self.get_time_series_forecast(item_id).get_quantile_score(lt, mean_time=True)
                 values.append(val)
             if values:
                 scores[lt] = pd.DataFrame(values).mean(axis=0)
