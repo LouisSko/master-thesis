@@ -161,12 +161,12 @@ class PostprocessorMLE(AbstractPostprocessor):
             Initial parameter estimates [a, b, c, d] for mu and sigma formulas.
         """
         # mean = a + b * Median
-        x_mu = sm.add_constant(m)
+        x_mu = sm.add_constant(m, has_constant="add")
         model_mu = sm.OLS(y_mu, x_mu).fit()
         a_init, b_init = model_mu.params
 
         # std = c + d * IQR
-        x_sigma = sm.add_constant(iqr)
+        x_sigma = sm.add_constant(iqr, has_constant="add")
         model_sigma = sm.OLS(y_sigma, x_sigma).fit()
         c_init, d_init = model_sigma.params
 
