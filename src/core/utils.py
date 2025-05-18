@@ -99,8 +99,7 @@ class CustomJSONEncoder(json.JSONEncoder):
             return list(o)
 
         if isinstance(o, pd.DateOffset):
-            # Serialize DateOffset as its keyword arguments
-            return o.kwds
+            return {"__dateoffset__": o.__class__.__name__, "freqstr": o.freqstr}
 
         if isinstance(o, Path):
             return str(o)
