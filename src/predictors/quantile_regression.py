@@ -80,7 +80,7 @@ class QuantileRegression(AbstractPredictor):
                     x_train = data_lt.drop(columns="target").astype(float).to_numpy()
                     y_train = self.target_scaler.transform(data_lt["target"].values)
                     # Add constant for intercept
-                    x_train = sm.add_constant(x_train)
+                    x_train = sm.add_constant(x_train, has_constant="add")
                     # fit model
                     model = sm.QuantReg(y_train, x_train)
                     self.models_qr[(item_id, lead_time, q)] = model.fit(q=q)
@@ -102,7 +102,7 @@ class QuantileRegression(AbstractPredictor):
                 # fit a quantile regression for each quantile and make predictions on test dataset
                 for q in self.quantiles:
                     x_test = data_lt.drop(columns="target").astype(float).to_numpy()
-                    x_test = sm.add_constant(x_test)
+                    x_test = sm.add_constant(x_test, has_constant="add")
                     predictions = self.models_qr[(item_id, lead_time, q)].predict(x_test)
                     predictions_q.append(self.target_scaler.inverse_transform(predictions))
 
