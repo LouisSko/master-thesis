@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Any
 import pandas as pd
 from src.core.timeseries_evaluation import ForecastCollection, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
@@ -7,10 +7,9 @@ from typing import Dict, List, Optional, Type, Union, Literal
 from pathlib import Path
 import joblib
 import logging
-from tqdm import tqdm
+import os
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
-
 
 class AbstractPredictor(ABC):
     def __init__(
@@ -90,8 +89,10 @@ class AbstractPredictor(ABC):
 
 
 class AbstractPostprocessor(ABC):
-    def __init__(self) -> None:
+    def __init__(self, output_dir: Path) -> None:
         self.ignore_first_n_train_entries = 200
+        self.output_dir = output_dir / self.__class__.__name__ / "models"
+        os.makedirs(self.output_dir, exist_ok=True)
 
     @abstractmethod
     def fit(self, data: ForecastCollection) -> None:
@@ -100,6 +101,16 @@ class AbstractPostprocessor(ABC):
     @abstractmethod
     def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         pass
+
+    def save_model(self, model: Any, item_id: int) -> None:
+        """Save model for a specific item id"""
+        file_path = self.output_dir / f"models_item_id_{item_id}.joblib"
+        joblib.dump(model, file_path)
+
+    def load_model(self, item_id: int) -> Any:
+        """Load model for a specific item id"""
+        file_path = self.output_dir / f"models_item_id_{item_id}.joblib"
+        return joblib.load(file_path)
 
     def save(self, file_path: Path) -> None:
         joblib.dump(self, file_path)

@@ -388,7 +388,7 @@ class ForecastingPipeline(AbstractPipeline):
         for postprocessor in self.postprocessors:
 
             # Initialize postprocessor
-            self.postprocessor_dict[postprocessor.__name__] = postprocessor()
+            self.postprocessor_dict[postprocessor.__name__] = postprocessor(self.pipeline_dir_postprocessors)
             logging.info("Initializing postprocessor: %s", postprocessor.__name__)
 
             # Fit postprocessor on calibration data

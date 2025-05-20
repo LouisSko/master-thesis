@@ -4,6 +4,7 @@ from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecas
 import torch
 from copy import deepcopy
 from tqdm import tqdm
+from pathlib import Path
 
 
 class PostprocessorEQC(AbstractPostprocessor):
@@ -13,8 +14,8 @@ class PostprocessorEQC(AbstractPostprocessor):
     This postprocessor adjusts quantile regression outputs by computing empirical offsets to improve quantile coverage.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, output_dir: Path) -> None:
+        super().__init__(output_dir)
         self.conf_thresholds = {}
         self.ignore_first_n_train_entries = 0
 
@@ -33,16 +34,18 @@ class PostprocessorEQC(AbstractPostprocessor):
         data = deepcopy(data)
 
         for item_id in tqdm(data.get_item_ids(), desc="Fitting EQC Postprocessor for each time series (item)"):
-            self.conf_thresholds[item_id] = {}
+            self.conf_thresholds = {}
             item = data.get_time_series_forecast(item_id)
             for lead_time in item.get_lead_times():
-                self.conf_thresholds[item_id][lead_time] = {}
+                self.conf_thresholds[lead_time] = {}
                 # TODO: could be made more efficient by accessing the predictions directly
                 df = item.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna().copy()
 
                 for q in item.quantiles:
                     scores = df[TARGET] - df[q]
-                    self.conf_thresholds[item_id][lead_time][q] = np.quantile(scores, q=q)
+                    self.conf_thresholds[lead_time][q] = np.quantile(scores, q=q)
+
+            self.save_model(model=self.conf_thresholds, item_id=item_id)
 
     def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """
@@ -65,13 +68,14 @@ class PostprocessorEQC(AbstractPostprocessor):
         for item_id in tqdm(data.get_item_ids(), desc="Updating Forecasts using EQC Postprocessor."):
             results_lt = {}
             item = data.get_time_series_forecast(item_id)
+            self.conf_thresholds = self.load_model(item_id=item_id)
             for lead_time in item.get_lead_times():
 
                 #### specific code #####
                 df = item.to_dataframe(lead_time)  # TODO: could be made more efficient by accessing the predictions directly
                 adjusted_predictions = []
                 for quantile in item.quantiles:
-                    conformalized_predictions = np.array(df[quantile] + self.conf_thresholds[item_id][lead_time][quantile])
+                    conformalized_predictions = np.array(df[quantile] + self.conf_thresholds[lead_time][quantile])
                     adjusted_predictions.append(conformalized_predictions)
                 adjusted_predictions = np.column_stack(adjusted_predictions)
                 #### specific code #####
