@@ -160,6 +160,9 @@ class TimeSeriesForecast(BaseModel):
         # add the target information.
         merged = result_reset.merge(data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"])
 
+        # if merged[TARGET].isna().all():
+        #     raise ValueError("target column is nan. Frequency (freq) might not be specified correctly.")
+
         # remove unused columns
         merged = merged.drop(columns=[col for col in merged.columns if "_remove" in str(col) or "feature" in str(col)], errors="ignore")
 
@@ -227,8 +230,8 @@ class TimeSeriesForecast(BaseModel):
             np.ndarray: Array of PIT values, where PIT values should follow a uniform [0,1] distribution.
         """
         df = self.to_dataframe(forecast_horizon).dropna()
-        targets = df["target"].to_numpy()  # Shape [num_samples]
-        predictions = df.drop("target").to_numpy()
+        targets = df[TARGET].to_numpy()  # Shape [num_samples]
+        predictions = df[self.quantiles].to_numpy()
 
         # Compute PIT values for each target
         pit_values = []
@@ -557,8 +560,10 @@ class ForecastCollection(BaseModel):
         if item_ids:
             first_item = item_ids[0]
         else:
-            first_item = self.items.keys()[0]
-        bins = self.get_time_series_forecast(first_item).quantiles
+            first_item = self.get_item_ids()[0]
+
+        bins = len(self.get_time_series_forecast(first_item).quantiles)
+
         if overlay:
             plt.figure(figsize=(10, 6))
             for lt, pit_values in pit_data.items():
