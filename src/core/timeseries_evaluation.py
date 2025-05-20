@@ -744,6 +744,7 @@ def get_crps_scores(
     reference_predictions: Optional[str] = None,
     add_mean: Optional[bool] = True,
     decimal_places: Optional[int] = None,
+    sort: bool = True,
 ) -> pd.DataFrame:
     """Computes and returns CRPS (Continuous Ranked Probability Score) values
     averaged across specified lead times and optionally normalized by a reference prediction.
@@ -784,6 +785,8 @@ def get_crps_scores(
 
     if add_mean:
         scores.loc["Mean CRPS", :] = scores.mean(axis=0)
+        if sort:
+            scores = scores.T.sort_values(by="Mean CRPS", axis=0).T
 
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
