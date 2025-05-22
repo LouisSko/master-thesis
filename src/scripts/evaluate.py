@@ -20,7 +20,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         model=Chronos,
         model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "device_map": "mps", "lead_times": lead_times, "freq": freq},
         postprocessors=[PostprocessorMLE, PostprocessorQR, PostprocessorEQC],
-        output_dir=output_dir / "chronos-zero-shot",
+        output_dir=output_dir / "chronos-bolt-zero-shot",
     )
 
     results = pipeline.backtest(
@@ -40,7 +40,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         model=Chronos,
         model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "sampling": True, "device_map": "mps", "lead_times": lead_times, "freq": freq},
         # postprocessors=[PostprocessorMLE, PostprocessorQR, PostprocessorEQC],
-        output_dir=output_dir / "chronos-zero-shot-sampling",
+        output_dir=output_dir / "chronos-bolt-zero-shot-sampling",
     )
 
     results = pipeline.backtest(
@@ -67,7 +67,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
             "finetuning_hp_search": False,
         },
         postprocessors=[PostprocessorMLE, PostprocessorQR, PostprocessorEQC],
-        output_dir=output_dir / "chronos-finetuned-full",
+        output_dir=output_dir / "chronos-bolt-finetuned-full",
     )
 
     results = pipeline.backtest(
@@ -94,7 +94,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
             "finetuning_hp_search": False,
         },
         postprocessors=[PostprocessorMLE, PostprocessorQR, PostprocessorEQC],
-        output_dir=output_dir / "chronos-finetuned-last-layer",
+        output_dir=output_dir / "chronos-bolt-finetuned-last-layer",
     )
 
     results = pipeline.backtest(
@@ -121,7 +121,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
             "finetuning_hp_search": False,
         },
         postprocessors=[PostprocessorMLE, PostprocessorQR, PostprocessorEQC],
-        output_dir=output_dir / "chronos-finetuned-lora",
+        output_dir=output_dir / "chronos-bolt-finetuned-lora",
     )
 
     results = pipeline.backtest(
