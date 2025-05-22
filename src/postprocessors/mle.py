@@ -55,6 +55,11 @@ class PostprocessorMLE(AbstractPostprocessor):
                 log_df["std_target"] = log_df["target"].rolling(20, min_periods=20, center=True).std()
                 log_df = log_df.dropna()
 
+                if len(log_df) == 0:
+                    logging.info("No calibration data available for item_id: %s, lead time: %s.", item_id, lead_time)
+                    self.params[lead_time] = None
+                    continue
+
                 M = log_df[0.5].values
                 IQR = (log_df[0.9] - log_df[0.1]).values
                 y_mu = log_df["target"].values
@@ -102,7 +107,7 @@ class PostprocessorMLE(AbstractPostprocessor):
                 params = self.params[lead_time]
                 if params is None:
                     # keeping original predictions
-                    logging.info("No params available for forecast horizon=%s, item=%s. Keeping original predictions.", lead_time, item_id)
+                    logging.info("No params available for item: %s, lead time: %s. Keeping original predictions.", item_id, lead_time)
                     predictions = df[item.quantiles].to_numpy()
                 else:
                     a, b, c, d = params

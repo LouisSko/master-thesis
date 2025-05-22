@@ -5,6 +5,9 @@ from tqdm import tqdm
 from src.core.base import AbstractPostprocessor
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame
 from pathlib import Path
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class PostprocessorQR(AbstractPostprocessor):
@@ -70,6 +73,11 @@ class PostprocessorQR(AbstractPostprocessor):
                     y_train = self._transform(y_train_raw)
                     x_train = self._create_features(train_data, q)
 
+                    if len(x_train) == 0:
+                        logging.info("No calibration data available for item_id: %s, lead time: %s.", item_id, lead_time)
+                        self.qr_models[lead_time][q] = None
+                        continue
+
                     # Fit model
                     model = sm.QuantReg(y_train, x_train)
                     fit_result = model.fit(q=q)
@@ -92,14 +100,15 @@ class PostprocessorQR(AbstractPostprocessor):
                 for quantile in item.quantiles:
                     x_test = self._create_features(df, quantile)
 
-                    try:
-                        params = self.qr_models[lead_time][quantile]
-                    except KeyError:
-                        raise ValueError(f"No model for item_id: {item_id}, lead_time: {lead_time}, quantile: {quantile}.")
+                    params = self.qr_models[lead_time][quantile]
+
+                    if params is None:
+                        logging.info("No params available for item: %s, lead time: %s, quantile: %s. Keeping original predictions.", item_id, lead_time, quantile)
+                        predictions = df[quantile].values
                     else:
                         predictions = x_test @ params
                         predictions = self._inverse_transform(predictions)  # inverse of arcsinh
-                        adjusted_predictions.append(predictions)
+                    adjusted_predictions.append(predictions)
 
                 adjusted_predictions = np.column_stack(adjusted_predictions)
                 results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(adjusted_predictions))

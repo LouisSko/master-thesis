@@ -5,6 +5,9 @@ import torch
 from copy import deepcopy
 from tqdm import tqdm
 from pathlib import Path
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
 class PostprocessorEQC(AbstractPostprocessor):
@@ -41,6 +44,12 @@ class PostprocessorEQC(AbstractPostprocessor):
                 # TODO: could be made more efficient by accessing the predictions directly
                 df = item.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna().copy()
 
+                if len(df) == 0:
+                    logging.info("No calibration data available for item_id: %s, lead time: %s.", item_id, lead_time)
+                    for q in item.quantiles:
+                        self.conf_thresholds[lead_time][q] = None
+                    continue
+
                 for q in item.quantiles:
                     scores = df[TARGET] - df[q]
                     self.conf_thresholds[lead_time][q] = np.quantile(scores, q=q)
@@ -75,7 +84,12 @@ class PostprocessorEQC(AbstractPostprocessor):
                 df = item.to_dataframe(lead_time)  # TODO: could be made more efficient by accessing the predictions directly
                 adjusted_predictions = []
                 for quantile in item.quantiles:
-                    conformalized_predictions = np.array(df[quantile] + self.conf_thresholds[lead_time][quantile])
+                    offset = self.conf_thresholds[lead_time][quantile]
+                    if offset is None:
+                        logging.info("No params available for item: %s, lead time: %s, quantile: %s. Keeping original predictions.", item_id, lead_time, quantile)
+                        conformalized_predictions = np.array(df[quantile])
+                    else:
+                        conformalized_predictions = np.array(df[quantile] + offset)
                     adjusted_predictions.append(conformalized_predictions)
                 adjusted_predictions = np.column_stack(adjusted_predictions)
                 #### specific code #####
