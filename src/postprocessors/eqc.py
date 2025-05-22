@@ -1,11 +1,10 @@
 import numpy as np
 from src.core.base import AbstractPostprocessor
-from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TARGET
+from src.core.timeseries_evaluation import TimeSeriesForecast, HorizonForecast, TARGET
 import torch
-from copy import deepcopy
-from tqdm import tqdm
 from pathlib import Path
 import logging
+from typing import Dict
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -16,86 +15,88 @@ class PostprocessorEQC(AbstractPostprocessor):
 
     This postprocessor adjusts quantile regression outputs by computing empirical offsets to improve quantile coverage.
     """
-
     def __init__(self, output_dir: Path) -> None:
         super().__init__(output_dir)
-        self.conf_thresholds = {}
-        self.ignore_first_n_train_entries = 0
 
-    def fit(self, data: ForecastCollection):
+    def _fit(self, data: TimeSeriesForecast) -> Dict[int, Dict[float, float]]:
         """
-        Fits the calibrator to the prediction data by computing empirical quantile offsets.
+        Calibrates predicted quantiles by computing empirical offsets for each lead time.
 
-        The method calculates how much each predicted quantile needs to be shifted
-        to achieve the desired empirical coverage on the calibration data.
+        This method estimates how much each predicted quantile should be shifted so that
+        the resulting quantile forecasts achieve the correct empirical coverage on the
+        calibration set. For each lead time and quantile, it calculates the empirical
+        error between the predicted quantile and the true target and stores the
+        corresponding offset.
 
-        Parameters:
-        -----------
-        data : PredictionLeadTimes
-            Predictions used for calibration.
+        Parameters
+        ----------
+        data : TimeSeriesForecast
+            Forecast data for a single item, including predicted quantiles and targets,
+            used for calibration.
+
+        Returns
+        -------
+        Dict[int, Dict[float, float]]
+            A nested dictionary of empirical quantile offsets structured as:
+            {
+                lead_time_1: {
+                    quantile_1: offset,
+                    quantile_2: offset,
+                    ...
+                },
+                ...
+            }
+            where each offset can be used to shift the corresponding quantile prediction.
         """
-        data = deepcopy(data)
+        conf_thresholds = {}
+        for lead_time in data.get_lead_times():
+            conf_thresholds[lead_time] = {}
+            # TODO: could be made more efficient by accessing the predictions directly
+            df = data.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna().copy()
 
-        for item_id in tqdm(data.get_item_ids(), desc="Fitting EQC Postprocessor for each time series (item)"):
-            self.conf_thresholds = {}
-            item = data.get_time_series_forecast(item_id)
-            for lead_time in item.get_lead_times():
-                self.conf_thresholds[lead_time] = {}
-                # TODO: could be made more efficient by accessing the predictions directly
-                df = item.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna().copy()
+            if len(df) == 0:
+                logging.info("No calibration data available for item_id: %s, lead time: %s.", data.item_id, lead_time)
+                for q in data.quantiles:
+                    conf_thresholds[lead_time][q] = None
+                continue
 
-                if len(df) == 0:
-                    logging.info("No calibration data available for item_id: %s, lead time: %s.", item_id, lead_time)
-                    for q in item.quantiles:
-                        self.conf_thresholds[lead_time][q] = None
-                    continue
+            for q in data.quantiles:
+                scores = df[TARGET] - df[q]
+                conf_thresholds[lead_time][q] = np.quantile(scores, q=q)
 
-                for q in item.quantiles:
-                    scores = df[TARGET] - df[q]
-                    self.conf_thresholds[lead_time][q] = np.quantile(scores, q=q)
+        return conf_thresholds
 
-            self.save_model(model=self.conf_thresholds, item_id=item_id)
-
-    def postprocess(self, data: ForecastCollection) -> ForecastCollection:
+    def _postprocess(self, data: TimeSeriesForecast, params: Dict[int, Dict[float, float]]) -> TimeSeriesForecast:
         """
         Applies the empirical quantile offsets to adjust predictions.
 
-        Parameters:
+        Parameters
         -----------
-        data : ForecastCollection
+        data : TimeSeriesForecast
             Prediction data to be postprocessed, containing raw quantile predictions.
 
-        Returns:
+        params : Dict[int, Dict[float, float]]
+            A nested dictionary of empirical quantile offsets
+
+        Returns
         --------
-        ForecastCollection
-            A new `ForecastCollection` object with calibrated quantile predictions.
+        TimeSeriesForecast
+            A new `TimeSeriesForecast` object with calibrated quantile predictions.
         """
-        data = deepcopy(data)
+        results_lt = {}
+        for lead_time in data.get_lead_times():
+            df = data.to_dataframe(lead_time)  # TODO: could be made more efficient by accessing the predictions directly
+            adjusted_predictions = []
+            for quantile in data.quantiles:
+                offset = params[lead_time][quantile]
+                if offset is None:
+                    logging.info("No params available for item: %s, lead time: %s, quantile: %s. Keeping original predictions.", data.item_id, lead_time, quantile)
+                    conformalized_predictions = np.array(df[quantile])
+                else:
+                    conformalized_predictions = np.array(df[quantile] + offset)
+                adjusted_predictions.append(conformalized_predictions)
+            adjusted_predictions = np.column_stack(adjusted_predictions)
 
-        results_item_ids = {}
+            results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(adjusted_predictions))
 
-        for item_id in tqdm(data.get_item_ids(), desc="Updating Forecasts using EQC Postprocessor."):
-            results_lt = {}
-            item = data.get_time_series_forecast(item_id)
-            self.conf_thresholds = self.load_model(item_id=item_id)
-            for lead_time in item.get_lead_times():
-
-                #### specific code #####
-                df = item.to_dataframe(lead_time)  # TODO: could be made more efficient by accessing the predictions directly
-                adjusted_predictions = []
-                for quantile in item.quantiles:
-                    offset = self.conf_thresholds[lead_time][quantile]
-                    if offset is None:
-                        logging.info("No params available for item: %s, lead time: %s, quantile: %s. Keeping original predictions.", item_id, lead_time, quantile)
-                        conformalized_predictions = np.array(df[quantile])
-                    else:
-                        conformalized_predictions = np.array(df[quantile] + offset)
-                    adjusted_predictions.append(conformalized_predictions)
-                adjusted_predictions = np.column_stack(adjusted_predictions)
-                #### specific code #####
-
-                results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(adjusted_predictions))
-
-            results_item_ids[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=results_lt, data=item.data, freq=item.freq, quantiles=item.quantiles)
-
-        return ForecastCollection(item_ids=results_item_ids)
+        return TimeSeriesForecast(item_id=data.item_id, lead_time_forecasts=results_lt, data=data.data, freq=data.freq, quantiles=data.quantiles)

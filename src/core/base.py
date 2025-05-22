@@ -1,13 +1,17 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Any
 import pandas as pd
-from src.core.timeseries_evaluation import ForecastCollection, TabularDataFrame
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 from typing import Dict, List, Optional, Type, Union, Literal
 from pathlib import Path
 import joblib
 import logging
 import os
+import random
+import numpy as np
+import torch
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -89,28 +93,68 @@ class AbstractPredictor(ABC):
 
 
 class AbstractPostprocessor(ABC):
-    def __init__(self, output_dir: Path) -> None:
+    def __init__(self, output_dir: Optional[Path] = None) -> None:
         self.ignore_first_n_train_entries = 200
-        self.output_dir = output_dir / self.__class__.__name__ / "models"
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.class_name = self.__class__.__name__
+        self.params = {}
 
-    @abstractmethod
+        if output_dir is not None:
+            self.output_dir = output_dir / self.class_name / "models"
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            logging.info("Using the following output directory to store results: %s", self.output_dir)
+        else:
+            self.output_dir = None
+            logging.info("No output directory provided. Models will not be saved or loaded from disk.")
+
     def fit(self, data: ForecastCollection) -> None:
+        """Fit postprocessor for each time series item and save the model if output_dir is set."""
+        for item_id in tqdm(data.get_item_ids(), desc=f"Fitting {self.class_name} for each time series (item)"):
+            forecast = data.get_time_series_forecast(item_id)
+            params = self._fit(forecast)
+            self.params[item_id] = params
+
+            if self.output_dir is not None:
+                self.save_model(params, item_id)
+
+    def postprocess(self, data: ForecastCollection) -> ForecastCollection:
+        """Apply postprocessor to each item using available or saved models."""
+        results = {}
+        for item_id in tqdm(data.get_item_ids(), desc=f"Postprocessing with {self.class_name}"):
+            forecast = data.get_time_series_forecast(item_id)
+            params = self.get_params(item_id)
+            results[item_id] = self._postprocess(forecast, params)
+        return ForecastCollection(item_ids=results)
+
+    def get_params(self, item_id: Union[int, str]) -> Any:
+        """Returns model parameters from memory or loads them from disk if output_dir is set."""
+        if item_id in self.params:
+            return self.params[item_id]
+        if self.output_dir is not None:
+            params = self.load_model(item_id)
+            self.params[item_id] = params
+            return params
+        raise ValueError(f"No parameters available for item_id={item_id}. Either call `fit()` or provide an output_dir with saved models.")
+
+    @abstractmethod
+    def _fit(self, data: TimeSeriesForecast) -> Any:
+        """Fit method to be implemented. Should return model parameters."""
         pass
 
     @abstractmethod
-    def postprocess(self, data: ForecastCollection) -> ForecastCollection:
+    def _postprocess(self, data: TimeSeriesForecast, params: Any) -> TimeSeriesForecast:
+        """Apply postprocessing using provided parameters."""
         pass
+
+    def _get_model_path(self, item_id: Union[int, str]) -> Path:
+        return self.output_dir / f"models_item_id_{item_id}.joblib"
 
     def save_model(self, model: Any, item_id: int) -> None:
-        """Save model for a specific item id"""
-        file_path = self.output_dir / f"models_item_id_{item_id}.joblib"
-        joblib.dump(model, file_path)
+        """Save model for a specific item ID to disk using joblib."""
+        joblib.dump(model, self._get_model_path(item_id))
 
     def load_model(self, item_id: int) -> Any:
         """Load model for a specific item id"""
-        file_path = self.output_dir / f"models_item_id_{item_id}.joblib"
-        return joblib.load(file_path)
+        return joblib.load(self._get_model_path(item_id))
 
     def save(self, file_path: Path) -> None:
         joblib.dump(self, file_path)
