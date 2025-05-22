@@ -518,7 +518,7 @@ def fine_tune(
     def create_callbacks():
         callbacks = [BestCheckpointCallback()]
         if data_val is not None:
-            patience = 5
+            patience = 3
             callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
             logging.info("Validation data is available, setting early_stopping_patience=%s", patience)
         return callbacks
@@ -658,8 +658,8 @@ def hp_space_optuna(trial: Trial):
 def create_trainer_kwargs(path: str = Path("./models/test/"), eval_during_fine_tune: bool = True, save_checkpoints: bool = True):
     """Define the training arguments"""
 
-    save_eval_steps = 100
-    logging_steps = 100
+    save_eval_steps = 0.1
+    logging_steps = 0.05
     target_column = "target"
     dir = "transformers_logs"
 
