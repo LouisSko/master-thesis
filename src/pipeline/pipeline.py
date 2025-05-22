@@ -1,6 +1,6 @@
 import torch
 from typing import Dict, List, Optional, Type, Union, Literal, Tuple
-from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS, ITEMID, TARGET
 from src.core.base import AbstractPostprocessor, AbstractPredictor
 from src.core.utils import CustomJSONEncoder
 from autogluon.timeseries import TimeSeriesDataFrame
@@ -181,12 +181,14 @@ class ForecastingPipeline(AbstractPipeline):
                 test_window_size = pd.DateOffset(years=1)
 
             while test_start_date < test_end_date:
-                results[test_start_date] = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
+                results[test_start_date] = self._train_predict_postprocess(
+                    data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on, evaluate=True
+                )
                 test_start_date += test_window_size
 
             results = self._merge_results(results)
         else:
-            results = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
+            results = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on, evaluate=True)
 
         if save_results:
             backtest_params = {
@@ -442,11 +444,17 @@ class ForecastingPipeline(AbstractPipeline):
         val_window_size: Optional[pd.DateOffset],
         test_window_size: Optional[pd.DateOffset],
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
+        evaluate: bool = False,
     ) -> Dict[str, ForecastCollection]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
 
         data_train, data_val, data_test = self.split_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
 
+        if evaluate:
+            logging.info("evaluate is set to true. Removing all item_ids which contain only nans in target column.")
+            data_test = data_test[data_test.groupby(level=ITEMID)[TARGET].transform(lambda x: not x.isna().all())].copy()
+            if len(data_test) == 0:
+                raise ValueError("Test data is empty after dropping all rows with target=nan. Check data.")
         if train:
             self.train(data_train, data_val)
         else:
