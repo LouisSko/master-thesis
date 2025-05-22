@@ -107,7 +107,7 @@ class ChronosBacktestingDataset(Dataset):
 
         self.target_array = data[target_column].to_numpy(dtype=np.float32)
         self.freq = data.freq
-        self.item_ids = data.index.get_level_values("item_id").to_numpy()
+        self.item_ids = pd.factorize(data.index.get_level_values("item_id"))[0]
         cum_sizes = data.num_timesteps_per_item().values.cumsum()
         self.indptr = np.append(0, cum_sizes).astype(np.int32)
         self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in self.item_ids}
@@ -274,7 +274,7 @@ class Chronos(AbstractPredictor):
         else:
             logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
             pipeline = BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
-            self.base_model_name = self.pretrained_model_name_or_path
+            self.base_model_name = self.pretrained_model_name_or_path # TODO: make this more robust in case pretrained_model_name_or_path does not contain chronos-t5 or chronos-bolt
 
         # only update prediction length for chronos-t5, not for chronos-bolt. TODO: Is there a nicer way to do this before instantiation?
         if "chronos-t5" in self.base_model_name:
