@@ -72,7 +72,7 @@ class PostprocessorQR(AbstractPostprocessor):
 
         results_lt = {}
 
-        transformer: DataTransformer = lt_params["transformer"]
+        transformer: DataTransformer = params["transformer"]
 
         for lead_time in data.get_lead_times():
             df = self._prepare_dataframe(data, lead_time, train=False)
