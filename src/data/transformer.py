@@ -7,6 +7,18 @@ from typing import Optional, Literal, Union, Any
 from sklearn.preprocessing import PowerTransformer, FunctionTransformer
 
 
+def log_transform(x, epsilon):
+    return np.log(x + epsilon)
+
+
+def log_inverse(x, epsilon):
+    return np.exp(x) - epsilon
+
+
+def identity(x):
+    return x
+
+
 class DataTransformer(AbstractDataTransformer):
     """
     A flexible transformer supporting various methods:
@@ -27,13 +39,15 @@ class DataTransformer(AbstractDataTransformer):
         if method in {"yeo-johnson", "box-cox"}:
             self.transformer = PowerTransformer(method=method, **power_kwargs)
             self.requires_fit = True
+
         elif method == "log":
             self.transformer = FunctionTransformer(
-                func=lambda x: np.log(x + self.epsilon),
-                inverse_func=lambda x: np.exp(x) - self.epsilon,
+                func=lambda x: log_transform(x, self.epsilon),
+                inverse_func=lambda x: log_inverse(x, self.epsilon),
                 validate=False,
             )
             self.requires_fit = False
+
         elif method == "arcsinh":
             self.transformer = FunctionTransformer(
                 func=np.arcsinh,
@@ -41,10 +55,11 @@ class DataTransformer(AbstractDataTransformer):
                 validate=False,
             )
             self.requires_fit = False
+
         else:
             self.transformer = FunctionTransformer(
-                func=lambda x: x,
-                inverse_func=lambda x: x,
+                func=identity,
+                inverse_func=identity,
                 validate=False,
             )
             self.requires_fit = False
