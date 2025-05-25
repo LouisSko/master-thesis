@@ -11,7 +11,7 @@ from pydantic import Field
 from pathlib import Path
 from pandas.tseries.frequencies import to_offset
 from collections import deque
-
+from scipy import stats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -369,6 +369,124 @@ class RollingQuantilePredictor(AbstractPredictor):
                     lead_time=lead_time,
                     predictions=torch.tensor(forecasts),  # same trivial forecast for each lead time
                 )
+
+            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
+
+        return ForecastCollection(item_ids=ts_forecast)
+
+
+class RandomWalkBenchmark(AbstractPredictor):
+    """
+    A simple benchmark model based on a random walk with Gaussian innovations in log space.
+
+    This model estimates the standard deviation of log returns for each time series from
+    the training data, and generates future quantile forecasts by simulating a random walk
+    in log space, scaled by the square root of the lead time.
+
+    Parameters
+    ----------
+    quantiles : List[float], optional
+        List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
+    lead_times : List[int], optional
+        List of lead times (in time steps) for which forecasts should be produced.
+    freq : Union[str, pd.Timedelta, pd.DateOffset], optional
+        Frequency of the time series data; can be a pandas-parsable string
+        (e.g., "1h", "1D"), a Timedelta, or a DateOffset.
+    output_dir : Optional[Union[str, Path]], optional
+        Directory to store model outputs or logs.
+    """
+
+    def __init__(
+        self,
+        quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        lead_times: List[int] = [1, 2, 3],
+        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        output_dir: Optional[Union[str, Path]] = None,
+    ) -> None:
+        # Normalize freq into a pandas DateOffset
+        self.offset = to_offset(freq)
+        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
+        self.quantiles = quantiles
+        self.sd_yd = {}  # standard deviation for each item id
+
+    def fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+    ) -> None:
+        """
+        Estimate the standard deviation of the log-differenced target series for each item.
+
+        Parameters
+        ----------
+        data_train : TimeSeriesDataFrame
+            Training data containing time series with 'target' values.
+        data_val : Optional[TimeSeriesDataFrame], optional
+            Validation data (not used in this implementation).
+        """
+
+        for id in data_train.item_ids:
+            data_sub = data_train.loc[[id]]["target"].values
+
+            y = np.log(data_sub)
+            y_diff = np.diff(y)
+            y_diff = y_diff[~np.isnan(y_diff)]
+            self.sd_yd[id] = np.std(y_diff)
+
+        logging.info("RandomWalkBenchmark estimated standard deviation for each time series from training data.")
+
+    def predict(
+        self,
+        data: TimeSeriesDataFrame,
+        previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        predict_only_last_timestep: bool = False,
+    ) -> ForecastCollection:
+        """
+        Generate quantile forecasts using a Gaussian random walk in log space.
+
+        For each time series, forecasts are produced by simulating a driftless
+        random walk with standard deviation estimated during training. Forecasts
+        are returned in the original (exponentiated) scale.
+
+        Parameters
+        ----------
+        data : TimeSeriesDataFrame
+            Time series data used to update history and for which forecasts are required.
+        previous_context_data : Optional[TimeSeriesDataFrame], optional
+            Contextual data used to pre-fill history before forecasting. Not used in this implementation.
+        predict_only_last_timestep : bool, optional
+            Whether to forecast only the final time step. Not used in this implementation.
+
+        Returns
+        -------
+        ForecastCollection
+            Forecasted quantiles for each item and lead time.
+        """
+
+        ts_forecast: Dict[int, TimeSeriesForecast] = {}
+
+        h_steps = np.array(self.lead_times).reshape(-1, 1)
+        z = stats.norm.ppf(np.array(self.quantiles)).reshape(1, -1)
+
+        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
+            data_sub = data.loc[[item_id]]
+
+            timestamps = data_sub.index.get_level_values("timestamp")
+            log_targets = np.log(data_sub["target"]).values
+
+            q_fc_matrix = np.sqrt(h_steps) @ z * self.sd_yd[item_id]
+
+            q_fc_y = []
+
+            for timestamp, log_y in zip(timestamps, log_targets):
+                q_fc_y.append(q_fc_matrix + log_y)
+
+            q_fc_y = np.exp(np.stack(q_fc_y, axis=0))
+
+            lt_forcast: Dict[int, HorizonForecast] = {}
+
+            for i, lead_time in enumerate(self.lead_times):
+                lt_forcast[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(q_fc_y[:, i, :]))
 
             ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
 
