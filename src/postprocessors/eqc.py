@@ -4,7 +4,7 @@ from src.core.timeseries_evaluation import TimeSeriesForecast, HorizonForecast, 
 import torch
 from pathlib import Path
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -15,8 +15,9 @@ class PostprocessorEQC(AbstractPostprocessor):
 
     This postprocessor adjusts quantile regression outputs by computing empirical offsets to improve quantile coverage.
     """
-    def __init__(self, output_dir: Path) -> None:
-        super().__init__(output_dir)
+
+    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None) -> None:
+        super().__init__(output_dir, name)
 
     def _fit(self, data: TimeSeriesForecast) -> Dict[int, Dict[float, float]]:
         """

@@ -95,9 +95,9 @@ class AbstractPredictor(ABC):
 
 
 class AbstractPostprocessor(ABC):
-    def __init__(self, output_dir: Optional[Path] = None) -> None:
+    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None) -> None:
         self.ignore_first_n_train_entries = 200
-        self.class_name = self.__class__.__name__
+        self.class_name = name or self.__class__.__name__
         self.params = {}
 
         if output_dir is not None:
@@ -187,9 +187,37 @@ class AbstractPostprocessor(ABC):
         """Load model for a specific item id"""
         return joblib.load(self._get_model_path(item_id))
 
-    def save(self, file_path: Path) -> None:
+    def save(self, file_path: Optional[Path] = None) -> None:
+
+        if file_path is None and self.output_dir is None:
+            raise ValueError("No file path provided and no default output_dir set.")
+
+        file_path = file_path or self.output_dir / f"{self.class_name}.joblib"
+
         joblib.dump(self, file_path)
-        logging.info("%s successfully saved to: %s", self.__class__.__name__, file_path)
+        logging.info("%s successfully saved to: %s", self.class_name, file_path)
+
+
+class AbstractDataTransformer(ABC):
+
+    def __init__(self):
+        pass
+
+    @abstractmethod
+    def fit(self, X: Union[np.ndarray, pd.DataFrame]) -> None:
+        """Fit the transformer if required (only for PowerTransformer)."""
+
+    @abstractmethod
+    def transform(self, X: Union[np.ndarray, pd.DataFrame]) -> Union[np.ndarray, pd.DataFrame]:
+        """Apply the forward transformation, with column-wise support for single-feature fits."""
+
+    @abstractmethod
+    def fit_transform(self, X: Union[np.ndarray, pd.DataFrame]) -> Union[np.ndarray, pd.DataFrame]:
+        """Fit and transform in one step."""
+
+    @abstractmethod
+    def inverse_transform(self, X: Union[np.ndarray, pd.DataFrame]) -> Union[np.ndarray, pd.DataFrame]:
+        """Invert the transformation."""
 
 
 class AbstractPipeline(ABC):

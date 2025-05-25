@@ -4,8 +4,9 @@ import scipy.stats as stats
 from scipy.optimize import minimize
 from src.core.base import AbstractPostprocessor
 from src.core.timeseries_evaluation import TimeSeriesForecast, HorizonForecast
+from src.data.transformer import DataTransformer
 import torch
-from typing import Tuple, Dict, Union
+from typing import Tuple, Dict, Union, Optional, Literal
 import logging
 from pathlib import Path
 import pandas as pd
@@ -14,25 +15,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 class PostprocessorMLE(AbstractPostprocessor):
-    def __init__(self, output_dir: Path) -> None:
-        """
-        Postprocessor that adjusts quantile regression outputs using Maximum Likelihood Estimation (MLE).
+    """
+    Postprocessor that adjusts quantile regression outputs using Maximum Likelihood Estimation (MLE).
 
-        Learns a simple parametric relationship between predicted medians (M) and interquartile ranges (IQR)
-        to true target values by fitting a normal distribution to the log transformed predictions.
-        """
-        super().__init__(output_dir)
-        self.epsilon = 100_000
+    Learns a simple parametric relationship between predicted medians (M) and interquartile ranges (IQR)
+    to true target values by fitting a normal distribution to the log transformed predictions.
+    """
 
-    def _transform(self, x: np.ndarray) -> np.ndarray:
-        """Apply arcsinh transform to any real-valued input."""
-        # return np.arcsinh(x)
-        return np.log(x + self.epsilon)
-
-    def _inverse_transform(self, x: np.ndarray) -> np.ndarray:
-        """Apply arcsinh transform to any real-valued input."""
-        # return np.sinh(x)
-        return np.exp(x) - self.epsilon
+    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, transformer: Optional[Literal["yeo-johnson", "box-cox", "log", "arcsinh"]] = None) -> None:
+        super().__init__(output_dir, name)
+        self.transformer = transformer
 
     def extract_m_iqr(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Extract median and inter quartile range from df"""
@@ -56,20 +48,23 @@ class PostprocessorMLE(AbstractPostprocessor):
             A dict of the fitted parameters {lead_time: (a, b, c, d)}. None if MLE failed.
         """
         params = {}
+        transformer = DataTransformer(self.transformer)
+        transformer.fit(data.data["target"])  # or use a separate transformer for each lead time/item id
         for lead_time in data.get_lead_times():
-            df = data.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna()
-            log_df = self._transform(df[data.quantiles + ["target"]])
-            log_df["std_target"] = log_df["target"].rolling(20, min_periods=20, center=True).std()
-            log_df = log_df.dropna()
+            df = data.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].copy().dropna()
+            df["target"] = transformer.transform(df[["target"]])
+            df[data.quantiles] = transformer.transform(df[data.quantiles])
+            df["std_target"] = df["target"].rolling(20, min_periods=20, center=True).std()
+            df = df.dropna()
 
-            if len(log_df) == 0:
+            if len(df) == 0:
                 logging.info("No calibration data available for item_id: %s, lead time: %s.", data.item_id, lead_time)
                 params[lead_time] = None
                 continue
 
-            M, IQR = self.extract_m_iqr(log_df)
-            y_mu = log_df["target"].values
-            y_sigma = log_df["std_target"].values
+            M, IQR = self.extract_m_iqr(df)
+            y_mu = df["target"].values
+            y_sigma = df["std_target"].values
 
             init_params = self._estimate_init_params(M, IQR, y_mu, y_sigma)
             result = minimize(self._neg_log_likelihood, args=(M, IQR, y_mu), x0=init_params, method="Nelder-Mead")
@@ -79,6 +74,8 @@ class PostprocessorMLE(AbstractPostprocessor):
             else:
                 logging.warning("MLE failed for forecast horizon=%s, item=%s. Predictions won't get postprocessed for this one.", lead_time, data.item_id)
                 params[lead_time] = None
+
+        params["transformer"] = transformer
 
         return params
 
@@ -110,21 +107,23 @@ class PostprocessorMLE(AbstractPostprocessor):
         """
         results_lt = {}
 
-        for lead_time in data.get_lead_times():
+        transformer: DataTransformer = params["transformer"]
 
-            df = data.to_dataframe(lead_time)
-            log_df = self._transform(df[data.quantiles])
-            M, IQR = self.extract_m_iqr(log_df)
+        for lead_time in data.get_lead_times():
             params_lt = params[lead_time]
             if params_lt is None:
                 logging.info("No params available for item: %s, lead time: %s. Keeping original predictions.", data.item_id, lead_time)
                 predictions = df[data.quantiles].to_numpy()
-            else:
-                a, b, c, d = params_lt
-                mu = a + b * M
-                sigma = c + d * IQR
-                log_predictions = stats.norm.ppf(np.array(data.quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
-                predictions = self._inverse_transform(log_predictions)  # transform back
+                continue
+
+            df = data.to_dataframe(lead_time).copy()
+            df = transformer.transform(df[data.quantiles])
+            M, IQR = self.extract_m_iqr(df)
+            a, b, c, d = params_lt
+            mu = a + b * M
+            sigma = c + d * IQR
+            log_predictions = stats.norm.ppf(np.array(data.quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
+            predictions = transformer.inverse_transform(log_predictions)
 
             results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(predictions))
 
