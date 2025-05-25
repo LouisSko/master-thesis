@@ -8,3 +8,5 @@ chronos-forecasting==1.5.1
 tensorboard==2.19.0
 peft==0.15.2
 transformers==4.51.3
+tqdm==4.67.1
+tqdm_joblib==0.0.4
