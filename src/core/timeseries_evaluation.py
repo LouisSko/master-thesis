@@ -562,7 +562,7 @@ class ForecastCollection(BaseModel):
         else:
             first_item = self.get_item_ids()[0]
 
-        bins = len(self.get_time_series_forecast(first_item).quantiles)
+        bins = len(self.get_time_series_forecast(first_item).quantiles)+1
 
         if overlay:
             plt.figure(figsize=(10, 6))
