@@ -25,6 +25,7 @@ class ForecastingPipeline(AbstractPipeline):
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
+        postprocessor_kwargs: Optional[List[Dict]] = None,
         output_dir: Optional[Union[Path, str]] = None,
     ):
         super().__init__(model, model_kwargs, postprocessors, output_dir)
@@ -33,11 +34,40 @@ class ForecastingPipeline(AbstractPipeline):
         self.pipeline_dir_models = self.output_dir / DIR_MODELS
         self.pipeline_dir_postprocessors = self.output_dir / DIR_POSTPROCESSORS
         self.pipeline_dir_backtests = self.output_dir / DIR_BACKTESTS
-        self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
 
-        # instantiate predictor
-        self.predictor = model(**model_kwargs)
+        # add output directory
+        self.postprocessors = postprocessors
+        self.postprocessor_kwargs = postprocessor_kwargs
+        self.model = model
+        self.model_kwargs = model_kwargs
+
+        # Need to be fitted
+        self.predictor = None
         self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
+
+        # create predictor
+        self.create_predictor()
+
+    def create_predictor(self):
+        self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
+        self.predictor = self.model(**self.model_kwargs)
+
+    def create_postprocessors(self):
+        if self.postprocessors is None:
+            raise ValueError("No postprocessors specified.")
+
+        if self.postprocessor_kwargs is None:
+            self.postprocessor_kwargs = [{} for p in self.postprocessors]
+
+        assert len(self.postprocessor_kwargs) == len(self.postprocessors)
+
+        for p_kwarg in self.postprocessor_kwargs:
+            p_kwarg.update({"output_dir": self.pipeline_dir_postprocessors})
+
+        self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
+        for pp, kwargs in zip(self.postprocessors, self.postprocessor_kwargs):
+            pp_instance = pp(**kwargs)
+            self.postprocessor_dict.update({pp_instance.class_name: pp_instance})
 
     def save(self) -> None:
         """Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib."""
@@ -50,7 +80,9 @@ class ForecastingPipeline(AbstractPipeline):
             "model": get_class_path(self.model),
             "model_kwargs": self.model_kwargs,
             "postprocessors": [get_class_path(postprocessor) for postprocessor in (self.postprocessors or [])],
+            "postprocessors_kwargs": self.postprocessor_kwargs,
         }
+
         config_file_path = self.output_dir / "pipeline_config.json"
         with open(config_file_path, "w") as f:
             json.dump(config, f, indent=4, cls=CustomJSONEncoder)
@@ -59,9 +91,8 @@ class ForecastingPipeline(AbstractPipeline):
         self.predictor.save()
 
         if self.postprocessor_dict is not None:
-            for name, postprocessor in self.postprocessor_dict.items():
-                # TODO: storing should be done in the same way as for predictor
-                postprocessor.save(self.pipeline_dir_postprocessors / f"{name}.joblib")
+            for postprocessor in self.postprocessor_dict.values():
+                postprocessor.save()
 
         logging.info('Pipeline saved successfully. Reload Pipeline using: ForecastingPipeline.from_pretrained("%s")', self.output_dir)
 
@@ -90,7 +121,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # Handle special fields in model_kwargs
         model_kwargs = config.get("model_kwargs", {})
-        if "freq" in model_kwargs:
+        if "freq" in model_kwargs:  # TODO: also support DateOffset
             model_kwargs["freq"] = pd.Timedelta(model_kwargs["freq"])
         config["model_kwargs"] = model_kwargs
 
@@ -102,6 +133,7 @@ class ForecastingPipeline(AbstractPipeline):
             model=config["model"],
             model_kwargs=config["model_kwargs"],
             postprocessors=config["postprocessors"],
+            postprocessor_kwargs=config["postprocessors_kwargs"],
             output_dir=pipeline_dir,
         )
 
@@ -316,7 +348,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # Initialize the predictor
         logging.info("Initializing predictor with model: %s", self.model.__name__)
-        self.predictor = self.model(**self.model_kwargs)
+        self.create_predictor()
 
         # Fit the predictor with training (and optional validation) data
         logging.info("Fitting predictor to the training data...")
@@ -386,17 +418,16 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_predictions = self.predictor.predict(calibration_data, previous_context_data)
         logging.info("Calibration predictions completed successfully.")
 
-        # Fit postprocessors
-        for postprocessor in self.postprocessors:
+        # initialize postprocessors
+        self.create_postprocessors()
 
-            # Initialize postprocessor
-            self.postprocessor_dict[postprocessor.__name__] = postprocessor(self.pipeline_dir_postprocessors)
-            logging.info("Initializing postprocessor: %s", postprocessor.__name__)
+        # Fit postprocessors
+        for name, postprocessor in self.postprocessor_dict.items():
 
             # Fit postprocessor on calibration data
-            logging.info("Fitting postprocessor: %s", postprocessor.__name__)
-            self.postprocessor_dict[postprocessor.__name__].fit(data=calibration_predictions)
-            logging.info("Successfully fitted postprocessor: %s", postprocessor.__name__)
+            logging.info("Fitting postprocessor: %s", name)
+            postprocessor.fit(data=calibration_predictions)
+            logging.info("Successfully fitted postprocessor: %s", name)
 
         end_time = pd.Timestamp.now()
         logging.info("Postprocessors training completed in %s seconds.", (end_time - start_time).total_seconds())
@@ -415,22 +446,17 @@ class ForecastingPipeline(AbstractPipeline):
         Dict[str, ForecastCollection]
             Dictionary with processed predictions.
         """
-        if not self.postprocessors:
+        if not self.postprocessor_dict:
             logging.info("No postprocessors configured. Returning raw predictions.")
             return predictions
 
-        if self.postprocessor_dict is None:
-            logging.error("Postprocessors need to be fitted via `.train_postprocessors()` first.")
-            raise ValueError("Postprocessors need to be fitted via `.train_postprocessors()` first.")
-
         logging.info("Applying postprocessing to predictions...")
-        for postprocessor in self.postprocessors:
-            logging.info("Postprocessing predictions using postprocessor: %s", postprocessor.__name__)
+        for name, postprocessor in self.postprocessor_dict.items():
+            logging.info("Postprocessing predictions using postprocessor: %s", name)
 
-            # Apply the postprocessing step and log the action
-            processed_predictions = self.postprocessor_dict[postprocessor.__name__].postprocess(data=predictions[self.predictor.__class__.__name__])
-            predictions[postprocessor.__name__] = processed_predictions
-            logging.info("Postprocessing complete for %s", postprocessor.__name__)
+            # Apply the postprocessing and store predictions as additional key value pair
+            predictions[name] = postprocessor.postprocess(data=predictions[self.predictor.__class__.__name__])
+            logging.info("Postprocessing complete for %s", name)
 
         logging.info("Postprocessing completed for all models.")
         return predictions
