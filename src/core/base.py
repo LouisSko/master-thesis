@@ -14,6 +14,8 @@ import torch
 from tqdm import tqdm
 from tqdm_joblib import tqdm_joblib
 from joblib import Parallel, delayed, cpu_count
+import time
+import importlib
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -30,9 +32,19 @@ class AbstractPredictor(ABC):
         self.output_dir = None
         if output_dir:
             self.output_dir = Path(output_dir)
+        self.fit_execution_time = None
+
+    def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
+        start_time = time.time()
+        self._fit(data_train, dat_val)
+        end_time = time.time()
+
+        self.fit_execution_time = np.round(end_time - start_time, 2)
+
+        logging.info("Time to fit %s in seconds: %s", self.__class__.__name__, self.fit_execution_time)
 
     @abstractmethod
-    def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def _fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
         pass
 
     @abstractmethod
@@ -99,6 +111,7 @@ class AbstractPostprocessor(ABC):
         self.ignore_first_n_train_entries = 200
         self.class_name = name or self.__class__.__name__
         self.params = {}
+        self.additional_info = {}
 
         if output_dir is not None:
             self.output_dir = output_dir / self.class_name / "models"
@@ -113,7 +126,7 @@ class AbstractPostprocessor(ABC):
 
         Fit each series in parallel with joblib.
         """
-
+        start_time = time.time()
         n_jobs = n_jobs or min(4, cpu_count())
 
         item_ids = data.get_item_ids()
@@ -136,6 +149,11 @@ class AbstractPostprocessor(ABC):
 
         # collect back into self.params
         self.params = dict(results)
+        end_time = time.time()
+
+        self.fit_execution_time = np.round(end_time - start_time, 2)
+
+        logging.info("Time to fit %s in seconds: %s", self.class_name, self.fit_execution_time)
 
     def fit_single_thread(self, data: ForecastCollection) -> None:
         """Fit postprocessor for each time series item and save the model if output_dir is set."""
@@ -226,6 +244,7 @@ class AbstractPipeline(ABC):
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
+        postprocessor_kwargs: Optional[List[Dict]] = None,
         output_dir: Optional[Union[str, Path]] = None,
     ):
         """Initialize the pipeline with model, data, and optional postprocessor.
@@ -247,6 +266,7 @@ class AbstractPipeline(ABC):
         self.model = model
         self.model_kwargs = model_kwargs
         self.postprocessors = postprocessors
+        self.postprocessor_kwargs = postprocessor_kwargs
 
     @abstractmethod
     def backtest(
@@ -363,6 +383,15 @@ class AbstractPipeline(ABC):
             Dictionary with processed predictions.
         """
 
+    def get_init_params(self) -> Dict:
+        """Get the init params information"""
+        return {
+            "model": get_class_path(self.model),
+            "model_kwargs": self.model_kwargs,
+            "postprocessors": [get_class_path(postprocessor) for postprocessor in (self.postprocessors or [])],
+            "postprocessors_kwargs": self.postprocessor_kwargs,
+        }
+
     def get_config(
         self,
         backtest_params: Dict,
@@ -385,13 +414,7 @@ class AbstractPipeline(ABC):
         """
 
         # Create base config with model information
-        config = {
-            "init_params": {
-                "model": self.model.__name__,
-                "model_kwargs": self.model_kwargs,
-                "postprocessors": [p.__name__ for p in self.postprocessors] if self.postprocessors is not None else None,
-            }
-        }
+        config = {"init_params": self.get_init_params()}
 
         # Add backtest parameters
         config.update({"backtest_params": backtest_params})
@@ -401,3 +424,41 @@ class AbstractPipeline(ABC):
             config.update({"additional_info": additional_config_info})
 
         return config
+
+
+def get_class_path(cls: Type) -> str:
+    """
+    Get the full import path of a class.
+    Example: mypackage.module.MyClass
+
+    Parameters:
+    -----------
+    cls : Type
+        The class to get the path from.
+
+    Returns:
+    --------
+    str
+        Full import path of the class.
+    """
+    return cls.__module__ + "." + cls.__name__
+
+
+def load_class_from_path(class_path: str) -> Type:
+    """
+    Dynamically load a class from a full import path.
+
+    Parameters:
+    -----------
+    class_path : str
+        Full import path (e.g., 'mypackage.module.MyClass').
+
+    Returns:
+    --------
+    Type
+        The loaded class.
+    """
+    module_name, class_name = class_path.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    logging.info("Load %s from %s", class_name, module)
+    return getattr(module, class_name)
