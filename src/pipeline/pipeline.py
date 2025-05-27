@@ -1,14 +1,13 @@
 import torch
 from typing import Dict, List, Optional, Type, Union, Literal, Tuple
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS, ITEMID, TARGET
-from src.core.base import AbstractPostprocessor, AbstractPredictor
+from src.core.base import AbstractPostprocessor, AbstractPredictor, load_class_from_path
 from src.core.utils import CustomJSONEncoder
 from autogluon.timeseries import TimeSeriesDataFrame
 import pandas as pd
 from src.core.base import AbstractPipeline
 from pathlib import Path
 import json
-import importlib
 from typing import Type
 import joblib
 import logging
@@ -28,7 +27,7 @@ class ForecastingPipeline(AbstractPipeline):
         postprocessor_kwargs: Optional[List[Dict]] = None,
         output_dir: Optional[Union[Path, str]] = None,
     ):
-        super().__init__(model, model_kwargs, postprocessors, output_dir)
+        super().__init__(model, model_kwargs, postprocessors, postprocessor_kwargs, output_dir)
 
         # define storage directory
         self.pipeline_dir_models = self.output_dir / DIR_MODELS
@@ -37,7 +36,6 @@ class ForecastingPipeline(AbstractPipeline):
 
         # add output directory
         self.postprocessors = postprocessors
-        self.postprocessor_kwargs = postprocessor_kwargs
         self.model = model
         self.model_kwargs = model_kwargs
 
@@ -76,12 +74,7 @@ class ForecastingPipeline(AbstractPipeline):
         create_dir(self.pipeline_dir_models)
         create_dir(self.pipeline_dir_postprocessors)
 
-        config = {
-            "model": get_class_path(self.model),
-            "model_kwargs": self.model_kwargs,
-            "postprocessors": [get_class_path(postprocessor) for postprocessor in (self.postprocessors or [])],
-            "postprocessors_kwargs": self.postprocessor_kwargs,
-        }
+        config = self.get_init_params()
 
         config_file_path = self.output_dir / "pipeline_config.json"
         with open(config_file_path, "w") as f:
@@ -203,6 +196,7 @@ class ForecastingPipeline(AbstractPipeline):
         logging.info("Start E2E backtesting...")
 
         results = {}
+        info = {}
 
         if test_end_date is None:
             test_end_date = data.index.get_level_values("timestamp").max()
@@ -213,14 +207,14 @@ class ForecastingPipeline(AbstractPipeline):
                 test_window_size = pd.DateOffset(years=1)
 
             while test_start_date < test_end_date:
-                results[test_start_date] = self._train_predict_postprocess(
+                results[test_start_date], info[test_start_date] = self._train_predict_postprocess(
                     data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on, evaluate=True
                 )
                 test_start_date += test_window_size
 
             results = self._merge_results(results)
         else:
-            results = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on, evaluate=True)
+            results, info = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on, evaluate=True)
 
         if save_results:
             backtest_params = {
@@ -232,10 +226,11 @@ class ForecastingPipeline(AbstractPipeline):
                 "test_window_size": test_window_size,
                 "train": train,
                 "calibration_based_on": calibration_based_on,
+                "additional_info": info,
             }
             self._save_backtest_results(results, backtest_params)
 
-        return results
+        return results, info
 
     def _save_backtest_results(self, results: Dict[str, ForecastCollection], backtest_params: Dict) -> None:
         """Save backtest results and config."""
@@ -322,7 +317,7 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-    ) -> None:
+    ) -> Dict:
         """
         Train the predictor.
 
@@ -335,8 +330,12 @@ class ForecastingPipeline(AbstractPipeline):
 
         Returns
         -------
-        None
+        Dict
+            Training information
         """
+
+        info = {}
+
         start_time = pd.Timestamp.now()
         logging.info("Starting training process from %s to %s", data_train.index.get_level_values("timestamp").min(), data_train.index.get_level_values("timestamp").max())
 
@@ -353,9 +352,12 @@ class ForecastingPipeline(AbstractPipeline):
         # Fit the predictor with training (and optional validation) data
         logging.info("Fitting predictor to the training data...")
         self.predictor.fit(data_train, data_val)
+        info["predictor_execution_time"] = self.predictor.fit_execution_time
 
         end_time = pd.Timestamp.now()
-        logging.info("Training completed in %s seconds.", (end_time - start_time).total_seconds())
+        logging.info("Pipeline training completed in %s seconds.", (end_time - start_time).total_seconds())
+
+        return info
 
     def predict(
         self,
@@ -392,7 +394,7 @@ class ForecastingPipeline(AbstractPipeline):
 
     def train_postprocessors(
         self, calibration_data: Union[TimeSeriesDataFrame, TabularDataFrame], previous_context_data: Union[TimeSeriesDataFrame, TabularDataFrame, None] = None
-    ) -> None:
+    ) -> Dict:
         """
         Fit the postprocessors based on calibration data.
 
@@ -401,6 +403,10 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_data : Union[TimeSeriesDataFrame, TabularDataFrame]
             The calibration data. Used to fit the postprocessor.
         """
+
+        # TODO: this function could return multiple information regarding the training
+        info = {}
+
         start_time = pd.Timestamp.now()
         logging.info(
             "Starting postprocessor training with calibration data from %s to %s",
@@ -421,16 +427,21 @@ class ForecastingPipeline(AbstractPipeline):
         # initialize postprocessors
         self.create_postprocessors()
 
+        info["postprocessors_execution_time"] = {}
+
         # Fit postprocessors
         for name, postprocessor in self.postprocessor_dict.items():
 
             # Fit postprocessor on calibration data
             logging.info("Fitting postprocessor: %s", name)
             postprocessor.fit(data=calibration_predictions)
+            info["postprocessors_execution_time"][name] = postprocessor.fit_execution_time
             logging.info("Successfully fitted postprocessor: %s", name)
 
         end_time = pd.Timestamp.now()
         logging.info("Postprocessors training completed in %s seconds.", (end_time - start_time).total_seconds())
+
+        return info
 
     def apply_postprocessing(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
         """
@@ -471,8 +482,10 @@ class ForecastingPipeline(AbstractPipeline):
         test_window_size: Optional[pd.DateOffset],
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
         evaluate: bool = False,
-    ) -> Dict[str, ForecastCollection]:
+    ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
+
+        info = {}
 
         data_train, data_val, data_test = self.split_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
 
@@ -482,7 +495,7 @@ class ForecastingPipeline(AbstractPipeline):
             if len(data_test) == 0:
                 raise ValueError("Test data is empty after dropping all rows with target=nan. Check data.")
         if train:
-            self.train(data_train, data_val)
+            info["model"] = self.train(data_train, data_val)
         else:
             logging.info("Skipping model training because `train=False`.")
 
@@ -498,10 +511,10 @@ class ForecastingPipeline(AbstractPipeline):
             else:
                 raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
 
-            self.train_postprocessors(calibration_data)
+            info["postprocessors"] = self.train_postprocessors(calibration_data)
             predictions = self.apply_postprocessing(predictions)
 
-        return predictions
+        return predictions, info
 
     def _merge_results(self, backtest_results: Dict[pd.Timestamp, Dict[str, ForecastCollection]]) -> Dict[str, ForecastCollection]:
 
@@ -582,41 +595,3 @@ def create_dir(path: Path) -> None:
     if not path.exists():
         path.mkdir(parents=True)
         logging.info("Created new directory: %s", path)
-
-
-def get_class_path(cls: Type) -> str:
-    """
-    Get the full import path of a class.
-    Example: mypackage.module.MyClass
-
-    Parameters:
-    -----------
-    cls : Type
-        The class to get the path from.
-
-    Returns:
-    --------
-    str
-        Full import path of the class.
-    """
-    return cls.__module__ + "." + cls.__name__
-
-
-def load_class_from_path(class_path: str) -> Type:
-    """
-    Dynamically load a class from a full import path.
-
-    Parameters:
-    -----------
-    class_path : str
-        Full import path (e.g., 'mypackage.module.MyClass').
-
-    Returns:
-    --------
-    Type
-        The loaded class.
-    """
-    module_name, class_name = class_path.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    logging.info("Load %s from %s", class_name, module)
-    return getattr(module, class_name)
