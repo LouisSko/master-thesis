@@ -283,7 +283,7 @@ class Chronos(AbstractPredictor):
 
         return pipeline
 
-    def fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
         """
         Finetuning chronos model
 

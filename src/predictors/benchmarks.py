@@ -139,7 +139,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
 
         return history
 
-    def fit(
+    def _fit(
         self,
         data_train: TimeSeriesDataFrame,
         data_val: Optional[TimeSeriesDataFrame] = None,
@@ -298,7 +298,7 @@ class RollingQuantilePredictor(AbstractPredictor):
 
         return history
 
-    def fit(
+    def _fit(
         self,
         data_train: TimeSeriesDataFrame,
         data_val: Optional[TimeSeriesDataFrame] = None,
@@ -409,7 +409,7 @@ class RandomWalkBenchmark(AbstractPredictor):
         self.quantiles = quantiles
         self.sd_yd = {}  # standard deviation for each item id
 
-    def fit(
+    def _fit(
         self,
         data_train: TimeSeriesDataFrame,
         data_val: Optional[TimeSeriesDataFrame] = None,
