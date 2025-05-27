@@ -7,12 +7,20 @@ from typing import Optional, Literal, Union, Any
 from sklearn.preprocessing import PowerTransformer, FunctionTransformer
 
 
-def log_transform(x, epsilon):
-    return np.log(x + epsilon)
+class LogTransform:
+    def __init__(self, epsilon):
+        self.epsilon = epsilon
+
+    def __call__(self, x):
+        return np.log(x + self.epsilon)
 
 
-def log_inverse(x, epsilon):
-    return np.exp(x) - epsilon
+class LogInverseTransform:
+    def __init__(self, epsilon):
+        self.epsilon = epsilon
+
+    def __call__(self, x):
+        return np.exp(x) - self.epsilon
 
 
 def identity(x):
@@ -42,8 +50,8 @@ class DataTransformer(AbstractDataTransformer):
 
         elif method == "log":
             self.transformer = FunctionTransformer(
-                func=lambda x: log_transform(x, self.epsilon),
-                inverse_func=lambda x: log_inverse(x, self.epsilon),
+                func=LogTransform(self.epsilon),
+                inverse_func=LogInverseTransform(self.epsilon),
                 validate=False,
             )
             self.requires_fit = False
