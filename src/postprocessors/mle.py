@@ -22,9 +22,16 @@ class PostprocessorMLE(AbstractPostprocessor):
     to true target values by fitting a normal distribution to the log transformed predictions.
     """
 
-    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, transformer: Optional[Literal["yeo-johnson", "box-cox", "log", "arcsinh"]] = None) -> None:
+    def __init__(
+        self,
+        output_dir: Optional[Path] = None,
+        name: Optional[str] = None,
+        transformer: Optional[Literal["yeo-johnson", "box-cox", "log", "arcsinh"]] = None,
+        epsilon: Optional[float] = 1e-8,
+    ) -> None:
         super().__init__(output_dir, name)
         self.transformer = transformer
+        self.epsilon = epsilon  # relevant for log
 
     def extract_m_iqr(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
         """Extract median and inter quartile range from df"""
@@ -48,12 +55,20 @@ class PostprocessorMLE(AbstractPostprocessor):
             A dict of the fitted parameters {lead_time: (a, b, c, d)}. None if MLE failed.
         """
         params = {}
-        transformer = DataTransformer(self.transformer)
-        transformer.fit(data.data["target"])  # or use a separate transformer for each lead time/item id
+        transformer = DataTransformer(self.transformer, self.epsilon)
+        target_trnsf = transformer.fit_transform(data.data["target"])  # or use a separate transformer for each lead time/item id
+
+        nan_mask = ~np.isnan(target_trnsf)
+        mean = np.mean(target_trnsf[nan_mask])
+        std = np.std(target_trnsf[nan_mask])
+
         for lead_time in data.get_lead_times():
             df = data.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].copy().dropna()
-            df["target"] = transformer.transform(df[["target"]])
+            df["target"] = transformer.transform(df["target"])
             df[data.quantiles] = transformer.transform(df[data.quantiles])
+
+            df["target"] = (df["target"] - mean) / std
+            df[data.quantiles] = (df[data.quantiles] - mean) / std
             df["std_target"] = df["target"].rolling(20, min_periods=20, center=True).std()
             df = df.dropna()
 
@@ -63,20 +78,27 @@ class PostprocessorMLE(AbstractPostprocessor):
                 continue
 
             M, IQR = self.extract_m_iqr(df)
+
             y_mu = df["target"].values
             y_sigma = df["std_target"].values
 
             init_params = self._estimate_init_params(M, IQR, y_mu, y_sigma)
+            # init_params = (0, 1, 0, 1)
+
             result = minimize(self._neg_log_likelihood, args=(M, IQR, y_mu), x0=init_params, method="Nelder-Mead")
 
             if result.success:
                 params[lead_time] = result.x
+
             else:
                 logging.warning("MLE failed for forecast horizon=%s, item=%s. Predictions won't get postprocessed for this one.", lead_time, data.item_id)
                 params[lead_time] = None
+                logging.info(f"Init params: {init_params}")
+                logging.info(f"found params: {result.x}")
 
         params["transformer"] = transformer
-
+        params["mean"] = mean
+        params["std"] = std
         return params
 
     def _postprocess(self, data: TimeSeriesForecast, params: Dict[int, Union[Tuple[float, float, float, float], None]]) -> TimeSeriesForecast:
@@ -108,22 +130,30 @@ class PostprocessorMLE(AbstractPostprocessor):
         results_lt = {}
 
         transformer: DataTransformer = params["transformer"]
+        mean = params["mean"]
+        std = params["std"]
 
         for lead_time in data.get_lead_times():
             params_lt = params[lead_time]
+            df = data.to_dataframe(lead_time).copy()
             if params_lt is None:
                 logging.info("No params available for item: %s, lead time: %s. Keeping original predictions.", data.item_id, lead_time)
                 predictions = df[data.quantiles].to_numpy()
-                continue
 
-            df = data.to_dataframe(lead_time).copy()
-            df = transformer.transform(df[data.quantiles])
-            M, IQR = self.extract_m_iqr(df)
-            a, b, c, d = params_lt
-            mu = a + b * M
-            sigma = c + d * IQR
-            log_predictions = stats.norm.ppf(np.array(data.quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
-            predictions = transformer.inverse_transform(log_predictions)
+            else:
+                df = transformer.transform(df[data.quantiles])
+                df[data.quantiles] = (df[data.quantiles] - mean) / std
+
+                M, IQR = self.extract_m_iqr(df)
+                a, b, c, d = params_lt
+                mu = a + b * M
+                sigma = c + d * IQR
+                log_predictions = stats.norm.ppf(np.array(data.quantiles).reshape(-1, 1), loc=mu, scale=sigma).T
+
+                # inverse standardization
+                log_predictions = log_predictions * std + mean
+
+                predictions = transformer.inverse_transform(log_predictions)
 
             results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(predictions))
 
@@ -156,10 +186,6 @@ class PostprocessorMLE(AbstractPostprocessor):
         mu = a + b * M
         sigma = c + d * IQR
 
-        # penalize negative standard deviation
-        if any(sigma <= 0):
-            return np.inf
-
         nll = -np.sum(stats.norm.logpdf(y, loc=mu, scale=sigma))
 
         return nll
@@ -167,6 +193,7 @@ class PostprocessorMLE(AbstractPostprocessor):
     def _estimate_init_params(self, m: np.ndarray, iqr: np.ndarray, y_mu: np.ndarray, y_sigma: np.ndarray) -> Tuple[float, float, float, float]:
         """
         Estimates initial parameters [a, b, c, d] using linear regression for mean and std.
+        Clips values and adds fallback defaults for robustness.
 
         Parameters
         ----------
@@ -185,13 +212,25 @@ class PostprocessorMLE(AbstractPostprocessor):
             Initial parameter estimates [a, b, c, d] for mu and sigma formulas.
         """
         # mean = a + b * Median
-        x_mu = sm.add_constant(m, has_constant="add")
-        model_mu = sm.OLS(y_mu, x_mu).fit()
-        a_init, b_init = model_mu.params
+        try:
+            x_mu = sm.add_constant(m, has_constant="add")
+            model_mu = sm.OLS(y_mu, x_mu).fit()
+            a_init, b_init = model_mu.params
+        except Exception:
+            logging.warning("OLS fit for mu failed, using fallback.")
+            a_init, b_init = 0.0, 1.0
 
         # std = c + d * IQR
-        x_sigma = sm.add_constant(iqr, has_constant="add")
-        model_sigma = sm.OLS(y_sigma, x_sigma).fit()
-        c_init, d_init = model_sigma.params
+        try:
+            x_sigma = sm.add_constant(iqr, has_constant="add")
+            model_sigma = sm.OLS(y_sigma, x_sigma).fit()
+            c_init, d_init = model_sigma.params
+
+            # Enforce positive std estimates
+            c_init = max(c_init, 1e-4)
+            d_init = max(d_init, 1e-4)
+        except Exception:
+            logging.warning("OLS fit for sigma failed, using fallback.")
+            c_init, d_init = 1e-2, 1.0
 
         return a_init, b_init, c_init, d_init
