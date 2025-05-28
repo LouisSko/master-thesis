@@ -75,6 +75,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         config = self.get_init_params()
 
+        # save pipeline configuration
         config_file_path = self.output_dir / "pipeline_config.json"
         with open(config_file_path, "w") as f:
             json.dump(config, f, indent=4, cls=CustomJSONEncoder)
@@ -238,7 +239,6 @@ class ForecastingPipeline(AbstractPipeline):
 
         for method, result in results.items():
             save_path = self.pipeline_dir_backtests / method
-
             create_dir(save_path)
 
             # Add information
@@ -312,7 +312,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         return data_train, data_val, data_test
 
-    def train(
+    def train_predictor(
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
@@ -402,8 +402,6 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_data : Union[TimeSeriesDataFrame, TabularDataFrame]
             The calibration data. Used to fit the postprocessor.
         """
-
-        # TODO: this function could return multiple information regarding the training
         info = {}
 
         start_time = pd.Timestamp.now()
@@ -494,10 +492,12 @@ class ForecastingPipeline(AbstractPipeline):
             if len(data_test) == 0:
                 raise ValueError("Test data is empty after dropping all rows with target=nan. Check data.")
         if train:
-            info["model"] = self.train(data_train, data_val)
+            info["model"] = self.train_predictor(data_train, data_val)
+            # TODO: save model directly
         else:
             logging.info("Skipping model training because `train=False`.")
 
+        # check whether predictions exist
         predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
         # TODO: save predictions directly
         if self.postprocessors is not None:
@@ -588,3 +588,9 @@ class ForecastingPipeline(AbstractPipeline):
             )
 
         return ForecastCollection(item_ids=merged_ts)
+
+
+def create_dir(path: Path) -> None:
+    if not path.exists():
+        path.mkdir(parents=True)
+        logging.info("Created new directory: %s", path)
