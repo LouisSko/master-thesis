@@ -16,8 +16,8 @@ class PostprocessorEQC(AbstractPostprocessor):
     This postprocessor adjusts quantile regression outputs by computing empirical offsets to improve quantile coverage.
     """
 
-    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None) -> None:
-        super().__init__(output_dir, name)
+    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, n_jobs: int = 1) -> None:
+        super().__init__(output_dir, name, n_jobs)
 
     def _fit(self, data: TimeSeriesForecast) -> Dict[int, Dict[float, float]]:
         """

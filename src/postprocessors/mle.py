@@ -28,8 +28,9 @@ class PostprocessorMLE(AbstractPostprocessor):
         name: Optional[str] = None,
         transformer: Optional[Literal["yeo-johnson", "box-cox", "log", "arcsinh"]] = None,
         epsilon: Optional[float] = 1e-8,
+        n_jobs: int = 1,
     ) -> None:
-        super().__init__(output_dir, name)
+        super().__init__(output_dir, name, n_jobs)
         self.transformer = transformer
         self.epsilon = epsilon  # relevant for log
 

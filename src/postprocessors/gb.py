@@ -13,8 +13,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 class PostprocessorGB(AbstractPostprocessor):
     """Gradient boosting postprocessor"""
 
-    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None) -> None:
-        super().__init__(output_dir, name)
+    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, n_jobs: int = 1) -> None:
+        super().__init__(output_dir, name, n_jobs)
+        self.n_jobs_lgbm = -1
 
     def _fit(self, data: TimeSeriesForecast) -> Any:
         """Fit the quantile regression models for each lead time and quantile."""
@@ -28,7 +29,7 @@ class PostprocessorGB(AbstractPostprocessor):
             y_train = df["target"]
 
             for quantile in data.quantiles:
-                model = LGBMRegressor(objective="quantile", alpha=quantile, n_jobs=-1, verbose=-1)
+                model = LGBMRegressor(objective="quantile", alpha=quantile, n_jobs=self.n_jobs_lgbm, verbose=-1)
 
                 if len(x_train) == 0:
                     logging.info("No calibration data available for item_id: %s, lead time: %s.", data.item_id, lead_time)

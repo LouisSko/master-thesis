@@ -12,8 +12,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 
 class PostprocessorQR(AbstractPostprocessor):
-    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, transformer: Optional[Literal["yeo-johnson", "box-cox", "log", "arcsinh"]] = None) -> None:
-        super().__init__(output_dir, name)
+    def __init__(
+        self, output_dir: Optional[Path] = None, name: Optional[str] = None, transformer: Optional[Literal["yeo-johnson", "box-cox", "log", "arcsinh"]] = None, n_jobs: int = 1
+    ) -> None:
+        super().__init__(output_dir, name, n_jobs)
         self.transformer = transformer
 
     def _create_features(self, data: TabularDataFrame, q: float, transformer: DataTransformer) -> np.ndarray:

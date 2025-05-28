@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 from tqdm_joblib import tqdm_joblib
-from joblib import Parallel, delayed, cpu_count
+from joblib import Parallel, delayed
 import time
 import importlib
 
@@ -111,11 +111,12 @@ class AbstractPredictor(ABC):
 
 
 class AbstractPostprocessor(ABC):
-    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None) -> None:
+    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, n_jobs: int = 1) -> None:
         self.ignore_first_n_train_entries = 200
         self.class_name = name or self.__class__.__name__
         self.params = {}
         self.additional_info = {}
+        self.n_jobs = n_jobs
 
         if output_dir is not None:
             self.output_dir = output_dir / self.class_name / "models"
@@ -125,34 +126,43 @@ class AbstractPostprocessor(ABC):
             self.output_dir = None
             logging.info("No output directory provided. Models will not be saved or loaded from disk.")
 
-    def fit(self, data: ForecastCollection, n_jobs: Optional[int] = None) -> None:
+    def fit(self, data: ForecastCollection) -> None:
         """Fit postprocessor for each time series item and save the model if output_dir is set.
 
         Fit each series in parallel with joblib.
         """
         start_time = time.time()
-        n_jobs = n_jobs or min(4, cpu_count())
-
         item_ids = data.get_item_ids()
 
         # ensure output directory exists before forking
         if self.output_dir is not None:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        def _fit_one(item_id):
-            # each process/worker will run this
-            forecast = data.get_time_series_forecast(item_id)
+        def _fit_one(item_id: int, forecast: TimeSeriesForecast):
             params = self._fit(forecast)
-            if self.output_dir is not None:
-                self.save_model(params, item_id)
+            self.save_model(params, item_id)
             return item_id, params
 
-        # wrap the Parallel call in the tqdm_joblib context manager
-        with tqdm_joblib(tqdm(desc=f"Fitting {self.class_name}", total=len(item_ids))):
-            results = Parallel(n_jobs=n_jobs, backend="loky")(delayed(_fit_one)(iid) for iid in item_ids)
+        # sequential processing
+        if self.n_jobs == 1:
+            for item_id in tqdm(data.get_item_ids(), desc=f"Fitting {self.class_name} for each time series (item)"):
+                forecast = data.get_time_series_forecast(item_id)
+                params = self._fit(forecast)
+                self.params[item_id] = params
 
-        # collect back into self.params
-        self.params = dict(results)
+        # or parallelize
+        else:
+            # wrap the Parallel call in the tqdm_joblib context manager
+            with tqdm_joblib(tqdm(desc=f"Fitting {self.class_name} for each time series (item)", total=len(item_ids))):
+                results = Parallel(n_jobs=self.n_jobs, backend="loky")(
+                    delayed(_fit_one)(
+                        iid,
+                        data.get_time_series_forecast(iid),
+                    )
+                    for iid in item_ids
+                )
+            self.params = dict(results)  # collect back into self.params
+
         end_time = time.time()
 
         self.fit_execution_time = np.round(end_time - start_time, 2)
