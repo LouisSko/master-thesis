@@ -7,17 +7,37 @@ from typing import Dict, List, Optional, Type, Union, Literal
 from pathlib import Path
 import joblib
 import logging
-import os
-import random
 import numpy as np
-import torch
 from tqdm import tqdm
 from tqdm_joblib import tqdm_joblib
 from joblib import Parallel, delayed
 import time
 import importlib
+from multiprocessing.resource_tracker import ResourceTracker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+
+# Avoid resource_tracker ChildProcessError on shutdown
+# Keep a reference to the original _stop method so we can call it later
+_orig_stop = ResourceTracker._stop
+
+def _safe_stop(self):
+    """
+    Replacement for ResourceTracker._stop that suppresses the benign
+    ChildProcessError which occurs if the tracker tries to reap a
+    child PID that's already gone.
+    """
+    try:
+        # Attempt the normal cleanup
+        _orig_stop(self)
+    except ChildProcessError:
+        # Ignore the error, since it simply means "no child processes"
+        # are left to clean up—and it’s harmless.
+        pass
+
+# Overwrite the tracker’s stop method with our safe version
+ResourceTracker._stop = _safe_stop
+
 
 class AbstractPredictor(ABC):
     def __init__(
@@ -168,16 +188,6 @@ class AbstractPostprocessor(ABC):
         self.fit_execution_time = np.round(end_time - start_time, 2)
 
         logging.info("Time to fit %s in seconds: %s", self.class_name, self.fit_execution_time)
-
-    def fit_single_thread(self, data: ForecastCollection) -> None:
-        """Fit postprocessor for each time series item and save the model if output_dir is set."""
-        for item_id in tqdm(data.get_item_ids(), desc=f"Fitting {self.class_name} for each time series (item)"):
-            forecast = data.get_time_series_forecast(item_id)
-            params = self._fit(forecast)
-            self.params[item_id] = params
-
-            if self.output_dir is not None:
-                self.save_model(params, item_id)
 
     def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """Apply postprocessor to each item using available or saved models."""
@@ -333,7 +343,7 @@ class AbstractPipeline(ABC):
         """
 
     @abstractmethod
-    def train(
+    def train_predictor(
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
