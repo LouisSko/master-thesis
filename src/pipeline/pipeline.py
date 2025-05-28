@@ -43,8 +43,9 @@ class ForecastingPipeline(AbstractPipeline):
         self.predictor = None
         self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
 
-        # create predictor
+        # create predictor and postprocessor
         self.create_predictor()
+        self.create_postprocessors()
 
     def create_predictor(self):
         self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
@@ -71,8 +72,6 @@ class ForecastingPipeline(AbstractPipeline):
         """Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib."""
 
         logging.info("Saving Pipeline to specified output directory: %s", self.output_dir)
-        create_dir(self.pipeline_dir_models)
-        create_dir(self.pipeline_dir_postprocessors)
 
         config = self.get_init_params()
 
@@ -500,7 +499,7 @@ class ForecastingPipeline(AbstractPipeline):
             logging.info("Skipping model training because `train=False`.")
 
         predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
-
+        # TODO: save predictions directly
         if self.postprocessors is not None:
             if calibration_based_on == "val":
                 calibration_data = data_val
@@ -589,9 +588,3 @@ class ForecastingPipeline(AbstractPipeline):
             )
 
         return ForecastCollection(item_ids=merged_ts)
-
-
-def create_dir(path: Path) -> None:
-    if not path.exists():
-        path.mkdir(parents=True)
-        logging.info("Created new directory: %s", path)

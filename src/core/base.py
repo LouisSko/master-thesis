@@ -102,6 +102,10 @@ class AbstractPredictor(ABC):
 
         file_path = file_path or self.output_dir / f"{self.__class__.__name__}.joblib"
 
+        if not file_path.parent.exists():
+            file_path.parent.mkdir(parents=True)
+            logging.info("Created new directory: %s", file_path.parent)
+
         joblib.dump(self, file_path)
         logging.info("%s successfully saved to: %s", self.__class__.__name__, file_path)
 
@@ -211,6 +215,10 @@ class AbstractPostprocessor(ABC):
             raise ValueError("No file path provided and no default output_dir set.")
 
         file_path = file_path or self.output_dir / f"{self.class_name}.joblib"
+
+        if not file_path.parent.exists():
+            file_path.parent.mkdir(parents=True)
+            logging.info("Created new directory: %s", file_path.parent)
 
         joblib.dump(self, file_path)
         logging.info("%s successfully saved to: %s", self.class_name, file_path)
