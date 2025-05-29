@@ -21,15 +21,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # Keep a reference to the original _stop method so we can call it later
 _orig_stop = ResourceTracker._stop
 
-def _safe_stop(self):
+def _safe_stop(self, *args, **kwargs):
     """
     Replacement for ResourceTracker._stop that suppresses the benign
     ChildProcessError which occurs if the tracker tries to reap a
     child PID that's already gone.
     """
     try:
-        # Attempt the normal cleanup
-        _orig_stop(self)
+        _orig_stop(self, *args, **kwargs)
     except ChildProcessError:
         # Ignore the error, since it simply means "no child processes"
         # are left to clean up—and it’s harmless.
