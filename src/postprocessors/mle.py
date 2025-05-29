@@ -88,12 +88,11 @@ class PostprocessorMLE(AbstractPostprocessor):
 
             result = minimize(self._neg_log_likelihood, args=(M, IQR, y_mu), x0=init_params, method="Nelder-Mead")
 
-            if result.success:
-                params[lead_time] = result.x
+            params[lead_time] = result.x
 
-            else:
-                logging.warning("MLE failed for forecast horizon=%s, item=%s. Predictions won't get postprocessed for this one.", lead_time, data.item_id)
-                params[lead_time] = None
+            if not result.success:
+                logging.warning("success=false for forecast horizon=%s, item=%s.", lead_time, data.item_id)
+                logging.warning(result.message)
                 logging.info(f"Init params: {init_params}")
                 logging.info(f"found params: {result.x}")
 
@@ -186,6 +185,9 @@ class PostprocessorMLE(AbstractPostprocessor):
         a, b, c, d = params
         mu = a + b * M
         sigma = c + d * IQR
+
+        if c <= 0 or d <= 0:
+            return np.inf
 
         nll = -np.sum(stats.norm.logpdf(y, loc=mu, scale=sigma))
 
