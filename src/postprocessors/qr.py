@@ -51,14 +51,15 @@ class PostprocessorQR(AbstractPostprocessor):
             for quantile in data.quantiles:
                 # Prepare training data
                 train_data = self._prepare_dataframe(data, lead_time, train=True)
-                y_train = train_data["target"].values
-                y_train = transformer.transform(y_train)
-                x_train = self._create_features(train_data, quantile, transformer)
 
-                if len(x_train) == 0:
+                if len(train_data) == 0:
                     logging.info("No calibration data available for item_id: %s, lead time: %s.", data.item_id, lead_time)
                     qr_params[lead_time][quantile] = None
                     continue
+
+                y_train = train_data["target"].values
+                y_train = transformer.transform(y_train)
+                x_train = self._create_features(train_data, quantile, transformer)
 
                 # Fit model
                 model = sm.QuantReg(y_train, x_train)
