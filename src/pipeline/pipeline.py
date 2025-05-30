@@ -45,7 +45,8 @@ class ForecastingPipeline(AbstractPipeline):
 
         # create predictor and postprocessor
         self.create_predictor()
-        self.create_postprocessors()
+        if self.postprocessors is not None:
+            self.create_postprocessors()
 
     def create_predictor(self):
         self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
