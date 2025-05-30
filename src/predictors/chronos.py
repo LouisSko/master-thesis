@@ -151,10 +151,8 @@ class ChronosBacktestingDataset(Dataset):
 
     def __getitem__(self, idx) -> np.ndarray:
         """Retrieves the context window for the given index within its corresponding time series."""
-        
+
         item_id = self.item_ids[idx]
-        print(self.item_ids)
-        print(item_id)
         item_id_start_idx = self.indptr[item_id]
         # idx in the target_array controlled for the item_id_start_idx
         start_idx = idx - item_id_start_idx
