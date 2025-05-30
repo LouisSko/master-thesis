@@ -103,14 +103,14 @@ class ChronosBacktestingDataset(Dataset):
             if self.prediction_length is None:
                 raise ValueError("prediction_length needs to be specified if return target is set to true.")
             # when target should be returned, the dataset is used for training/evaluation and we should reorder based on timestamps
-            data = data.sort_values(by=[TIMESTAMP, ITEMID])
+            data = data.sort_values(by=[ITEMID, TIMESTAMP])
 
         self.target_array = data[target_column].to_numpy(dtype=np.float32)
         self.freq = data.freq
         self.item_ids = pd.factorize(data.index.get_level_values(ITEMID))[0]
         cum_sizes = data.num_timesteps_per_item().values.cumsum()
         self.indptr = np.append(0, cum_sizes).astype(np.int32)
-        self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in data.item_ids}
+        self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in np.unique(self.item_ids)}
 
     def __len__(self):
         """Returns the total number of time steps in the dataset."""
@@ -151,7 +151,10 @@ class ChronosBacktestingDataset(Dataset):
 
     def __getitem__(self, idx) -> np.ndarray:
         """Retrieves the context window for the given index within its corresponding time series."""
+        
         item_id = self.item_ids[idx]
+        print(self.item_ids)
+        print(item_id)
         item_id_start_idx = self.indptr[item_id]
         # idx in the target_array controlled for the item_id_start_idx
         start_idx = idx - item_id_start_idx
@@ -274,7 +277,9 @@ class Chronos(AbstractPredictor):
         else:
             logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
             pipeline = BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
-            self.base_model_name = self.pretrained_model_name_or_path # TODO: make this more robust in case pretrained_model_name_or_path does not contain chronos-t5 or chronos-bolt
+            self.base_model_name = (
+                self.pretrained_model_name_or_path
+            )  # TODO: make this more robust in case pretrained_model_name_or_path does not contain chronos-t5 or chronos-bolt
 
         # only update prediction length for chronos-t5, not for chronos-bolt. TODO: Is there a nicer way to do this before instantiation?
         if "chronos-t5" in self.base_model_name:
@@ -424,8 +429,7 @@ class Chronos(AbstractPredictor):
                     forecast = torch.quantile(forecast, q=torch.tensor(self.quantiles, dtype=forecast.dtype), dim=1).swapaxes(1, 0)
 
             forecasts.append(forecast)
-        forecasts = torch.vstack(forecasts) #  output shape: [batch_size, quantiles, prediction_length]
-
+        forecasts = torch.vstack(forecasts)  #  output shape: [batch_size, quantiles, prediction_length]
 
         if not predict_only_last_timestep:
             mask = data_merged.index.isin(data.index)
