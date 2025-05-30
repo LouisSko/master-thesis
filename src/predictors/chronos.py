@@ -9,7 +9,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
 from src.core.base import AbstractPredictor
-from src.core.timeseries_evaluation import TARGET
+from src.core.timeseries_evaluation import TARGET, ITEMID, TIMESTAMP
 import logging
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
 from optuna.trial import Trial
@@ -103,14 +103,14 @@ class ChronosBacktestingDataset(Dataset):
             if self.prediction_length is None:
                 raise ValueError("prediction_length needs to be specified if return target is set to true.")
             # when target should be returned, the dataset is used for training/evaluation and we should reorder based on timestamps
-            data = data.sort_values(by=["timestamp", "item_id"])
+            data = data.sort_values(by=[TIMESTAMP, ITEMID])
 
         self.target_array = data[target_column].to_numpy(dtype=np.float32)
         self.freq = data.freq
-        self.item_ids = pd.factorize(data.index.get_level_values("item_id"))[0]
+        self.item_ids = pd.factorize(data.index.get_level_values(ITEMID))[0]
         cum_sizes = data.num_timesteps_per_item().values.cumsum()
         self.indptr = np.append(0, cum_sizes).astype(np.int32)
-        self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in self.item_ids}
+        self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in data.item_ids}
 
     def __len__(self):
         """Returns the total number of time steps in the dataset."""
