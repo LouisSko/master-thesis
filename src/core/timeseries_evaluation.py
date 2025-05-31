@@ -15,6 +15,7 @@ from pathlib import Path
 import joblib
 import logging
 import os
+from tqdm import tqdm
 
 DIR_BACKTESTS = "backtest"
 DIR_MODELS = "models"
@@ -654,6 +655,7 @@ def get_quantile_scores(
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
     decimal_places: Optional[int] = None,
+    sort: bool = True,
 ) -> pd.DataFrame:
     """
     Computes quantile scores for different prediction sources,
@@ -675,6 +677,8 @@ def get_quantile_scores(
         If provided, all CRPS values will be divided by the CRPS values from this prediction.
     decimal_places : Optional[int], default=None
         Number of decimal places to round numerical values to. If None, no rounding is applied.
+    sort : bool, default=True
+        If True, columns will be sorted by mean CRPS in ascending order.
 
     Returns
     --------
@@ -704,6 +708,9 @@ def get_quantile_scores(
 
     if reference_predictions:
         scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
+
+    if sort:
+        scores = scores.T.sort_values(by="Mean (CRPS/2)", axis=0).T
 
     if decimal_places:
         return scores.round(decimal_places)
@@ -809,7 +816,7 @@ def get_crps_scores(
     scores_dict = {}
     reference_scores = None
 
-    for key, value in predictions.items():
+    for key, value in tqdm(predictions.items(), desc="Compute CRPS score"):
         if isinstance(value, ForecastCollection):
             pred = value
         elif isinstance(value, (str, Path)):
