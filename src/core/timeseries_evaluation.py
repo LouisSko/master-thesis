@@ -470,14 +470,6 @@ class ForecastCollection(BaseModel):
         if mean_time:
             crps_scores.index.name = ITEMID
 
-        # if add_mean:
-        #     if not mean_time:
-        #         crps_scores.loc["Mean CRPS", :] = crps_scores.mean(axis=0)
-        #     if not mean_lead_times:
-        #         crps_scores.loc[:, "Mean CRPS"] = crps_scores.mean(axis=1)
-
-        # crps_scores = crps_scores.dropna()
-
         if decimal_places:
             return crps_scores.round(decimal_places)
         return crps_scores
@@ -562,7 +554,7 @@ class ForecastCollection(BaseModel):
         else:
             first_item = self.get_item_ids()[0]
 
-        bins = len(self.get_time_series_forecast(first_item).quantiles)+1
+        bins = len(self.get_time_series_forecast(first_item).quantiles) + 1
 
         if overlay:
             plt.figure(figsize=(10, 6))
@@ -656,7 +648,7 @@ class ForecastCollection(BaseModel):
 
 
 def get_quantile_scores(
-    predictions: Dict[str, ForecastCollection],
+    predictions: Dict[str, Union["ForecastCollection", Path]],
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
@@ -669,10 +661,11 @@ def get_quantile_scores(
 
     Parameters
     -----------
-    predictions : Dict[str, ForecastCollection]
-        Dictionary of prediction objects, where each value provides a `get_crps` method
-        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
-    lead_times : Optional[List[int]], default=None
+    predictions : Dict[str, Union[ForecastCollection, Path]]
+        Dictionary mapping keys to either:
+        - Preloaded ForecastCollection objects, or
+        - File paths (Path or str) to joblib files that contain ForecastCollection objects.
+     lead_times : Optional[List[int]], default=None
         List of lead times to filter CRPS scores. If None, all lead times are used.
     item_ids : Optional[List[int]], default=None
         List of item IDs to include in the CRPS computation. If None, all item IDs are used.
@@ -690,7 +683,22 @@ def get_quantile_scores(
         the scores are expressed as a ratio to the reference prediction.
     """
 
-    scores = pd.concat([pred.get_quantile_scores(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids) for pred in predictions.values()], axis=1)
+    scores_dict = {}
+
+    for key, value in predictions.items():
+        if isinstance(value, ForecastCollection):
+            pred = value
+        elif isinstance(value, (str, Path)):
+            pred = joblib.load(value)
+        else:
+            raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
+
+        q_scores_df = pred.get_quantile_scores(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids)
+
+        scores_dict[key] = q_scores_df.squeeze()  # Convert single-row DataFrame to Series
+
+    scores = pd.DataFrame(scores_dict)
+
     scores.columns = [key for key in predictions.keys()]
 
     if reference_predictions:
@@ -702,16 +710,20 @@ def get_quantile_scores(
 
 
 def get_empirical_coverage_rates(
-    predictions: Dict[str, ForecastCollection], lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None, decimal_places: Optional[int] = None
+    predictions: Dict[str, Union["ForecastCollection", Path]],
+    lead_times: Optional[List[int]] = None,
+    item_ids: Optional[List[int]] = None,
+    decimal_places: Optional[int] = None,
 ) -> pd.DataFrame:
     """Computes empirical coverage rates for different prediction sources,
     averaged across the specified lead times.
 
     Parameters
     -----------
-    predictions : Dict[str, ForecastCollection]
-        Dictionary of prediction objects, where each value provides a `get_crps` method
-        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    predictions : Dict[str, Union[ForecastCollection, Path]]
+        Dictionary mapping keys to either:
+        - Preloaded ForecastCollection objects, or
+        - File paths (Path or str) to joblib files that contain ForecastCollection objects.
     lead_times : Optional[List[int]], default=None
         List of lead times to filter CRPS scores. If None, all lead times are used.
     item_ids : Optional[List[int]], default=None
@@ -725,10 +737,22 @@ def get_empirical_coverage_rates(
         A DataFrame where each column corresponds to a prediction source,
         and values represent the empirical coverage rates averaged over the specified lead times.
     """
+    scores_dict = {}
 
-    scores = pd.concat(
-        [pred.get_empirical_coverage_rates(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids, decimal_places=decimal_places) for pred in predictions.values()], axis=1
-    )
+    for key, value in predictions.items():
+        if isinstance(value, ForecastCollection):
+            pred = value
+        elif isinstance(value, (str, Path)):
+            pred = joblib.load(value)
+        else:
+            raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
+
+        cov_rate_df = pred.get_empirical_coverage_rates(lead_times=lead_times, mean_lead_times=True, item_ids=item_ids)
+
+        scores_dict[key] = cov_rate_df.squeeze()  # Convert single-row DataFrame to Series
+
+    scores = pd.DataFrame(scores_dict)
+
     scores.columns = [key for key in predictions.keys()]
 
     if decimal_places:
@@ -737,7 +761,7 @@ def get_empirical_coverage_rates(
 
 
 def get_crps_scores(
-    predictions: Dict[str, ForecastCollection],
+    predictions: Dict[str, Union["ForecastCollection", Path]],
     lead_times: Optional[List[int]] = None,
     mean_lead_times: bool = False,
     item_ids: Optional[List[int]] = None,
@@ -746,58 +770,87 @@ def get_crps_scores(
     decimal_places: Optional[int] = None,
     sort: bool = True,
 ) -> pd.DataFrame:
-    """Computes and returns CRPS (Continuous Ranked Probability Score) values
-    averaged across specified lead times and optionally normalized by a reference prediction.
+    """
+    Computes and returns CRPS (Continuous Ranked Probability Score) values averaged across
+    specified lead times. Supports both eager (preloaded ForecastCollection objects) and lazy
+    (file paths to joblib files) prediction loading.
 
     Parameters
-    -----------
-    predictions : Dict[str, ForecastCollection]
-        Dictionary of prediction objects, where each value provides a `get_crps` method
-        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    ----------
+    predictions : Dict[str, Union[ForecastCollection, Path]]
+        Dictionary mapping keys to either:
+        - Preloaded ForecastCollection objects, or
+        - File paths (Path or str) to joblib files that contain ForecastCollection objects.
     lead_times : Optional[List[int]], default=None
-        List of lead times to filter CRPS scores. If None, all lead times are used.
+        List of lead times to include in the CRPS computation. If None, all lead times are used.
+    mean_lead_times : bool, default=False
+        If True, CRPS scores are averaged across lead times.
     item_ids : Optional[List[int]], default=None
         List of item IDs to include in the CRPS computation. If None, all item IDs are used.
     reference_predictions : Optional[str], default=None
         Key of a prediction set to be used as a reference for normalization.
         If provided, all CRPS values will be divided by the CRPS values from this prediction.
     add_mean : Optional[bool], default=True
-        Adds additional row at the end of the dataframe containing the Mean CRPS score
+        Whether to add a "Mean CRPS" row to the output.
     decimal_places : Optional[int], default=None
         Number of decimal places to round numerical values to. If None, no rounding is applied.
+    sort : bool, default=True
+        If True and `add_mean` is enabled, columns will be sorted by mean CRPS in ascending order.
 
     Returns
-    --------
+    -------
     pd.DataFrame
-        A DataFrame with CRPS values (or normalized CRPS) for each prediction source.
-        Rows represent lead times (or a single row if mean_lead_times=True), and columns represent prediction sources.
+        A DataFrame with CRPS values (or normalized CRPS values). Rows represent lead times
+        (or a single row if `mean_lead_times=True`), and columns represent prediction keys.
+        Includes an optional "Mean CRPS" row for column-wise averages.
     """
 
-    scores = pd.concat(
-        [
-            pred.get_crps(lead_times=lead_times, mean_lead_times=mean_lead_times, mean_time=True, mean_item_ids=True, item_ids=item_ids, decimal_places=None)
-            for pred in predictions.values()
-        ],
-        axis=0,
-    ).T
-    scores.columns = [key for key in predictions.keys()]
+    scores_dict = {}
+    reference_scores = None
+
+    for key, value in predictions.items():
+        if isinstance(value, ForecastCollection):
+            pred = value
+        elif isinstance(value, (str, Path)):
+            pred = joblib.load(value)
+        else:
+            raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
+
+        crps_df = pred.get_crps(
+            lead_times=lead_times,
+            mean_lead_times=mean_lead_times,
+            mean_time=True,
+            mean_item_ids=True,
+            item_ids=item_ids,
+            decimal_places=None,
+        )
+
+        if reference_predictions and key == reference_predictions:
+            reference_scores = crps_df.copy()
+
+        scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
+
+    scores = pd.DataFrame(scores_dict)
     scores.index.name = "lead times"
+
+    if reference_predictions:
+        if reference_scores is None:
+            raise ValueError(f"Reference prediction '{reference_predictions}' not found.")
+        scores = scores.div(reference_scores.squeeze(), axis=0)
 
     if add_mean:
         scores.loc["Mean CRPS", :] = scores.mean(axis=0)
         if sort:
             scores = scores.T.sort_values(by="Mean CRPS", axis=0).T
 
-    if reference_predictions:
-        scores = scores.apply(lambda x: x / x[reference_predictions], axis=1)
+    if decimal_places is not None:
+        scores = scores.round(decimal_places)
 
-    if decimal_places:
-        return scores.round(decimal_places)
     return scores
 
 
 def plot_crps(
-    predictions: Dict[str, ForecastCollection],
+    predictions: Dict[str, Union["ForecastCollection", Path]],
     selected_keys: Optional[List] = None,
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
@@ -808,9 +861,10 @@ def plot_crps(
 
     Parameters
     -----------
-    predictions : Dict[str, ForecastCollection]
-        Dictionary of prediction objects, where each value provides a `get_crps` method
-        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    predictions : Dict[str, Union[ForecastCollection, Path]]
+        Dictionary mapping keys to either:
+        - Preloaded ForecastCollection objects, or
+        - File paths (Path or str) to joblib files that contain ForecastCollection objects.
     selected_keys: Optional[List], default=None
         List of ForecastCollection objects which sould be considered. If None, all ForecastCollections are displayed.
     lead_times : Optional[List[int]], default=None
@@ -831,12 +885,28 @@ def plot_crps(
     if selected_keys:
         predictions = {key: value for key, value in predictions.items() if key in selected_keys}
 
-    # Compute CRPS DataFrame
-    df = pd.concat([pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, item_ids=item_ids, decimal_places=None) for pred in predictions.values()], axis=1)
+    scores_dict = {}
 
-    df.columns = list(predictions.keys())
+    for key, value in predictions.items():
+        if isinstance(value, ForecastCollection):
+            pred = value
+        elif isinstance(value, (str, Path)):
+            pred = joblib.load(value)
+        else:
+            raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
 
-    df = df.reset_index(level=0, drop=True).groupby("timestamp").mean()
+        crps_df = pred.get_crps(
+            lead_times=lead_times,
+            mean_lead_times=True,
+            mean_time=False,
+            mean_item_ids=True,
+            item_ids=item_ids,
+            decimal_places=None,
+        )
+
+        scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
+
+    df = pd.DataFrame(scores_dict)
 
     if rolling_window_eval:
         df = df.rolling(window=rolling_window_eval).mean()
@@ -863,7 +933,7 @@ def plot_crps(
 
 
 def plot_crps_across_lead_times(
-    predictions: Dict[str, ForecastCollection],
+    predictions: Dict[str, Union["ForecastCollection", Path]],
     selected_keys: Optional[List] = None,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
@@ -872,9 +942,10 @@ def plot_crps_across_lead_times(
 
     Parameters
     -----------
-    predictions : Dict[str, ForecastCollection]
-        Dictionary of prediction objects, where each value provides a `get_crps` method
-        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    predictions : Dict[str, Union[ForecastCollection, Path]]
+        Dictionary mapping keys to either:
+        - Preloaded ForecastCollection objects, or
+        - File paths (Path or str) to joblib files that contain ForecastCollection objects.
     selected_keys: Optional[List], default=None
         List of ForecastCollection objects which sould be considered. If None, all ForecastCollections are displayed.
     item_ids : Optional[List[int]], default=None
@@ -904,7 +975,7 @@ def plot_crps_across_lead_times(
 
 
 def get_crps_by_period(
-    predictions: Dict[str, ForecastCollection],
+    predictions: Dict[str, Union["ForecastCollection", Path]],
     date_splits: List[pd.Timestamp],
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
@@ -916,9 +987,10 @@ def get_crps_by_period(
 
     Parameters
     -----------
-    predictions : Dict[str, ForecastCollection]
-        Dictionary of prediction objects, where each value provides a `get_crps` method
-        that returns a DataFrame with CRPS values indexed by ['item_id', 'timestamp'].
+    predictions : Dict[str, Union[ForecastCollection, Path]]
+        Dictionary mapping keys to either:
+        - Preloaded ForecastCollection objects, or
+        - File paths (Path or str) to joblib files that contain ForecastCollection objects.
     date_splits : List[pd.Timestamp]
         List of timestamps to split the CRPS data into time-based segments.
         The function calculates mean CRPS in each period between these dates.
@@ -939,12 +1011,28 @@ def get_crps_by_period(
         optionally normalized by a reference prediction. Each column corresponds to a prediction key.
     """
 
-    df = pd.concat(
-        [pred.get_crps(lead_times=lead_times, mean_lead_times=True, mean_time=False, mean_item_ids=False, item_ids=item_ids, decimal_places=None) for pred in predictions.values()],
-        axis=1,
-    )
+    scores_dict = {}
 
-    df.columns = [key for key in predictions.keys()]
+    for key, value in predictions.items():
+        if isinstance(value, ForecastCollection):
+            pred = value
+        elif isinstance(value, (str, Path)):
+            pred = joblib.load(value)
+        else:
+            raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
+
+        crps_df = pred.get_crps(
+            lead_times=lead_times,
+            mean_lead_times=True,
+            mean_time=False,
+            mean_item_ids=False,
+            item_ids=item_ids,
+            decimal_places=None,
+        )
+
+        scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
+
+    df = pd.DataFrame(scores_dict)
 
     df = df.reset_index()
 
@@ -952,18 +1040,18 @@ def get_crps_by_period(
 
     date_splits = sorted(date_splits)
 
-    first_date = df["timestamp"].min()
-    last_date = df["timestamp"].max()
+    first_date = df[TIMESTAMP].min()
+    last_date = df[TIMESTAMP].max()
     date_splits.append(last_date)
 
     for d in date_splits:
         if not isinstance(d, pd.Timestamp):
             raise TypeError(f"All date_splits must be pd.Timestamp, got {type(d)}")
 
-        subset_df = df[(df["timestamp"] > first_date) & (df["timestamp"] <= d)]
+        subset_df = df[(df[TIMESTAMP] > first_date) & (df[TIMESTAMP] <= d)]
 
         # after = df[df["timestamp"] >= d]
-        results[f"{first_date.strftime("%d-%m-%Y")}_to_{d.strftime("%d-%m-%Y")}"] = subset_df.drop(columns=["item_id", "timestamp"]).mean()
+        results[f"{first_date.strftime("%d-%m-%Y")}_to_{d.strftime("%d-%m-%Y")}"] = subset_df.drop(columns=[ITEMID, TIMESTAMP]).mean()
         first_date = d
 
     results = pd.DataFrame(results).T
@@ -979,6 +1067,7 @@ def get_crps_by_period(
 def load_predictions(
     prediction_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
     prediction_files: Union[List[Union[Path, str]], Path, str, None] = None,
+    load: bool = True,
 ) -> Dict[str, ForecastCollection]:
     """
     Load saved prediction files from specified files or recursively from directories.
@@ -1053,8 +1142,13 @@ def load_predictions(
                     relevant_dirs.remove(d)
 
             key = "_".join(relevant_dirs)
-            all_predictions[key] = joblib.load(filepath)
-            logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
+            if load:
+                all_predictions[key] = joblib.load(filepath)
+                logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
+            else:
+                all_predictions[key] = filepath
+                logging.info(f"Found prediction file: `{filepath}` as key: {key}")
+
     else:
         logging.warning("No prediction files were found.")
 
