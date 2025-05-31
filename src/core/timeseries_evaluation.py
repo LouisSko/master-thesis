@@ -181,7 +181,7 @@ class TimeSeriesForecast(BaseModel):
         Returns:
             float: The mean CRPS score across all samples.
         """
-        data = self.to_dataframe(forecast_horizon)
+        data = self.to_dataframe(forecast_horizon)[: -max(self.get_lead_times())]  # get rid of incomplete predictions
         quantile_predictions = data[self.quantiles].to_numpy()
         target = data["target"].to_numpy()
 
@@ -455,7 +455,8 @@ class ForecastCollection(BaseModel):
                     scores.append(crps)
 
             scores = np.vstack(scores).T
-            idx = [item_id] if mean_time else item.to_dataframe(lt).index
+
+            idx = [item_id] if mean_time else item.to_dataframe(lt).index[: -max(self.get_lead_times())]
             all_scores.append(pd.DataFrame(scores, index=idx, columns=lead_times))
 
         crps_scores = pd.concat(all_scores)
