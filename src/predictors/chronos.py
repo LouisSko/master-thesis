@@ -280,9 +280,9 @@ class Chronos(AbstractPredictor):
             )  # TODO: make this more robust in case pretrained_model_name_or_path does not contain chronos-t5 or chronos-bolt
 
         # only update prediction length for chronos-t5, not for chronos-bolt. TODO: Is there a nicer way to do this before instantiation?
-        if "chronos-t5" in self.base_model_name:
-            logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
-            pipeline.model.config.prediction_length = self.prediction_length
+        #if "chronos-t5" in self.base_model_name:
+        #    logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
+        #    pipeline.model.config.prediction_length = self.prediction_length
 
         return pipeline
 
