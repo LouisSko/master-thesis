@@ -279,11 +279,6 @@ class Chronos(AbstractPredictor):
                 self.pretrained_model_name_or_path
             )  # TODO: make this more robust in case pretrained_model_name_or_path does not contain chronos-t5 or chronos-bolt
 
-        # only update prediction length for chronos-t5, not for chronos-bolt. TODO: Is there a nicer way to do this before instantiation?
-        #if "chronos-t5" in self.base_model_name:
-        #    logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
-        #    pipeline.model.config.prediction_length = self.prediction_length
-
         return pipeline
 
     def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
@@ -301,6 +296,13 @@ class Chronos(AbstractPredictor):
 
             logging.info("Initializing model for full tuning (all parameters trainable).")
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+            # only update prediction length for chronos-t5, not for chronos-bolt.
+            if "chronos-t5" in self.base_model_name:
+                logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
+                pipeline.inner_model.config.prediction_length = self.prediction_length
+                self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+
             return pipeline.inner_model
 
         def _model_init_last_layer_tuning() -> PreTrainedModel:
@@ -308,6 +310,13 @@ class Chronos(AbstractPredictor):
 
             logging.info("Initializing model for last layer tuning (only last layer trainable).")
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+            # only update prediction length for chronos-t5, not for chronos-bolt.
+            if "chronos-t5" in self.base_model_name:
+                logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
+                pipeline.inner_model.config.prediction_length = self.prediction_length
+                self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+
             # Freeze all parameters
             for param in pipeline.inner_model.parameters():
                 param.requires_grad = False
@@ -323,6 +332,12 @@ class Chronos(AbstractPredictor):
             logging.info("Initializing model with LoRA adapters.")
             # Initialize the Chronos model
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+            # only update prediction length for chronos-t5, not for chronos-bolt.
+            if "chronos-t5" in self.base_model_name:
+                logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
+                pipeline.inner_model.config.prediction_length = self.prediction_length
+                pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
             # Configure LoRA
             lora_config = LoraConfig(
@@ -366,6 +381,8 @@ class Chronos(AbstractPredictor):
             prediction_length = min(self.prediction_length, 64)
         else:
             prediction_length = self.prediction_length
+            self.pipeline.model.config.prediction_length = self.prediction_length
+            self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
         fine_tune(
             model_init=finetuning_options[self.finetuning_type],
@@ -551,8 +568,14 @@ def fine_tune(
     final_training_path = output_dir / "training"
     final_training_path.mkdir(exist_ok=True, parents=True)
 
+    # add specific train args for chronos bolt
+    if tokenizer is None:
+        pipeline_specific_train_args = {"label_names": [TARGET]}
+    else:
+        pipeline_specific_train_args = {}
+    
     # Create args for final training with best hyperparameters
-    fine_tune_trainer_kwargs = create_trainer_kwargs(path=final_training_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
+    fine_tune_trainer_kwargs = create_trainer_kwargs(pipeline_specific_train_args, path=final_training_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
 
     logging.info("Training results are going to be logged in tensorboard.")
     logging.info(f"Run `tensorboard --logdir {output_dir}` in the terminal to start.")
@@ -657,12 +680,11 @@ def hp_space_optuna(trial: Trial):
     }
 
 
-def create_trainer_kwargs(path: str = Path("./models/test/"), eval_during_fine_tune: bool = True, save_checkpoints: bool = True):
+def create_trainer_kwargs(pipeline_specific_train_args, path: str = Path("./models/test/"), eval_during_fine_tune: bool = True, save_checkpoints: bool = True):
     """Define the training arguments"""
 
     save_eval_steps = 0.1
     logging_steps = 0.05
-    target_column = "target"
     dir = "transformers_logs"
 
     # create TrainingArguments
@@ -698,10 +720,9 @@ def create_trainer_kwargs(path: str = Path("./models/test/"), eval_during_fine_t
         "metric_for_best_model": "eval_loss",
         "greater_is_better": False,
         "use_cpu": False,
-        "label_names": [target_column],
     }
 
-    return TrainingArguments(**fine_tune_trainer_kwargs)
+    return TrainingArguments(**fine_tune_trainer_kwargs, **pipeline_specific_train_args)
 
 
 def check_model_parameters(chronos: Chronos, model_name: str = "amazon/chronos-bolt-tiny"):
