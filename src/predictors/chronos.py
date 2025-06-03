@@ -1,6 +1,8 @@
 from tqdm import tqdm
 import torch
 from chronos import BaseChronosPipeline
+from chronos.chronos_bolt import ChronosBoltPipeline
+from chronos.chronos import ChronosPipeline
 from chronos.chronos import ChronosTokenizer
 from autogluon.timeseries import TimeSeriesDataFrame
 from torch.utils.data import DataLoader
@@ -19,7 +21,7 @@ from peft import PeftModel
 import json
 from transformers.trainer import Trainer
 from transformers import PreTrainedModel
-from peft import get_peft_model, LoraConfig
+from peft import get_peft_model, LoraConfig, TaskType
 from transformers import TrainerCallback, EarlyStoppingCallback, TrainerState, TrainerControl
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
@@ -232,14 +234,14 @@ class Chronos(AbstractPredictor):
 
         self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
-        if "chronos-bolt" in self.base_model_name:
+        if isinstance(self.pipeline, ChronosBoltPipeline):
             if self.context_length > 2048:
                 logging.info("Contex length detected of: %s. Adapt context length to maximum of 2048", self.context_length)
                 self.context_length = 2048
             if sampling:
                 logging.info("Sampling is turned on. Chronos-bolt will sample multiple trajectories to compute quantiles for prediction lengths >64.")
             self.sampling = sampling
-        elif "chronos-t5" in self.base_model_name:
+        elif isinstance(self.pipeline, ChronosPipeline):
             if self.context_length > 512:
                 logging.info("Contex length detected of: %s. Adapt context length to maximum of 512", self.context_length)
                 self.context_length = 512
@@ -298,7 +300,7 @@ class Chronos(AbstractPredictor):
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
             # only update prediction length for chronos-t5, not for chronos-bolt.
-            if "chronos-t5" in self.base_model_name:
+            if isinstance(pipeline, ChronosPipeline):
                 logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
                 pipeline.inner_model.config.prediction_length = self.prediction_length
                 self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
@@ -312,7 +314,7 @@ class Chronos(AbstractPredictor):
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
             # only update prediction length for chronos-t5, not for chronos-bolt.
-            if "chronos-t5" in self.base_model_name:
+            if isinstance(pipeline, ChronosPipeline):
                 logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
                 pipeline.inner_model.config.prediction_length = self.prediction_length
                 self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
@@ -334,34 +336,41 @@ class Chronos(AbstractPredictor):
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
             # only update prediction length for chronos-t5, not for chronos-bolt.
-            if "chronos-t5" in self.base_model_name:
+            if isinstance(pipeline, ChronosPipeline):
                 logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
                 pipeline.inner_model.config.prediction_length = self.prediction_length
                 pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
-            # Configure LoRA
-            lora_config = LoraConfig(
-                task_type=None,
-                inference_mode=False,
-                r=8,  # LoRA rank
-                lora_alpha=8,  # Scaling factor
-                lora_dropout=0.0,  # Dropout rate
-                target_modules=[
-                    # Self Attention (inside SelfAttention and EncDecAttention)
-                    "q",
-                    "k",
-                    "v",
-                    "o",  #
-                    # Feedforward (inside DenseReluDense blocks (Feed Forward))
-                    "wi",
-                    "wo",
-                    # output_patch_embedding and input_patch_embedding blocks
-                    "hidden_layer",
-                    "output_layer",
-                    "residual_layer",
-                ],
-            )
+                lora_config = LoraConfig(
+                    r=8, lora_alpha=8, target_modules=["q", "v", "k"], lora_dropout=0.0, bias="none", task_type=TaskType.SEQ_2_SEQ_LM  # may need to check actual T5 module names
+                )
 
+            elif isinstance(pipeline, ChronosBoltPipeline):
+                # Configure LoRA
+                lora_config = LoraConfig(
+                    task_type=None,
+                    inference_mode=False,
+                    r=8,  # LoRA rank
+                    lora_alpha=8,  # Scaling factor
+                    lora_dropout=0.0,  # Dropout rate
+                    target_modules=[
+                        # Self Attention (inside SelfAttention and EncDecAttention)
+                        "q",
+                        "k",
+                        "v",
+                        "o",  #
+                        # Feedforward (inside DenseReluDense blocks (Feed Forward))
+                        "wi",
+                        "wo",
+                        # output_patch_embedding and input_patch_embedding blocks
+                        "hidden_layer",
+                        "output_layer",
+                        "residual_layer",
+                    ],
+                )
+            else:
+                raise ValueError("Pipeline is not correctly specified.")
+            
             # Apply LoRA to the base model
             lora_model = get_peft_model(pipeline.inner_model, lora_config)
             lora_model.print_trainable_parameters()
@@ -440,7 +449,7 @@ class Chronos(AbstractPredictor):
                 forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
 
                 # chronos-t5 forecast output shape: [batch_size, num_trajectories, prediction_length]
-                if "chronos-t5" in self.base_model_name:
+                if isinstance(self.pipeline, ChronosPipeline):
                     forecast = torch.quantile(forecast, q=torch.tensor(self.quantiles, dtype=forecast.dtype), dim=1).swapaxes(1, 0)
 
             forecasts.append(forecast)
@@ -573,7 +582,7 @@ def fine_tune(
         pipeline_specific_train_args = {"label_names": [TARGET]}
     else:
         pipeline_specific_train_args = {}
-    
+
     # Create args for final training with best hyperparameters
     fine_tune_trainer_kwargs = create_trainer_kwargs(pipeline_specific_train_args, path=final_training_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
 
