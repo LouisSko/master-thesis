@@ -27,6 +27,19 @@ from transformers import TrainerCallback, EarlyStoppingCallback, TrainerState, T
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
+class ChronosLoraConfig(LoraConfig):
+    """Chronos t5 lora configuration"""
+
+    def __init__(self, prediction_length=None, **kwargs):
+        super().__init__(**kwargs)
+        self.prediction_length = prediction_length
+
+    def to_dict(self):
+        base = LoraConfig.to_dict(self)
+        base["prediction_length"] = self.prediction_length
+        return base
+
+
 class ChronosInferenceDataset(Dataset):
     """A dataset for inference with time series data.
 
@@ -236,14 +249,14 @@ class Chronos(AbstractPredictor):
 
         if isinstance(self.pipeline, ChronosBoltPipeline):
             if self.context_length > 2048:
-                logging.info("Contex length detected of: %s. Adapt context length to maximum of 2048", self.context_length)
+                logging.info("Context length detected of: %s. Adapt context length to maximum of 2048", self.context_length)
                 self.context_length = 2048
             if sampling:
                 logging.info("Sampling is turned on. Chronos-bolt will sample multiple trajectories to compute quantiles for prediction lengths >64.")
             self.sampling = sampling
         elif isinstance(self.pipeline, ChronosPipeline):
             if self.context_length > 512:
-                logging.info("Contex length detected of: %s. Adapt context length to maximum of 512", self.context_length)
+                logging.info("Context length detected of: %s. Adapt context length to maximum of 512", self.context_length)
                 self.context_length = 512
             if sampling:
                 logging.warning("Sampling does not need to be explicitly enabled for chronos-t5. It uses sampling by default.")
@@ -263,11 +276,20 @@ class Chronos(AbstractPredictor):
             with open(Path(pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
                 adapter_config: dict = json.load(f)
 
-            self.base_model_name = adapter_config.get("base_model_name_or_path")
-            logging.info("Base model name: %s", self.base_model_name)
+            base_model_name = adapter_config.get("base_model_name_or_path")
+            logging.info("Base model name: %s", base_model_name)
 
-            logging.info("Initializing Chronos pipeline with model: %s", self.base_model_name)
-            pipeline = BaseChronosPipeline.from_pretrained(self.base_model_name, device_map=self.device_map)
+            logging.info("Initializing Chronos pipeline with model: %s", base_model_name)
+            pipeline = BaseChronosPipeline.from_pretrained(base_model_name, device_map=self.device_map)
+
+            # update prediction length of base model based on lora configuration
+            # TODO: this is a hack. it produces a warning, that there is an unexpected keyword argument. Should get fixed
+            if isinstance(pipeline, ChronosPipeline):
+                pred_length = adapter_config.get("prediction_length")
+                logging.info("Setting prediction length of chronos-t5 to %s based on LoRa configuration.", pred_length)
+                pipeline.inner_model.config.prediction_length = pred_length
+                pipeline.inner_model.config.chronos_config["prediction_length"] = pred_length
+                pipeline.model.config.prediction_length = pred_length
 
             # Apply LoRA adapters
             pipeline.inner_model = PeftModel.from_pretrained(pipeline.inner_model, pretrained_model_name_or_path, is_trainable=False)
@@ -277,9 +299,6 @@ class Chronos(AbstractPredictor):
         else:
             logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
             pipeline = BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
-            self.base_model_name = (
-                self.pretrained_model_name_or_path
-            )  # TODO: make this more robust in case pretrained_model_name_or_path does not contain chronos-t5 or chronos-bolt
 
         return pipeline
 
@@ -303,7 +322,7 @@ class Chronos(AbstractPredictor):
             if isinstance(pipeline, ChronosPipeline):
                 logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
                 pipeline.inner_model.config.prediction_length = self.prediction_length
-                self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+                pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
             return pipeline.inner_model
 
@@ -317,7 +336,7 @@ class Chronos(AbstractPredictor):
             if isinstance(pipeline, ChronosPipeline):
                 logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
                 pipeline.inner_model.config.prediction_length = self.prediction_length
-                self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+                pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
             # Freeze all parameters
             for param in pipeline.inner_model.parameters():
@@ -331,6 +350,10 @@ class Chronos(AbstractPredictor):
         def _model_init_lora() -> PreTrainedModel:
             """Initialize a model with LoRA"""
 
+            if self.lora:
+                logging.error("Cannot fine-tune the model when LoRa is enabled.")
+                raise ValueError("Not supported to fine tune model when LoRa is enabled.")
+
             logging.info("Initializing model with LoRA adapters.")
             # Initialize the Chronos model
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
@@ -341,8 +364,14 @@ class Chronos(AbstractPredictor):
                 pipeline.inner_model.config.prediction_length = self.prediction_length
                 pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
-                lora_config = LoraConfig(
-                    r=8, lora_alpha=8, target_modules=["q", "v", "k"], lora_dropout=0.0, bias="none", task_type=TaskType.SEQ_2_SEQ_LM  # may need to check actual T5 module names
+                lora_config = ChronosLoraConfig(
+                    prediction_length=self.prediction_length,  # add updated prediction lenght to lora configuration
+                    r=8,
+                    lora_alpha=8,
+                    target_modules=["q", "v", "k"],
+                    lora_dropout=0.0,
+                    bias="none",
+                    task_type=TaskType.SEQ_2_SEQ_LM,
                 )
 
             elif isinstance(pipeline, ChronosBoltPipeline):
@@ -370,7 +399,8 @@ class Chronos(AbstractPredictor):
                 )
             else:
                 raise ValueError("Pipeline is not correctly specified.")
-            
+
+            logging.info("LoRa config: %s", lora_config)
             # Apply LoRA to the base model
             lora_model = get_peft_model(pipeline.inner_model, lora_config)
             lora_model.print_trainable_parameters()
@@ -378,14 +408,10 @@ class Chronos(AbstractPredictor):
 
         finetuning_options = {"full": _model_init_full_tuning, "last_layer": _model_init_last_layer_tuning, "LoRa": _model_init_lora}
 
-        if self.lora:
-            logging.error("Cannot fine-tune the model when LoRa is enabled.")
-            raise ValueError("Not supported to fine tune model when LoRa is enabled.")
-
         logging.info("Starting fine-tuning with type: %s", self.finetuning_type)
         output_dir_fine_tuning = self.output_dir / f"finetuned-{self.finetuning_type}"
 
-        if "chronos-bolt" in self.base_model_name and self.prediction_length > 64:
+        if isinstance(self.pipeline, ChronosBoltPipeline) and self.prediction_length > 64:
             logging.info("Prediction length for chronos-bolt model will be set to 64 during training.")
             prediction_length = min(self.prediction_length, 64)
         else:
@@ -692,9 +718,17 @@ def hp_space_optuna(trial: Trial):
 def create_trainer_kwargs(pipeline_specific_train_args, path: str = Path("./models/test/"), eval_during_fine_tune: bool = True, save_checkpoints: bool = True):
     """Define the training arguments"""
 
-    save_eval_steps = 0.1
-    logging_steps = 0.05
+    epochs = 3
+    eval_ratio = 0.1 / epochs  # evaluate every 0.1 epochs
+    logging_steps = 0.05 / epochs
     dir = "transformers_logs"
+
+    # speed up training if tf32 is available
+    fp16 = False
+    if torch.cuda.is_available():
+        capability = torch.cuda.get_device_capability()
+        if capability >= (7, 0):
+            fp16 = True
 
     # create TrainingArguments
     fine_tune_trainer_kwargs = {
@@ -712,18 +746,19 @@ def create_trainer_kwargs(pipeline_specific_train_args, path: str = Path("./mode
         "logging_steps": logging_steps,
         "disable_tqdm": True,
         # "max_steps": 500,
-        "num_train_epochs": 1,
+        "num_train_epochs": epochs,
         "gradient_accumulation_steps": 1,
-        "dataloader_num_workers": 0,
+        "dataloader_num_workers": 4,
         "tf32": False,
+        "fp16": fp16,
         "report_to": "tensorboard",
         "prediction_loss_only": True,
         "save_strategy": "steps" if save_checkpoints else "no",
-        "save_steps": save_eval_steps if save_checkpoints else None,
+        "save_steps": eval_ratio if save_checkpoints else None,
         "save_only_model": True,
         "save_total_limit": 5,
         "eval_strategy": "steps" if eval_during_fine_tune else "no",
-        "eval_steps": save_eval_steps if eval_during_fine_tune else None,
+        "eval_steps": eval_ratio if eval_during_fine_tune else None,
         "eval_on_start": True if eval_during_fine_tune else False,
         "load_best_model_at_end": True if eval_during_fine_tune else False,
         "metric_for_best_model": "eval_loss",
