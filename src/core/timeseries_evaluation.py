@@ -444,7 +444,8 @@ class ForecastCollection(BaseModel):
         decimal_places: Optional[int] = None,
     ) -> pd.DataFrame:
         item_ids = item_ids or self.get_item_ids()
-        lead_times = lead_times or self.get_lead_times()
+        if lead_times is None:
+            lead_times = self.get_lead_times()
 
         all_scores = []
         for item_id in item_ids:
@@ -479,8 +480,10 @@ class ForecastCollection(BaseModel):
     def get_empirical_coverage_rates(
         self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, decimal_places: Optional[int] = None
     ) -> pd.DataFrame:
+
         item_ids = item_ids or self.get_item_ids()
-        lead_times = lead_times or self.get_lead_times()
+        if lead_times is None:
+            lead_times = self.get_lead_times()
 
         rates = {lt: [] for lt in lead_times}
 
@@ -508,7 +511,8 @@ class ForecastCollection(BaseModel):
         self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, decimal_places: Optional[int] = None
     ) -> pd.DataFrame:
         item_ids = item_ids or self.get_item_ids()
-        lead_times = lead_times or self.get_lead_times()
+        if lead_times is None:
+            lead_times = self.get_lead_times()
 
         scores = {}
 
@@ -535,7 +539,8 @@ class ForecastCollection(BaseModel):
 
     def get_pit_values(self, lead_times: Optional[List[int]] = None, item_ids: Optional[List[int]] = None) -> Dict[int, np.ndarray]:
         item_ids = item_ids or self.get_item_ids()
-        lead_times = lead_times or self.get_lead_times()
+        if lead_times is None:
+            lead_times = self.get_lead_times()
         result = {}
         for lt in lead_times:
             values = []
@@ -548,7 +553,8 @@ class ForecastCollection(BaseModel):
         return result
 
     def get_pit_histogram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
-        lead_times = lead_times or self.get_lead_times()
+        if lead_times is None:
+            lead_times = self.get_lead_times()
         pit_data = self.get_pit_values(lead_times=lead_times, item_ids=item_ids)
 
         if item_ids:
