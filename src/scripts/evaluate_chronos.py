@@ -1,30 +1,37 @@
 from src.data.preprocessor import read_smard_data, read_exchange_rates_data
-from src.postprocessors.mle import PostprocessorMLE
-from src.postprocessors.qr import PostprocessorQR
-from src.postprocessors.eqc import PostprocessorEQC
 from src.pipeline.pipeline import ForecastingPipeline
 from src.predictors.chronos import Chronos
 from autogluon.timeseries import TimeSeriesDataFrame
-from src.predictors.benchmarks import RollingSeasonalQuantilePredictor, RandomWalkBenchmark
-import numpy as np
 from pathlib import Path
 import pandas as pd
-from typing import List, Union
+from typing import Union
 import argparse
+import eval_constants
 
 
-def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset], lead_times: List[int], quantiles: List[float], test_start_date: pd.Timestamp, output_dir: Path):
+def evaluate(
+    data: TimeSeriesDataFrame,
+    freq: Union[pd.Timedelta, pd.DateOffset],
+    val_window_size: pd.DateOffset,
+    model_name: str,  # like chronos-t5-tiny or chronos-bolt-tiny
+    output_dir: Path,
+):
 
-    postprocessors = [PostprocessorMLE, PostprocessorQR, PostprocessorEQC]  # , PostprocessorGB]
-    postprocessor_kwargs = [{"transformer": None, "n_jobs": 4}, {"transformer": "arcsinh", "n_jobs": 4}, {"n_jobs": 4}]  # , {"n_jobs": 1}]
+    lead_times = eval_constants.lead_times
+    quantiles = eval_constants.quantiles
+    test_start_date = eval_constants.test_start_date
+    postprocessors = eval_constants.postprocessors
+    postprocessor_kwargs = eval_constants.postprocessor_kwargs
+
+    device_map = "cuda"
 
     # chronos zero shot results
     pipeline = ForecastingPipeline(
         model=Chronos,
-        model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "device_map": "mps", "lead_times": lead_times, "freq": freq},
+        model_kwargs={"pretrained_model_name_or_path": f"amazon/{model_name}", "device_map": device_map, "lead_times": lead_times, "freq": freq},
         postprocessors=postprocessors,
         postprocessor_kwargs=postprocessor_kwargs,
-        output_dir=output_dir / "chronos-bolt-zero-shot",
+        output_dir=output_dir / f"{model_name}-zero-shot",
     )
 
     results = pipeline.backtest(
@@ -42,33 +49,12 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
     del pipeline
     del results
 
-    # # chronos zero shot results with sampling
-    # # pipeline = ForecastingPipeline(
-    # #     model=Chronos,
-    # #     model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "sampling": True, "device_map": "mps", "lead_times": lead_times, "freq": freq},
-    # #     postprocessors=postprocessors,
-    # #     postprocessor_kwargs=postprocessor_kwargs,
-    # #     output_dir=output_dir / "chronos-bolt-zero-shot-sampling",
-    # # )
-
-    # # results = pipeline.backtest(
-    # #     data=data,
-    # #     test_start_date=test_start_date,
-    # #     rolling_window_eval=False,
-    # #     train=False,
-    # #     val_window_size=None,
-    # #     train_window_size=None,
-    # #     test_window_size=None,
-    # #     calibration_based_on=None,
-    # #     save_results=True,
-    # # )
-
     # chronos full fine tuning
     pipeline = ForecastingPipeline(
         model=Chronos,
         model_kwargs={
-            "pretrained_model_name_or_path": "amazon/chronos-bolt-tiny",
-            "device_map": "mps",
+            "pretrained_model_name_or_path": f"amazon/{model_name}",
+            "device_map": device_map,
             "lead_times": lead_times,
             "freq": freq,
             "finetuning_type": "full",
@@ -76,7 +62,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         },
         postprocessors=postprocessors,
         postprocessor_kwargs=postprocessor_kwargs,
-        output_dir=output_dir / "chronos-bolt-finetuned-full",
+        output_dir=output_dir / f"{model_name}-finetuned-full",
     )
 
     results = pipeline.backtest(
@@ -84,7 +70,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         test_start_date=test_start_date,
         rolling_window_eval=False,
         train=True,
-        val_window_size=pd.DateOffset(years=3),
+        val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
         calibration_based_on="val",
@@ -98,8 +84,8 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
     pipeline = ForecastingPipeline(
         model=Chronos,
         model_kwargs={
-            "pretrained_model_name_or_path": "amazon/chronos-bolt-tiny",
-            "device_map": "mps",
+            "pretrained_model_name_or_path": f"amazon/{model_name}",
+            "device_map": device_map,
             "lead_times": lead_times,
             "freq": freq,
             "finetuning_type": "last_layer",
@@ -107,7 +93,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         },
         postprocessors=postprocessors,
         postprocessor_kwargs=postprocessor_kwargs,
-        output_dir=output_dir / "chronos-bolt-finetuned-last-layer",
+        output_dir=output_dir / f"{model_name}-finetuned-last-layer",
     )
 
     results = pipeline.backtest(
@@ -115,7 +101,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         test_start_date=test_start_date,
         rolling_window_eval=False,
         train=True,
-        val_window_size=pd.DateOffset(years=3),
+        val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
         calibration_based_on="val",
@@ -129,8 +115,8 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
     pipeline = ForecastingPipeline(
         model=Chronos,
         model_kwargs={
-            "pretrained_model_name_or_path": "amazon/chronos-bolt-tiny",
-            "device_map": "mps",
+            "pretrained_model_name_or_path": f"amazon/{model_name}",
+            "device_map": device_map,
             "lead_times": lead_times,
             "freq": freq,
             "finetuning_type": "LoRa",
@@ -138,7 +124,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         },
         postprocessors=postprocessors,
         postprocessor_kwargs=postprocessor_kwargs,
-        output_dir=output_dir / "chronos-bolt-finetuned-lora",
+        output_dir=output_dir / f"{model_name}-finetuned-lora",
     )
 
     results = pipeline.backtest(
@@ -146,7 +132,7 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
         test_start_date=test_start_date,
         rolling_window_eval=False,
         train=True,
-        val_window_size=pd.DateOffset(years=3),
+        val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
         calibration_based_on="val",
@@ -156,59 +142,22 @@ def evaluate(data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
     del pipeline
     del results
 
-    # Naive Rolling Seasonal quantile predictions
-    pipeline = ForecastingPipeline(
-        model=RollingSeasonalQuantilePredictor,
-        model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq},
-        postprocessors=postprocessors,
-        postprocessor_kwargs=postprocessor_kwargs,
-        output_dir=output_dir / "seasonal_rolling",
-    )
-
-    results = pipeline.backtest(
-        test_start_date=test_start_date,
-        data=data,
-        rolling_window_eval=False,
-        train=True,
-        val_window_size=None,
-        train_window_size=None,
-        test_window_size=None,
-        calibration_based_on="train",
-        save_results=True,
-    )
-
-    del pipeline
-    del results
-
-    # Naive rolling quantile predictions
-    pipeline = ForecastingPipeline(
-        model=RandomWalkBenchmark,
-        model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq},
-        postprocessors=postprocessors,
-        postprocessor_kwargs=postprocessor_kwargs,
-        output_dir=output_dir / "random_walk",
-    )
-
-    results = pipeline.backtest(
-        test_start_date=test_start_date,
-        data=data,
-        rolling_window_eval=False,
-        train=True,
-        val_window_size=None,
-        train_window_size=None,
-        test_window_size=None,
-        calibration_based_on="train",
-        save_results=True,
-    )
-
 
 def main():
     parser = argparse.ArgumentParser(description="Run evaluation pipeline for selected dataset.")
     parser.add_argument("--dataset", type=str, required=True, choices=["wholesale_prices", "energy_consumption", "exchange_rates"], help="Dataset to evaluate")
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        required=True,
+        choices=["chronos-bolt-tiny", "chronos-bolt-small", "chronos-bolt-base", "chronos-t5-tiny", "chronos-t5-small", "chronos-t5-base"],
+        help="Model used for predictions",
+    )
 
     args = parser.parse_args()
 
     if args.dataset == "wholesale_prices":
+        val_window_size = pd.DateOffset(years=1)
         data, mapping, freq = read_smard_data(
             file_paths=["data/Gro_handelspreise_201501010000_202101010000_Stunde.csv", "data/Gro_handelspreise_202101010000_202504240000_Stunde.csv"],
             selected_time_series=None,
@@ -216,6 +165,7 @@ def main():
         output_dir = Path("./results/wholesale_prices/pipeline/")
 
     elif args.dataset == "energy_consumption":
+        val_window_size = pd.DateOffset(years=1)
         data, mapping, freq = read_smard_data(
             file_paths=["data/Realisierter_Stromverbrauch_201501010000_202101010000_Stunde.csv", "data/Realisierter_Stromverbrauch_202101010000_202504240000_Stunde.csv"],
             selected_time_series=["Netzlast [MWh] Berechnete Auflösungen", "Residuallast [MWh] Berechnete Auflösungen"],
@@ -223,18 +173,14 @@ def main():
         output_dir = Path("./results/energy_consumption/pipeline/")
 
     elif args.dataset == "exchange_rates":
+        val_window_size = pd.DateOffset(years=5)
         data, mapping, freq = read_exchange_rates_data(files_dir="data/exchange_rates/")
         output_dir = Path("./results/exchange_rates/pipeline/")
 
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
 
-    lead_times = np.arange(1, 192 + 1).tolist()
-    quantiles = np.round(np.arange(0.1, 1, 0.1), 1).tolist()
-
-    test_start_date = pd.Timestamp("2023-01-01")
-
-    evaluate(data, freq, lead_times, quantiles, test_start_date, output_dir)
+    evaluate(data, freq, val_window_size, args.model_name, output_dir)
 
 
 if __name__ == "__main__":
