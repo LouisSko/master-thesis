@@ -4,7 +4,6 @@ pandas==2.2.3
 scoringrules==0.7.1
 matplotlib==3.10.1
 statsmodels==0.14.4
-chronos-forecasting==1.5.1
 tensorboard==2.19.0
 peft==0.15.2
 transformers==4.51.3
