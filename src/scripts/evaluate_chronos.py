@@ -7,6 +7,7 @@ import pandas as pd
 from typing import Union
 import argparse
 import eval_constants
+import torch
 
 
 def evaluate(
@@ -23,7 +24,12 @@ def evaluate(
     postprocessors = eval_constants.postprocessors
     postprocessor_kwargs = eval_constants.postprocessor_kwargs
 
-    device_map = "cuda"
+    if torch.cuda.is_available():
+        device_map = "cuda"
+    elif torch.mps.is_available():
+        device_map = "mps"
+    else:
+        device_map = "cpu"
 
     # chronos zero shot results
     pipeline = ForecastingPipeline(
