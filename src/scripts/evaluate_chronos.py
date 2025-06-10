@@ -151,7 +151,7 @@ def evaluate(
 
 def main():
     parser = argparse.ArgumentParser(description="Run evaluation pipeline for selected dataset.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["wholesale_prices", "energy_consumption", "exchange_rates"], help="Dataset to evaluate")
+    parser.add_argument("--dataset", type=str, required=True, choices=["wholesale_prices", "electricity_consumption", "exchange_rates"], help="Dataset to evaluate")
     parser.add_argument(
         "--model_name",
         type=str,
@@ -170,13 +170,13 @@ def main():
         )
         output_dir = Path("./results/wholesale_prices/pipeline/")
 
-    elif args.dataset == "energy_consumption":
+    elif args.dataset == "electricity_consumption":
         val_window_size = pd.DateOffset(years=1)
         data, mapping, freq = read_smard_data(
             file_paths=["data/Realisierter_Stromverbrauch_201501010000_202101010000_Stunde.csv", "data/Realisierter_Stromverbrauch_202101010000_202504240000_Stunde.csv"],
             selected_time_series=["Netzlast [MWh] Berechnete Auflösungen", "Residuallast [MWh] Berechnete Auflösungen"],
         )
-        output_dir = Path("./results/energy_consumption/pipeline/")
+        output_dir = Path("./results/electricity_consumption/pipeline/")
 
     elif args.dataset == "exchange_rates":
         val_window_size = pd.DateOffset(years=5)
