@@ -7,7 +7,12 @@ from autogluon.timeseries import TimeSeriesDataFrame
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
 
-def read_smard_data(file_paths: List[Path], selected_time_series: Optional[List[str]] = None, cols_to_drop: Optional[List[str]] = None) -> Tuple[pd.DataFrame, Dict[int, str]]:
+def read_smard_data(
+    file_paths: List[Path],
+    selected_time_series: Optional[List[str]] = None,
+    cols_to_drop: Optional[List[str]] = None,
+    freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+) -> Tuple[pd.DataFrame, Dict[int, str]]:
     """
     Reads and processes SMARD data from multiple CSV files into a unified long-format DataFrame.
 
@@ -29,20 +34,18 @@ def read_smard_data(file_paths: List[Path], selected_time_series: Optional[List[
 
     logging.info("Reading SMARD data...")
 
-    freq = pd.Timedelta("1h")
-
     # Step 1: Read and concatenate all CSVs
     dfs = []
     for file_path in file_paths:
         logging.info(f"Reading file: {file_path}")
-        df = pd.read_csv(file_path, sep=";", decimal=",", thousands=".", na_values=["-"], parse_dates=["Datum von", "Datum bis"], dayfirst=True)
+        df = pd.read_csv(file_path, sep=";", decimal=".", thousands=",", na_values=["-"], parse_dates=["Start date", "End date"], date_format="%b %d, %Y %I:%M %p")
         dfs.append(df)
 
     df = pd.concat(dfs, ignore_index=True)
     logging.info(f"Total rows after concat: {len(df)}")
 
     # Step 2: Drop unnecessary columns
-    df.drop(columns=["Datum bis"], inplace=True, errors="ignore")
+    df.drop(columns=["End date"], inplace=True, errors="ignore")
 
     if cols_to_drop:
         df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
@@ -50,12 +53,12 @@ def read_smard_data(file_paths: List[Path], selected_time_series: Optional[List[
 
     if selected_time_series:
         logging.info(f"Filtering columns: {selected_time_series}")
-        columns_to_keep = ["Datum von"] + selected_time_series
+        columns_to_keep = ["Start date"] + selected_time_series
         df = df[columns_to_keep]
         logging.info(f"Columns retained: {df.columns.tolist()}")
 
     # Step 3: Format & reshape
-    df.rename(columns={"Datum von": "timestamp"}, inplace=True)
+    df.rename(columns={"Start date": "timestamp"}, inplace=True)
     df.sort_values("timestamp", inplace=True)
     df.drop_duplicates(subset="timestamp", keep="first", inplace=True)
 

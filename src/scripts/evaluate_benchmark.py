@@ -4,11 +4,12 @@ from src.predictors.benchmarks import RollingSeasonalQuantilePredictor, RandomWa
 from pathlib import Path
 import argparse
 import eval_constants
+import pandas as pd
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run evaluation pipeline for selected dataset.")
-    parser.add_argument("--dataset", type=str, required=True, choices=["wholesale_prices", "electricity_consumption", "exchange_rates"], help="Dataset to evaluate")
+    parser.add_argument("--dataset", type=str, required=True, choices=["day_ahead_prices", "electricity_consumption", "exchange_rates"], help="Dataset to evaluate")
     args = parser.parse_args()
 
     lead_times = eval_constants.lead_times
@@ -17,12 +18,24 @@ def main():
     postprocessors = eval_constants.postprocessors
     postprocessor_kwargs = eval_constants.postprocessor_kwargs
 
-    if args.dataset == "wholesale_prices":
+    if args.dataset == "day_ahead_prices":
         data, mapping, freq = read_smard_data(
-            file_paths=["data/Gro_handelspreise_201501010000_202101010000_Stunde.csv", "data/Gro_handelspreise_202101010000_202504240000_Stunde.csv"],
-            selected_time_series=None,
+            file_paths=["data/day_ahead_prices/Day-ahead_prices_201501010000_202001010000_Hour.csv", "data/day_ahead_prices/Day-ahead_prices_202001010000_202506120000_Hour.csv"],
+            selected_time_series=[
+                "Belgium [€/MWh] Original resolutions",
+                "Denmark 1 [€/MWh] Original resolutions",
+                "Denmark 2 [€/MWh] Original resolutions",
+                "France [€/MWh] Original resolutions",
+                "Netherlands [€/MWh] Original resolutions",
+                "Norway 2 [€/MWh] Original resolutions",
+                "Sweden 4 [€/MWh] Original resolutions",
+                "Switzerland [€/MWh] Original resolutions",
+                "Czech Republic [€/MWh] Original resolutions",
+                "Slovenia [€/MWh] Original resolutions",
+                "Hungary [€/MWh] Original resolutions",
+            ],
+            freq=pd.Timedelta("1h"),
         )
-        output_dir = Path("./results/wholesale_prices/pipeline/")
 
         # Naive Rolling Seasonal quantile predictions
         pipeline = ForecastingPipeline(
@@ -30,7 +43,7 @@ def main():
             model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq},
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
-            output_dir=output_dir / "seasonal_rolling",
+            output_dir=eval_constants.output_dir_day_ahead_prices / "seasonal_rolling",
         )
 
         results = pipeline.backtest(
@@ -47,10 +60,14 @@ def main():
 
     elif args.dataset == "electricity_consumption":
         data, mapping, freq = read_smard_data(
-            file_paths=["data/Realisierter_Stromverbrauch_201501010000_202101010000_Stunde.csv", "data/Realisierter_Stromverbrauch_202101010000_202504240000_Stunde.csv"],
-            selected_time_series=["Netzlast [MWh] Berechnete Auflösungen", "Residuallast [MWh] Berechnete Auflösungen"],
+            file_paths=[
+                "data/electricity_consumption/Actual_consumption_201501010000_202001010000_Quarterhour.csv",
+                "data/electricity_consumption/Actual_consumption_202001010000_202506120000_Quarterhour.csv",
+            ],
+            selected_time_series=["grid load [MWh] Original resolutions", "Residual load [MWh] Original resolutions"],
+            freq=pd.Timedelta("15 min"),
         )
-        output_dir = Path("./results/electricity_consumption/pipeline/")
+
 
         # Naive Rolling Seasonal quantile predictions
         pipeline = ForecastingPipeline(
@@ -58,7 +75,7 @@ def main():
             model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq},
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
-            output_dir=output_dir / "seasonal_rolling",
+            output_dir=eval_constants.output_dir_electricity_consumption / "seasonal_rolling",
         )
 
         results = pipeline.backtest(
@@ -75,7 +92,6 @@ def main():
 
     elif args.dataset == "exchange_rates":
         data, mapping, freq = read_exchange_rates_data(files_dir="data/exchange_rates/")
-        output_dir = Path("./results/exchange_rates/pipeline/")
 
         # Naive rolling quantile predictions
         pipeline = ForecastingPipeline(
@@ -83,7 +99,7 @@ def main():
             model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq},
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
-            output_dir=output_dir / "random_walk",
+            output_dir=eval_constants.output_dir_exchange_rates / "random_walk",
         )
 
         results = pipeline.backtest(
