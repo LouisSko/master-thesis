@@ -332,19 +332,26 @@ class Chronos(AbstractPredictor):
             logging.info("Initializing model for last layer tuning (only last layer trainable).")
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
-            # only update prediction length for chronos-t5, not for chronos-bolt.
+            # Freeze all parameters
+            for param in pipeline.inner_model.parameters():
+                param.requires_grad = False
+
             if isinstance(pipeline, ChronosPipeline):
+                # only update prediction length for chronos-t5, not for chronos-bolt.
                 logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
                 pipeline.inner_model.config.prediction_length = self.prediction_length
                 pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
-            # Freeze all parameters
-            for param in pipeline.inner_model.parameters():
-                param.requires_grad = False
-            # Train only last residual block (incl. output layer)
-            for param in pipeline.inner_model.output_patch_embedding.parameters():
-                param.requires_grad = True
+                # unfreezing the last layer
+                for param in pipeline.inner_model.lm_head.parameters():
+                    param.requires_grad = True
 
+            elif isinstance(pipeline, ChronosBoltPipeline):
+
+                # unfreezing the last layer
+                for param in pipeline.inner_model.output_patch_embedding.output_layer.parameters():
+                    param.requires_grad = True
+            
             return pipeline.inner_model
 
         def _model_init_lora() -> PreTrainedModel:
@@ -662,6 +669,10 @@ def fine_tune(
         callbacks=create_callbacks(),
     )
 
+    # save training args
+    with open(final_training_path / "trainer_args.json", "w") as f:
+        f.write(fine_tune_trainer_kwargs.to_json_string())
+
     logging.info("Starting final training process...")
     trainer.train()
 
@@ -738,7 +749,7 @@ def create_trainer_kwargs(pipeline_specific_train_args, path: str = Path("./mode
         "per_device_eval_batch_size": 32,
         "learning_rate": 1e-05,
         "lr_scheduler_type": "linear",
-        "warmup_ratio": 0.1,
+        "warmup_ratio": 0.0,
         "weight_decay": 0.0,
         "optim": "adamw_torch_fused",
         "logging_dir": Path(path) / dir,
