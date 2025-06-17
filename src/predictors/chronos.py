@@ -394,14 +394,14 @@ class Chronos(AbstractPredictor):
                         "q",
                         "k",
                         "v",
-                        "o",  #
-                        # Feedforward (inside DenseReluDense blocks (Feed Forward))
-                        "wi",
-                        "wo",
-                        # output_patch_embedding and input_patch_embedding blocks
-                        "hidden_layer",
-                        "output_layer",
-                        "residual_layer",
+                        # "o",  #
+                        # # Feedforward (inside DenseReluDense blocks (Feed Forward))
+                        # "wi",
+                        # "wo",
+                        # # output_patch_embedding and input_patch_embedding blocks
+                        # "hidden_layer",
+                        # "output_layer",
+                        # "residual_layer",
                     ],
                 )
             else:
@@ -734,7 +734,7 @@ def create_trainer_kwargs(pipeline_specific_train_args, path: str = Path("./mode
     logging_steps = 0.05 / epochs
     dir = "transformers_logs"
 
-    # speed up training if tf32 is available
+    # speed up training if fp16 is available
     fp16 = False
     if torch.cuda.is_available():
         capability = torch.cuda.get_device_capability()
