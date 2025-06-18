@@ -190,7 +190,7 @@ class TimeSeriesForecast(BaseModel):
             # logging.warning("No crps score can be calculated for lead time: %s", forecast_horizon)
             return np.array([np.nan]) if mean_time else torch.full((len(target),), float("nan"))
 
-        crps = sr.crps_quantile(target, quantile_predictions, self.quantiles)
+        crps = sr.crps_quantile(target, quantile_predictions, self.quantiles, backend="numpy")
 
         if mean_time:
             return np.array([crps[~np.isnan(crps)].mean()])
