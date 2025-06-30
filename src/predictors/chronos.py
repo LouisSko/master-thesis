@@ -324,6 +324,8 @@ class Chronos(AbstractPredictor):
                 pipeline.inner_model.config.prediction_length = self.prediction_length
                 pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
 
+            print_trainable_params(pipeline.inner_model)
+
             return pipeline.inner_model
 
         def _model_init_last_layer_tuning() -> PreTrainedModel:
@@ -351,7 +353,9 @@ class Chronos(AbstractPredictor):
                 # unfreezing the last layer
                 for param in pipeline.inner_model.output_patch_embedding.output_layer.parameters():
                     param.requires_grad = True
-            
+
+            print_trainable_params(pipeline.inner_model)
+
             return pipeline.inner_model
 
         def _model_init_lora() -> PreTrainedModel:
@@ -788,3 +792,16 @@ def check_model_parameters(chronos: Chronos, model_name: str = "amazon/chronos-b
     for (name1, p1), (name2, p2) in zip(chronos_copy.pipeline.inner_model.named_parameters(), chronos.pipeline.inner_model.named_parameters()):
         if not torch.equal(p1, p2):
             logging.info(f"Parameter %s has changed!", name1)
+
+
+def print_trainable_params(model: PreTrainedModel) -> None:
+    """Computes fraction of trainable params for a PreTrainedModel"""
+
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+
+    fraction_trainable_params = trainable_params / total_params
+
+    fraction_trainable_params = np.round(fraction_trainable_params * 100, 2)
+
+    print(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
