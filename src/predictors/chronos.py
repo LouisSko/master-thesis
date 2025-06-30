@@ -2,8 +2,7 @@ from tqdm import tqdm
 import torch
 from chronos import BaseChronosPipeline
 from chronos.chronos_bolt import ChronosBoltPipeline
-from chronos.chronos import ChronosPipeline
-from chronos.chronos import ChronosTokenizer
+from chronos.chronos import ChronosPipeline, ChronosTokenizer
 from autogluon.timeseries import TimeSeriesDataFrame
 from torch.utils.data import DataLoader
 from typing import Callable, List, Optional, Dict, Any, Literal, Union
@@ -23,6 +22,7 @@ from transformers.trainer import Trainer
 from transformers import PreTrainedModel
 from peft import get_peft_model, LoraConfig, TaskType
 from transformers import TrainerCallback, EarlyStoppingCallback, TrainerState, TrainerControl
+import torch.nn as nn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -208,6 +208,9 @@ class Chronos(AbstractPredictor):
         Frequency of the time series data. Defaults to 1 hour.
     finetuning_type : {"full", "last_layer", "LoRa"}, optional
         Type of fine-tuning to apply. Defaults to "full".
+    finetuning_adjust_pretrained_prediction_length : bool, optional
+        Whether the original pretrained prediction length should be overwritten.
+        This involves changing the number of output neurons in case of chronos-bolt. Defaults to true.
     finetuning_hp_search : bool, optional
         Whether to perform hyperparameter search during fine-tuning. Defaults to False.
     finetuning_hp_search_trials : int, optional
@@ -225,6 +228,7 @@ class Chronos(AbstractPredictor):
         sampling: bool = False,
         freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         finetuning_type: Literal["full", "last_layer", "LoRa"] = "full",
+        finetuning_adjust_pretrained_prediction_length: bool = True,
         finetuning_hp_search: Optional[bool] = False,
         finetuning_hp_search_trials: Optional[int] = 10,
         output_dir: Optional[Path] = Path("./models/"),
@@ -236,6 +240,7 @@ class Chronos(AbstractPredictor):
         self.base_model_name = None
         self.device_map = device_map
         self.finetuning_type = finetuning_type
+        self.finetuning_adjust_pretrained_prediction_length = finetuning_adjust_pretrained_prediction_length
         self.finetuning_hp_search = finetuning_hp_search
         self.finetuning_hp_search_trials = finetuning_hp_search_trials
         self.lora = False
@@ -318,11 +323,17 @@ class Chronos(AbstractPredictor):
             logging.info("Initializing model for full tuning (all parameters trainable).")
             pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
 
-            # only update prediction length for chronos-t5, not for chronos-bolt.
             if isinstance(pipeline, ChronosPipeline):
-                logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
-                pipeline.inner_model.config.prediction_length = self.prediction_length
-                pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+                if self.finetuning_adjust_pretrained_prediction_length:
+                    logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
+
+                    pipeline.inner_model.config.prediction_length = self.prediction_length
+                    pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+
+            elif isinstance(pipeline, ChronosBoltPipeline):
+
+                if self.finetuning_adjust_pretrained_prediction_length:
+                    pipeline = resize_chronos_bolt_output_layers(pipeline, self.prediction_length)
 
             print_trainable_params(pipeline.inner_model)
 
@@ -339,19 +350,25 @@ class Chronos(AbstractPredictor):
                 param.requires_grad = False
 
             if isinstance(pipeline, ChronosPipeline):
-                # only update prediction length for chronos-t5, not for chronos-bolt.
-                logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
-                pipeline.inner_model.config.prediction_length = self.prediction_length
-                pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+                if self.finetuning_adjust_pretrained_prediction_length:
+                    logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
 
-                # unfreezing the last layer
+                    pipeline.inner_model.config.prediction_length = self.prediction_length
+                    pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+
+                # unfreeze the last layer
                 for param in pipeline.inner_model.lm_head.parameters():
                     param.requires_grad = True
 
             elif isinstance(pipeline, ChronosBoltPipeline):
 
-                # unfreezing the last layer
+                if self.finetuning_adjust_pretrained_prediction_length:
+                    pipeline = resize_chronos_bolt_output_layers(pipeline, self.prediction_length)
+
+                # Unfreeze the last layer(s)
                 for param in pipeline.inner_model.output_patch_embedding.output_layer.parameters():
+                    param.requires_grad = True
+                for param in pipeline.inner_model.output_patch_embedding.residual_layer.parameters():
                     param.requires_grad = True
 
             print_trainable_params(pipeline.inner_model)
@@ -422,13 +439,14 @@ class Chronos(AbstractPredictor):
         logging.info("Starting fine-tuning with type: %s", self.finetuning_type)
         output_dir_fine_tuning = self.output_dir / f"finetuned-{self.finetuning_type}"
 
-        if isinstance(self.pipeline, ChronosBoltPipeline) and self.prediction_length > 64:
-            logging.info("Prediction length for chronos-bolt model will be set to 64 during training.")
-            prediction_length = min(self.prediction_length, 64)
-        else:
+        if self.finetuning_adjust_pretrained_prediction_length:
             prediction_length = self.prediction_length
-            self.pipeline.model.config.prediction_length = self.prediction_length
-            self.pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+            self.pipeline.model.config.prediction_length = prediction_length
+            self.pipeline.inner_model.config.chronos_config["prediction_length"] = prediction_length
+        else:
+            prediction_length = self.pipeline.inner_model.config.chronos_config["prediction_length"]   # standard
+
+        logging.info("Prediction length will be set to %s during training.", self.prediction_length)
 
         fine_tune(
             model_init=finetuning_options[self.finetuning_type],
@@ -805,3 +823,77 @@ def print_trainable_params(model: PreTrainedModel) -> None:
     fraction_trainable_params = np.round(fraction_trainable_params * 100, 2)
 
     print(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
+
+
+def resize_chronos_bolt_output_layers(
+    pipeline: ChronosBoltPipeline,
+    new_prediction_length: int,
+) -> ChronosPipeline:
+    """
+    Resize the output and residual layers of a Chronos-Bolt model to match a new prediction length.
+
+    This function handles both truncation (when the new prediction length is smaller)
+    and extension (when the new prediction length is larger). In the latter case, it
+    replicates the weights and biases of the last timestep to initialize additional outputs.
+
+    Parameters:
+        pipeline (ChronosBoltPipeline):
+            The Chronos Pipeline
+        new_prediction_length (int):
+            The desired number of forecast steps to adjust the output layers to.
+
+    Returns:
+        ChronosBoltPipeline
+    """
+
+    output_patch_embedding = pipeline.inner_model.output_patch_embedding
+    config = pipeline.inner_model.config
+    old_pred_length = config.chronos_config["prediction_length"]
+    num_quantiles = len(config.chronos_config["quantiles"])
+    out_dim = num_quantiles * new_prediction_length
+
+    print(out_dim)
+    if old_pred_length == new_prediction_length:
+        return  # No adjustment needed
+
+    layer_specs = [
+        ("output_layer", config.d_ff),
+        ("residual_layer", config.d_model),
+    ]
+
+    for layer_name, in_dim in layer_specs:
+        old_layer = getattr(output_patch_embedding, layer_name)
+        old_weight = old_layer.weight.data
+        old_bias = old_layer.bias.data
+
+        new_layer = nn.Linear(in_dim, out_dim)
+
+        if new_prediction_length < old_pred_length:
+            # Truncate weights and biases to the new length
+            new_layer.weight.data = old_weight[:out_dim]
+            new_layer.bias.data = old_bias[:out_dim]
+        else:
+            # Copy existing weights
+            new_layer.weight.data[: old_pred_length * num_quantiles] = old_weight
+            new_layer.bias.data[: old_pred_length * num_quantiles] = old_bias
+
+            # Replicate the last timestep weights and biases
+            last_start = (old_pred_length - 1) * num_quantiles
+            last_end = old_pred_length * num_quantiles
+            last_weight_block = old_weight[last_start:last_end]
+            last_bias_block = old_bias[last_start:last_end]
+
+            for i in range(old_pred_length, new_prediction_length):
+                start = i * num_quantiles
+                end = (i + 1) * num_quantiles
+                new_layer.weight.data[start:end] = last_weight_block
+                new_layer.bias.data[start:end] = last_bias_block
+
+        setattr(output_patch_embedding, layer_name, new_layer)
+
+    # update configs
+    pipeline.inner_model.config.prediction_length = new_prediction_length
+    pipeline.inner_model.chronos_config.prediction_length = new_prediction_length
+    pipeline.inner_model.config.chronos_config["prediction_length"] = new_prediction_length
+
+    return pipeline
