@@ -410,20 +410,7 @@ class Chronos(AbstractPredictor):
                     r=8,  # LoRA rank
                     lora_alpha=8,  # Scaling factor
                     lora_dropout=0.0,  # Dropout rate
-                    target_modules=[
-                        # Self Attention (inside SelfAttention and EncDecAttention)
-                        "q",
-                        "k",
-                        "v",
-                        # "o",  #
-                        # # Feedforward (inside DenseReluDense blocks (Feed Forward))
-                        # "wi",
-                        # "wo",
-                        # # output_patch_embedding and input_patch_embedding blocks
-                        # "hidden_layer",
-                        # "output_layer",
-                        # "residual_layer",
-                    ],
+                    target_modules=["q", "k", "v"],  # Self Attention (inside SelfAttention and EncDecAttention)
                 )
             else:
                 raise ValueError("Pipeline is not correctly specified.")
