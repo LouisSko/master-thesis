@@ -444,7 +444,7 @@ class Chronos(AbstractPredictor):
             self.pipeline.model.config.prediction_length = prediction_length
             self.pipeline.inner_model.config.chronos_config["prediction_length"] = prediction_length
         else:
-            prediction_length = self.pipeline.inner_model.config.chronos_config["prediction_length"]   # standard
+            prediction_length = self.pipeline.inner_model.config.chronos_config["prediction_length"]  # standard
 
         logging.info("Prediction length will be set to %s during training.", self.prediction_length)
 
@@ -825,75 +825,109 @@ def print_trainable_params(model: PreTrainedModel) -> None:
     print(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
 
 
-def resize_chronos_bolt_output_layers(
-    pipeline: ChronosBoltPipeline,
-    new_prediction_length: int,
-) -> ChronosPipeline:
+def _resize_proj(
+    old_linear: nn.Linear,
+    num_quantiles: int,
+    old_H: int,
+    new_H: int,
+) -> nn.Linear:
     """
-    Resize the output and residual layers of a Chronos-Bolt model to match a new prediction length.
+    Resize a projection that is laid out (Q · H, in_dim) in row-major order.
 
-    This function handles both truncation (when the new prediction length is smaller)
-    and extension (when the new prediction length is larger). In the latter case, it
-    replicates the weights and biases of the last timestep to initialize additional outputs.
-
-    Parameters:
-        pipeline (ChronosBoltPipeline):
-            The Chronos Pipeline
-        new_prediction_length (int):
-            The desired number of forecast steps to adjust the output layers to.
-
-    Returns:
-        ChronosBoltPipeline
+    We first view it as (Q, H, in_dim) or (Q, H) for bias, manipulate the
+    horizon axis, then restore the flattened (Q · H, …) shape.
     """
+    in_dim = old_linear.in_features
+    device = old_linear.weight.device
+    dtype = old_linear.weight.dtype
+    has_bias = old_linear.bias is not None
 
-    output_patch_embedding = pipeline.inner_model.output_patch_embedding
-    config = pipeline.inner_model.config
-    old_pred_length = config.chronos_config["prediction_length"]
-    num_quantiles = len(config.chronos_config["quantiles"])
-    out_dim = num_quantiles * new_prediction_length
+    # split into (Q, H, in_dim)
+    W = old_linear.weight.data.view(num_quantiles, old_H, in_dim)
+    b = old_linear.bias.data.view(num_quantiles, old_H) if has_bias else None
 
-    print(out_dim)
-    if old_pred_length == new_prediction_length:
-        return  # No adjustment needed
+    # build new tensors
+    if new_H == old_H:  # nothing to do
+        new_W = W
+        new_b = b
+    elif new_H < old_H:  # truncate
+        new_W = W[:, :new_H]
+        new_b = b[:, :new_H] if has_bias else None
+    else:  # extend — repeat last horizon
+        reps = new_H - old_H
+        extra_W = W[:, -1:].expand(-1, reps, -1)
+        new_W = torch.cat([W, extra_W], dim=1)
 
-    layer_specs = [
-        ("output_layer", config.d_ff),
-        ("residual_layer", config.d_model),
-    ]
-
-    for layer_name, in_dim in layer_specs:
-        old_layer = getattr(output_patch_embedding, layer_name)
-        old_weight = old_layer.weight.data
-        old_bias = old_layer.bias.data
-
-        new_layer = nn.Linear(in_dim, out_dim)
-
-        if new_prediction_length < old_pred_length:
-            # Truncate weights and biases to the new length
-            new_layer.weight.data = old_weight[:out_dim]
-            new_layer.bias.data = old_bias[:out_dim]
+        if has_bias:
+            extra_b = b[:, -1:].expand(-1, reps)
+            new_b = torch.cat([b, extra_b], dim=1)
         else:
-            # Copy existing weights
-            new_layer.weight.data[: old_pred_length * num_quantiles] = old_weight
-            new_layer.bias.data[: old_pred_length * num_quantiles] = old_bias
+            new_b = None
 
-            # Replicate the last timestep weights and biases
-            last_start = (old_pred_length - 1) * num_quantiles
-            last_end = old_pred_length * num_quantiles
-            last_weight_block = old_weight[last_start:last_end]
-            last_bias_block = old_bias[last_start:last_end]
+    # flatten back & create new Linear
+    new_linear = nn.Linear(in_dim, num_quantiles * new_H, bias=has_bias).to(device, dtype)
+    new_linear.weight.data.copy_(new_W.reshape(num_quantiles * new_H, in_dim))
+    if has_bias:
+        new_linear.bias.data.copy_(new_b.reshape(num_quantiles * new_H))
 
-            for i in range(old_pred_length, new_prediction_length):
-                start = i * num_quantiles
-                end = (i + 1) * num_quantiles
-                new_layer.weight.data[start:end] = last_weight_block
-                new_layer.bias.data[start:end] = last_bias_block
+    return new_linear
 
-        setattr(output_patch_embedding, layer_name, new_layer)
 
-    # update configs
-    pipeline.inner_model.config.prediction_length = new_prediction_length
-    pipeline.inner_model.chronos_config.prediction_length = new_prediction_length
-    pipeline.inner_model.config.chronos_config["prediction_length"] = new_prediction_length
+def resize_chronos_bolt_output_layers(pipeline, new_prediction_length: int):
+    """
+    In-place resize of Chronos-Bolt’s output head so that the first
+    `old_prediction_length` horizons stay identical.
 
+    Parameters
+    ----------
+    pipeline : ChronosBoltPipeline
+    new_prediction_length : int
+        Desired forecast horizon (H).  Can be >, <, or == the current one.
+    """
+    model = pipeline.inner_model
+    rb = model.output_patch_embedding  # ResidualBlock
+
+    old_H = model.chronos_config.prediction_length
+    if new_prediction_length == old_H:
+        logging.info("Prediction length unchanged (%d); nothing to do.", old_H)
+        return pipeline
+
+    num_quantiles = len(model.chronos_config.quantiles)
+
+    # 1) resize output_layer  (d_ff → Q · H)
+    # 2) resize residual_layer(d_model → Q · H)
+    rb.output_layer = _resize_proj(
+        rb.output_layer,
+        num_quantiles,
+        old_H,
+        new_prediction_length,
+    )
+    rb.residual_layer = _resize_proj(
+        rb.residual_layer,
+        num_quantiles,
+        old_H,
+        new_prediction_length,
+    )
+
+    # layer-norm (if enabled)
+    if getattr(rb, "use_layer_norm", False):
+        rb.layer_norm = nn.modules.normalization.T5LayerNorm(
+            num_quantiles * new_prediction_length,
+            eps=rb.layer_norm.variance_epsilon,
+        ).to(rb.layer_norm.weight.device, rb.layer_norm.weight.dtype)
+
+    # Update every place where the horizon length lives in the config
+    model.chronos_config.prediction_length = new_prediction_length
+    model.config.chronos_config["prediction_length"] = new_prediction_length
+    # Some checkpoints also duplicate it here:
+    if hasattr(model.config, "prediction_length"):
+        model.config.prediction_length = new_prediction_length
+
+    logging.info(
+        "Resized Chronos-Bolt head from %d to %d steps (%d → %d parameters each).",
+        old_H,
+        new_prediction_length,
+        num_quantiles * old_H,
+        num_quantiles * new_prediction_length,
+    )
     return pipeline
