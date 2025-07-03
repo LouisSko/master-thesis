@@ -208,9 +208,12 @@ class Chronos(AbstractPredictor):
         Frequency of the time series data. Defaults to 1 hour.
     finetuning_type : {"full", "last_layer", "LoRa"}, optional
         Type of fine-tuning to apply. Defaults to "full".
-    finetuning_adjust_pretrained_prediction_length : bool, optional
+    finetuning_adjust_pretrained_prediction_length : bool, defaults to True
         Whether the original pretrained prediction length should be overwritten.
         This involves changing the number of output neurons in case of chronos-bolt. Defaults to true.
+    finetuning_warmup_new_neurons : bool, defaults to True
+        Whether to first fine tune the model on the newely added neurons.
+        Only relevant if finetuning_adjust_pretrained_prediction_length is set to True
     finetuning_hp_search : bool, optional
         Whether to perform hyperparameter search during fine-tuning. Defaults to False.
     finetuning_hp_search_trials : int, optional
@@ -231,6 +234,7 @@ class Chronos(AbstractPredictor):
         finetuning_adjust_pretrained_prediction_length: bool = True,
         finetuning_hp_search: Optional[bool] = False,
         finetuning_hp_search_trials: Optional[int] = 10,
+        finetuning_warmup_new_neurons: bool = True,
         output_dir: Optional[Path] = Path("./models/"),
     ) -> None:
         super().__init__(lead_times, freq, output_dir)
@@ -244,6 +248,7 @@ class Chronos(AbstractPredictor):
         self.finetuning_hp_search = finetuning_hp_search
         self.finetuning_hp_search_trials = finetuning_hp_search_trials
         self.lora = False
+        self.finetuning_warmup_new_neurons = finetuning_warmup_new_neurons
 
         self.quantiles = np.arange(0.1, 1, 0.1).round(1)
         # if self.prediction_length > 64:
@@ -305,6 +310,8 @@ class Chronos(AbstractPredictor):
             logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
             pipeline = BaseChronosPipeline.from_pretrained(pretrained_model_name_or_path, device_map=self.device_map)
 
+        # pipeline = resize_chronos_bolt_output_layers(pipeline, self.prediction_length)
+
         return pipeline
 
     def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
@@ -316,116 +323,88 @@ class Chronos(AbstractPredictor):
             data_train (TimeSeriesDataFrame): Training data (not used).
             data_val (TimeSeriesDataFrame): Evaluation data (optional).
         """
+        def _build_model(
+            source: Union[str, Path],  # name or ckpt dir
+            mode: Literal["full", "last_layer", "LoRa", "new_rows"],
+        ) -> PreTrainedModel:
+            """Helper that creates a pipeline (optionally from a checkpoint) and prepares it according to `mode`"""
 
-        def _model_init_full_tuning() -> PreTrainedModel:
-            """Initialize a model where all parameters are trainable"""
+            pipe = self._pipeline_init(source)
 
-            logging.info("Initializing model for full tuning (all parameters trainable).")
-            pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+            # freeze
+            for p in pipe.inner_model.parameters():
+                p.requires_grad = False
 
-            if isinstance(pipeline, ChronosPipeline):
-                if self.finetuning_adjust_pretrained_prediction_length:
-                    logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
+            # resize head if requested (only for Bolt)
+            if isinstance(pipe, ChronosBoltPipeline) and self.finetuning_adjust_pretrained_prediction_length:
+                unfreeze_new = mode == "new_rows"
+                pipe = resize_chronos_bolt_output_layers(pipe, self.prediction_length, unfreeze_new_neurons=unfreeze_new)
 
-                    pipeline.inner_model.config.prediction_length = self.prediction_length
-                    pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
+            # unfreeze
+            if mode == "full":
+                for p in pipe.inner_model.parameters():
+                    p.requires_grad = True
 
-            elif isinstance(pipeline, ChronosBoltPipeline):
+            elif mode == "last_layer":
+                if isinstance(pipe, ChronosPipeline):
+                    for p in pipe.inner_model.lm_head.parameters():
+                        p.requires_grad = True
+                else:  # Bolt
+                    head = pipe.inner_model.output_patch_embedding
+                    for m in (head.output_layer, head.residual_layer):
+                        for p in m.parameters():
+                            p.requires_grad = True
 
-                if self.finetuning_adjust_pretrained_prediction_length:
-                    pipeline = resize_chronos_bolt_output_layers(pipeline, self.prediction_length)
+            elif mode == "new_rows":
+                # nothing extra to do – resize_chronos_bolt_output_layers already
+                # attached the gradient mask and left requires_grad=True
+                pass
 
-            print_trainable_params(pipeline.inner_model)
+            elif mode == "LoRa":
+                # attach LoRA adapters (all original params stay frozen)
+                if isinstance(pipe, ChronosPipeline):
+                    lcfg = ChronosLoraConfig(
+                        prediction_length=self.prediction_length,
+                        r=8,
+                        lora_alpha=8,
+                        lora_dropout=0.0,
+                        target_modules=["q", "k", "v"],
+                        bias="none",
+                        task_type=TaskType.SEQ_2_SEQ_LM,
+                    )
+                else:
+                    lcfg = LoraConfig(
+                        task_type=None,
+                        inference_mode=False,
+                        r=8,
+                        lora_alpha=8,
+                        lora_dropout=0.0,
+                        target_modules=["q", "k", "v"],
+                    )
+                pipe.inner_model = get_peft_model(pipe.inner_model, lcfg)
 
-            return pipeline.inner_model
-
-        def _model_init_last_layer_tuning() -> PreTrainedModel:
-            """Initialize a model where only the last layer is trainable."""
-
-            logging.info("Initializing model for last layer tuning (only last layer trainable).")
-            pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
-
-            # Freeze all parameters
-            for param in pipeline.inner_model.parameters():
-                param.requires_grad = False
-
-            if isinstance(pipeline, ChronosPipeline):
-                if self.finetuning_adjust_pretrained_prediction_length:
-                    logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
-
-                    pipeline.inner_model.config.prediction_length = self.prediction_length
-                    pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
-
-                # unfreeze the last layer
-                for param in pipeline.inner_model.lm_head.parameters():
-                    param.requires_grad = True
-
-            elif isinstance(pipeline, ChronosBoltPipeline):
-
-                if self.finetuning_adjust_pretrained_prediction_length:
-                    pipeline = resize_chronos_bolt_output_layers(pipeline, self.prediction_length)
-
-                # Unfreeze the last layer(s)
-                for param in pipeline.inner_model.output_patch_embedding.output_layer.parameters():
-                    param.requires_grad = True
-                for param in pipeline.inner_model.output_patch_embedding.residual_layer.parameters():
-                    param.requires_grad = True
-
-            print_trainable_params(pipeline.inner_model)
-
-            return pipeline.inner_model
-
-        def _model_init_lora() -> PreTrainedModel:
-            """Initialize a model with LoRA"""
-
-            if self.lora:
-                logging.error("Cannot fine-tune the model when LoRa is enabled.")
-                raise ValueError("Not supported to fine tune model when LoRa is enabled.")
-
-            logging.info("Initializing model with LoRA adapters.")
-            # Initialize the Chronos model
-            pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
-
-            # only update prediction length for chronos-t5, not for chronos-bolt.
-            if isinstance(pipeline, ChronosPipeline):
-                logging.info("Setting prediction length of chronos-t5 to %s.", self.prediction_length)
-                pipeline.inner_model.config.prediction_length = self.prediction_length
-                pipeline.inner_model.config.chronos_config["prediction_length"] = self.prediction_length
-
-                lora_config = ChronosLoraConfig(
-                    prediction_length=self.prediction_length,  # add updated prediction lenght to lora configuration
-                    r=8,
-                    lora_alpha=8,
-                    target_modules=["q", "v", "k"],
-                    lora_dropout=0.0,
-                    bias="none",
-                    task_type=TaskType.SEQ_2_SEQ_LM,
-                )
-
-            elif isinstance(pipeline, ChronosBoltPipeline):
-                # Configure LoRA
-                lora_config = LoraConfig(
-                    task_type=None,
-                    inference_mode=False,
-                    r=8,  # LoRA rank
-                    lora_alpha=8,  # Scaling factor
-                    lora_dropout=0.0,  # Dropout rate
-                    target_modules=["q", "k", "v"],  # Self Attention (inside SelfAttention and EncDecAttention)
-                )
             else:
-                raise ValueError("Pipeline is not correctly specified.")
+                raise ValueError(f"unknown mode {mode}")
 
-            logging.info("LoRa config: %s", lora_config)
-            # Apply LoRA to the base model
-            lora_model = get_peft_model(pipeline.inner_model, lora_config)
-            lora_model.print_trainable_parameters()
-            return lora_model
+            print_trainable_params(pipe.inner_model)
+            return pipe.inner_model
 
-        finetuning_options = {"full": _model_init_full_tuning, "last_layer": _model_init_last_layer_tuning, "LoRa": _model_init_lora}
+        # convenience wrappers for Trainer
+        def init_full():
+            return _build_model(self.pretrained_model_name_or_path, "full")
 
-        logging.info("Starting fine-tuning with type: %s", self.finetuning_type)
-        output_dir_fine_tuning = self.output_dir / f"finetuned-{self.finetuning_type}"
+        def init_last():
+            return _build_model(self.pretrained_model_name_or_path, "last_layer")
 
+        def init_lora():
+            return _build_model(self.pretrained_model_name_or_path, "LoRa")
+
+        def init_new_rows():
+            return _build_model(self.pretrained_model_name_or_path, "new_rows")
+
+        model_inits = {"full": init_full, "last_layer": init_last, "LoRa": init_lora}
+
+        # Ensure config.prediction_length is up-to-date for T5 (no head resize)
         if self.finetuning_adjust_pretrained_prediction_length:
             prediction_length = self.prediction_length
             self.pipeline.model.config.prediction_length = prediction_length
@@ -435,21 +414,52 @@ class Chronos(AbstractPredictor):
 
         logging.info("Prediction length will be set to %s during training.", self.prediction_length)
 
+        # 1) optional warm-up
+        warm_ckpt: Optional[Path] = None
+
+        if isinstance(self.pipeline, ChronosBoltPipeline) and self.finetuning_adjust_pretrained_prediction_length and self.finetuning_warmup_new_neurons:
+            warm_dir = self.output_dir / "warmup-new-neurons"
+            logging.info(">>> Warm-up: training only new output neurons …")
+
+            fine_tune(
+                model_init=init_new_rows,
+                data_train=data_train,
+                data_val=data_val,
+                output_dir=warm_dir,
+                hp_tuning=False,
+                context_length=self.context_length,
+                prediction_length=prediction_length,
+                tokenizer=getattr(self.pipeline, "tokenizer", None),
+                specific_train_kwargs={"learning_rate": 1e-4, "num_train_epochs": 1, "warmup_ratio": 0.1},
+            )
+            warm_ckpt = warm_dir / "fine-tuned-ckpt"
+            logging.info("Warm-up finished, best checkpoint at %s", warm_ckpt)
+
+        # 2) main fine-tune
+        final_dir = self.output_dir / f"finetuned-{self.finetuning_type}"
+        logging.info(">>> Main fine-tuning (%s) …", self.finetuning_type)
+
+        if warm_ckpt is not None:
+            model_init_main = lambda: _build_model(warm_ckpt, self.finetuning_type)
+        else:
+            model_init_main = model_inits[self.finetuning_type]
+
         fine_tune(
-            model_init=finetuning_options[self.finetuning_type],
+            model_init=model_init_main,
             data_train=data_train,
             data_val=data_val,
-            output_dir=output_dir_fine_tuning,
+            output_dir=final_dir,
             hp_tuning=self.finetuning_hp_search,
             n_trials=self.finetuning_hp_search_trials,
             context_length=self.context_length,
-            prediction_length=prediction_length,
+            prediction_length=self.prediction_length,
             tokenizer=getattr(self.pipeline, "tokenizer", None),
+            specific_train_kwargs={"num_train_epochs": 3},
         )
 
-        # Load the fine-tuned model from the best checkpoint
-        self.pipeline = self._pipeline_init(output_dir_fine_tuning / "fine-tuned-ckpt")
-        logging.info("Trained model has been automatically loaded from checkpoint.")
+        # reload final model
+        self.pipeline = self._pipeline_init(final_dir / "fine-tuned-ckpt")
+        logging.info("Two-stage fine-tuning complete – model reloaded.")
 
     def predict(
         self,
@@ -561,6 +571,7 @@ def fine_tune(
     context_length: int = 2048,
     prediction_length: int = 64,
     tokenizer: Optional["ChronosTokenizer"] = None,
+    specific_train_kwargs: Dict = {},
 ):
     """
     Fine-tune a Chronos Bolt model (or other Hugging Face PreTrainedModel) on time series data.
@@ -583,6 +594,8 @@ def fine_tune(
         Context length the model sees during training.
     prediction_length : Optional[int], default=None
         Number of timestamps the model is required to predict in the future.
+    specific_train_kwargs : Dict, default={},
+        Additional training arguments to include. Override default values
     """
 
     def create_callbacks():
@@ -621,12 +634,15 @@ def fine_tune(
 
     # add specific train args for chronos bolt
     if tokenizer is None:
-        pipeline_specific_train_args = {"label_names": [TARGET]}
-    else:
-        pipeline_specific_train_args = {}
+        specific_train_kwargs.update({"label_names": [TARGET]})
 
     # Create args for final training with best hyperparameters
-    fine_tune_trainer_kwargs = create_trainer_kwargs(pipeline_specific_train_args, path=final_training_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
+    fine_tune_trainer_kwargs = build_train_args(
+        base_path=final_training_path,
+        eval_during_ft=data_val is not None,
+        save_checkpoints=True,
+        pipeline_kwargs=specific_train_kwargs,
+    )
 
     logging.info("Training results are going to be logged in tensorboard.")
     logging.info(f"Run `tensorboard --logdir {output_dir}` in the terminal to start.")
@@ -644,7 +660,12 @@ def fine_tune(
         hp_tuning_path.mkdir(exist_ok=True, parents=True)
 
         # Args for hyperparameter tuning phase
-        hp_tuning_args = create_trainer_kwargs(path=hp_tuning_path, eval_during_fine_tune=data_val is not None, save_checkpoints=True)
+        hp_tuning_args = build_train_args(
+            base_path=hp_tuning_path,
+            eval_during_ft=data_val is not None,
+            save_checkpoints=True,
+            pipeline_kwargs=specific_train_kwargs,
+        )
 
         logging.info("Starting hyperparameter tuning with optuna (%s trials)...", n_trials)
         logging.debug(f"Hyperparameter tuning args: {hp_tuning_args}")
@@ -735,58 +756,63 @@ def hp_space_optuna(trial: Trial):
     }
 
 
-def create_trainer_kwargs(pipeline_specific_train_args, path: str = Path("./models/test/"), eval_during_fine_tune: bool = True, save_checkpoints: bool = True):
-    """Define the training arguments"""
+def build_train_args(
+    *,
+    base_path: Path,
+    save_checkpoints: bool = True,
+    eval_during_ft: bool = True,
+    pipeline_kwargs: Optional[Dict[str, Any]] = None,
+) -> TrainingArguments:
+    """
+    Construct `transformers.TrainingArguments` from defaults + pipeline_kwargs
+    """
+
+    if pipeline_kwargs is None:
+        pipeline_kwargs = {}
 
     epochs = 3
-    eval_ratio = 0.1 / epochs  # evaluate every 0.1 epochs
+    eval_ratio = 0.1 / epochs
     logging_steps = 0.05 / epochs
-    dir = "transformers_logs"
+    log_dir = base_path / "logs"
 
-    # speed up training if fp16 is available
-    fp16 = False
-    if torch.cuda.is_available():
-        capability = torch.cuda.get_device_capability()
-        if capability >= (7, 0):
-            fp16 = True
+    fp16 = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (7, 0)
 
-    # create TrainingArguments
-    fine_tune_trainer_kwargs = {
-        "output_dir": path / dir,
-        "overwrite_output_dir": False,
-        "per_device_train_batch_size": 32,
-        "per_device_eval_batch_size": 32,
-        "learning_rate": 1e-05,
-        "lr_scheduler_type": "linear",
-        "warmup_ratio": 0.0,
-        "weight_decay": 0.0,
-        "optim": "adamw_torch_fused",
-        "logging_dir": Path(path) / dir,
-        "logging_strategy": "steps",
-        "logging_steps": logging_steps,
-        "disable_tqdm": True,
-        # "max_steps": 500,
-        "num_train_epochs": epochs,
-        "gradient_accumulation_steps": 1,
-        "dataloader_num_workers": 4,
-        "tf32": False,
-        "fp16": fp16,
-        "report_to": "tensorboard",
-        "prediction_loss_only": True,
-        "save_strategy": "steps" if save_checkpoints else "no",
-        "save_steps": eval_ratio if save_checkpoints else None,
-        "save_only_model": True,
-        "save_total_limit": 5,
-        "eval_strategy": "steps" if eval_during_fine_tune else "no",
-        "eval_steps": eval_ratio if eval_during_fine_tune else None,
-        "eval_on_start": True if eval_during_fine_tune else False,
-        "load_best_model_at_end": True if eval_during_fine_tune else False,
-        "metric_for_best_model": "eval_loss",
-        "greater_is_better": False,
-        "use_cpu": False,
-    }
+    defaults = dict(
+        output_dir=base_path,
+        overwrite_output_dir=False,
+        per_device_train_batch_size=32,
+        per_device_eval_batch_size=32,
+        learning_rate=1e-5,
+        lr_scheduler_type="linear",
+        warmup_ratio=0.0,
+        weight_decay=0.0,
+        optim="adamw_torch_fused",
+        logging_dir=log_dir,
+        logging_strategy="steps",
+        logging_steps=logging_steps,
+        disable_tqdm=True,
+        num_train_epochs=epochs,
+        gradient_accumulation_steps=1,
+        dataloader_num_workers=4,
+        tf32=False,
+        fp16=fp16,
+        report_to="tensorboard",
+        prediction_loss_only=True,
+        save_strategy="steps" if save_checkpoints else "no",
+        save_steps=eval_ratio if save_checkpoints else None,
+        save_only_model=True,
+        save_total_limit=5,
+        eval_strategy="steps" if eval_during_ft else "no",
+        eval_steps=eval_ratio if eval_during_ft else None,
+        eval_on_start=eval_during_ft,
+        load_best_model_at_end=eval_during_ft,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        use_cpu=False,
+    )
 
-    return TrainingArguments(**fine_tune_trainer_kwargs, **pipeline_specific_train_args)
+    merged = {**defaults, **pipeline_kwargs}
+    return TrainingArguments(**merged)
 
 
 def check_model_parameters(chronos: Chronos, model_name: str = "amazon/chronos-bolt-tiny"):
@@ -812,12 +838,7 @@ def print_trainable_params(model: PreTrainedModel) -> None:
     print(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
 
 
-def _resize_proj(
-    old_linear: nn.Linear,
-    num_quantiles: int,
-    old_H: int,
-    new_H: int,
-) -> nn.Linear:
+def _resize_proj(old_linear: nn.Linear, num_quantiles: int, old_H: int, new_H: int, unfreeze_new_neurons: bool) -> nn.Linear:
     """
     Resize a projection that is laid out (Q · H, in_dim) in row-major order.
 
@@ -857,10 +878,27 @@ def _resize_proj(
     if has_bias:
         new_linear.bias.data.copy_(new_b.reshape(num_quantiles * new_H))
 
+    # gradient mask: only horizons ≥ old_H
+    if unfreeze_new_neurons and new_H > old_H:
+        # shape (Q, H) -> True for newly-added horizons
+        mask_2d = torch.zeros(num_quantiles, new_H, dtype=dtype, device=device)
+        mask_2d[:, old_H:] = 1.0
+        flat_mask = mask_2d.reshape(-1)  # (Q·H,)
+
+        def mask_grad_weight(grad):
+            return grad * flat_mask.unsqueeze(1)  # broadcast to (Q·H, in_dim)
+
+        def mask_grad_bias(grad):
+            return grad * flat_mask
+
+        new_linear.weight.register_hook(mask_grad_weight)
+        if has_bias:
+            new_linear.bias.register_hook(mask_grad_bias)
+
     return new_linear
 
 
-def resize_chronos_bolt_output_layers(pipeline, new_prediction_length: int):
+def resize_chronos_bolt_output_layers(pipeline, new_prediction_length: int, unfreeze_new_neurons: bool = False):
     """
     In-place resize of Chronos-Bolt’s output head so that the first
     `old_prediction_length` horizons stay identical.
@@ -870,6 +908,8 @@ def resize_chronos_bolt_output_layers(pipeline, new_prediction_length: int):
     pipeline : ChronosBoltPipeline
     new_prediction_length : int
         Desired forecast horizon (H).  Can be >, <, or == the current one.
+    unfreeze_new_neurons : bool
+        Whether to explicitly unfreeze the weights and biases for the added neurons, Defaults to False.
     """
     model = pipeline.inner_model
     rb = model.output_patch_embedding  # ResidualBlock
@@ -888,12 +928,14 @@ def resize_chronos_bolt_output_layers(pipeline, new_prediction_length: int):
         num_quantiles,
         old_H,
         new_prediction_length,
+        unfreeze_new_neurons,
     )
     rb.residual_layer = _resize_proj(
         rb.residual_layer,
         num_quantiles,
         old_H,
         new_prediction_length,
+        unfreeze_new_neurons,
     )
 
     # layer-norm (if enabled)
