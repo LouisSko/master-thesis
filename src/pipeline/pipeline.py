@@ -402,6 +402,8 @@ class ForecastingPipeline(AbstractPipeline):
         ----------
         calibration_data : Union[TimeSeriesDataFrame, TabularDataFrame]
             The calibration data. Used to fit the postprocessor.
+        previous_context_data : Optional[TimeSeriesDataFrame], default=None
+            Optional preceding data to provide initial context before the evaluation period. This is used by some predictors to extend the context length.
         """
         info = {}
 
