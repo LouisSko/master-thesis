@@ -16,6 +16,7 @@ import joblib
 import logging
 import os
 from tqdm import tqdm
+from numpy.typing import NDArray
 
 DIR_BACKTESTS = "backtest"
 DIR_MODELS = "models"
@@ -121,6 +122,7 @@ class TimeSeriesForecast(BaseModel):
     data: TimeSeriesDataFrame
     quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
     freq: Union[pd.Timedelta, pd.DateOffset]
+    forecast_mask: NDArray[np.bool_]
 
     class Config:
         arbitrary_types_allowed = True
@@ -149,7 +151,7 @@ class TimeSeriesForecast(BaseModel):
         """
 
         horizon_fc = self.get_lead_time_forecast(forecast_horizon)
-        result = pd.DataFrame(horizon_fc.predictions, index=self.data.index, columns=self.quantiles)
+        result = pd.DataFrame(horizon_fc.predictions, index=self.data[self.forecast_mask].index, columns=self.quantiles)
 
         # add prediction date information
         result["prediction_date"] = result.index.get_level_values("timestamp") + self.freq * horizon_fc.lead_time
@@ -160,6 +162,10 @@ class TimeSeriesForecast(BaseModel):
 
         # add the target information.
         merged = result_reset.merge(data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"])
+
+        # add actual values
+        data_reset = data_reset.rename(columns={"target": "current"})
+        merged = merged.merge(data_reset, on=["item_id", "timestamp"])
 
         # if merged[TARGET].isna().all():
         #     raise ValueError("target column is nan. Frequency (freq) might not be specified correctly.")
@@ -316,7 +322,53 @@ class TimeSeriesForecast(BaseModel):
             - Future true values
             - Predicted quantiles (median and shaded interval)
         """
-        lead_times = self.get_lead_times()
+
+        def _add_prediction_intervals(
+            ax: plt.Axes,
+            selected_predictions: pd.DataFrame,
+            intervals: list[tuple[float, float]],
+            base_color: str = "orange",
+            lw_outer: float = 0.5,
+            lw_inner: float = 0.5,
+        ) -> None:
+            """
+            Shade multiple predictive intervals on an existing axes *and*
+            draw boundary lines around each band.
+
+            Parameters
+            ----------
+            ax
+                Matplotlib axes to draw on.
+            selected_predictions
+                DataFrame with quantile columns.
+            intervals
+                List of (lower_q, upper_q) tuples, drawn in the given order.
+            base_color
+                A matplotlib-compatible color for both fill and lines.
+            lw_outer / lw_inner
+                Line-widths for the widest and narrowest bands, interpolated in-between.
+            """
+            n = len(intervals)
+            # Draw widest interval first so narrower ones appear on top
+            for i, (ql, qu) in enumerate(intervals):
+                if ql not in selected_predictions or qu not in selected_predictions:
+                    continue  # silently skip if quantiles are missing
+                alpha = 0.2 + 0.15 * (n - 1 - i)
+                print(alpha)
+                ax.fill_between(
+                    selected_predictions.index,
+                    selected_predictions[ql],
+                    selected_predictions[qu],
+                    color=base_color,
+                    alpha=alpha,
+                    label=f"{int(qu*100)}–{int(ql*100)} % interval",
+                )
+
+                # line-width interpolates from outer- to inner-band values
+                lw = lw_outer + (lw_inner - lw_outer) * (n - 1 - i) / (n - 1)
+                ax.plot(selected_predictions.index, selected_predictions[ql], color=base_color, alpha=alpha + 0.1, linewidth=lw)
+
+                ax.plot(selected_predictions.index, selected_predictions[qu], color=base_color, alpha=alpha + 0.1, linewidth=lw)
 
         timestamps = self.data.index.get_level_values("timestamp")
 
@@ -329,19 +381,28 @@ class TimeSeriesForecast(BaseModel):
         else:
             start_idx = len(self.data) - 1
 
+        # get the origin timestamp
+        start_date = timestamps[start_idx]
+        forecasted_ts = timestamps[self.forecast_mask]
+        start_idx_preds = forecasted_ts.get_indexer([start_date], method="backfill")[0]
+
+        # Collect prediction tensor
         preds = torch.stack([hf.predictions for hf in self.lead_time_forecasts.values()], dim=1)  # shape: [num_samples, num_lead_times, num_quantiles]
 
+        # Past context
         historic_start_idx = max(0, start_idx - context_length) if start_idx >= 0 else start_idx - context_length
+        past = self.data.iloc[historic_start_idx:start_idx].reset_index(level=0, drop=True)
 
-        past = self.data[historic_start_idx:start_idx].reset_index(level=0, drop=True)
-        future = self.data[start_idx : start_idx + max(lead_times)].reset_index(level=0, drop=True)
+        # Future truth Horizon: up to max lead-time
+        max_lt = max(self.get_lead_times())
+        future = self.data.iloc[start_idx : start_idx + max_lt].reset_index(level=0, drop=True)
 
-        current_date = timestamps[start_idx - 1]
-        prediction_dates = [current_date + pd.tseries.frequencies.to_offset(self.freq) * lt for lt in lead_times]
+        # Align forecast tensor with corresponding timestamp index
+        freq_offset = pd.tseries.frequencies.to_offset(self.freq)
+        prediction_dates = [start_date + freq_offset * lt for lt in self.get_lead_times()]
+        selected_predictions = pd.DataFrame(data=preds[start_idx_preds].numpy(), columns=self.quantiles, index=prediction_dates)  # shape: [num_lead_times, num_quantiles]
 
-        selected_predictions = pd.DataFrame(data=preds[start_idx].numpy(), columns=self.quantiles, index=prediction_dates)  # shape: [num_lead_times, num_quantiles]
-
-        plt.figure(figsize=(12, 4))
+        plt.figure(figsize=(12, 6))
 
         plt.plot(past.index, past.values, label="Past", color="black", linestyle="--")
         plt.plot(future.index, future.values, label="Future (true)", color="blue")
@@ -349,20 +410,13 @@ class TimeSeriesForecast(BaseModel):
         if 0.5 in selected_predictions.columns:
             plt.plot(selected_predictions.index, selected_predictions[0.5].values, label="Prediction (median)", color="red")
 
-        if q_lower in selected_predictions.columns and q_upper in selected_predictions.columns:
-            plt.fill_between(
-                selected_predictions.index,
-                selected_predictions[q_lower],
-                selected_predictions[q_upper],
-                color="orange",
-                alpha=0.3,
-                label=f"{int(q_upper * 100)}–{int(q_lower * 100)}% interval",
-            )
+        intervals = [(0.4, 0.6), (0.3, 0.7), (0.2, 0.8), (0.1, 0.9)]
+        _add_prediction_intervals(plt.gca(), selected_predictions, intervals, base_color="orange")
 
-        plt.axvline(current_date, color="gray", linestyle=":", label="Prediction start")
+        plt.axvline(start_date, color="gray", linestyle=":", label="Prediction start")
         plt.xlabel("Date")
         plt.ylabel("Value")
-        plt.title(f"Forecast for item_id={self.item_id} from {current_date}")
+        plt.title(f"Forecast for item_id={self.item_id} from {start_date}")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
