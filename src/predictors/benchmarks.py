@@ -205,7 +205,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
 
         # 2. Per-item loop
-        for item_id in data.item_ids:
+        for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
             item_df = data.loc[[item_id]]
             item_hist = history[item_id]  # shortcut
             timestamps = item_df.index.get_level_values("timestamp")
@@ -372,6 +372,111 @@ class RollingQuantilePredictor(AbstractPredictor):
         logging.info("RollingQuantilePredictor: no fit step; predict() will build or update history.")
 
     def predict(
+        self,
+        data: TimeSeriesDataFrame,
+        previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        rolling: bool = False,
+        stride: int = 1,
+    ) -> ForecastCollection:
+        """
+        Generate forecasts using rolling quantiles over past target values.
+
+        Forecast quantiles for each lead time using rolling history of target values.
+
+        Parameters
+        ----------
+        data : TimeSeriesDataFrame
+            Time series data used to update history and for which forecasts are required.
+        previous_context_data : Optional[TimeSeriesDataFrame], optional
+            Contextual data used to pre-fill history before forecasting.
+        rolling : bool, optional
+            Whether to perform rolling forecasts at each stride.
+        stride : int, optional
+            Number of steps to move the evaluation window each time.
+
+        Returns
+        -------
+        ForecastCollection
+            Forecasted quantiles for each item and lead time.
+        """
+        if stride < 1:
+            raise ValueError("stride must be a positive integer (≥1)")
+
+        if previous_context_data is not None:
+            logging.info("Building history from provided context_data.")
+            history = self._build_history_from_context(previous_context_data)
+        else:
+            logging.info("Initializing empty history.")
+            history = self._initialize_history(data.item_ids)
+
+        ts_forecast: Dict[int, TimeSeriesForecast] = {}
+        percentiles = (np.array(self.quantiles) * 100).astype(int)
+
+        for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
+            data_sub = data.loc[[item_id]]
+            item_history = history[item_id]
+            timestamps = data_sub.index.get_level_values("timestamp")
+            target_vals = data_sub["target"].values
+
+            # Decide which rows we forecast at
+            if rolling:
+                eval_indices = list(range(0, len(timestamps), stride))
+            else:
+                eval_indices = [len(timestamps) - 1]
+
+            forecast_mask = np.zeros(len(timestamps), dtype=bool)
+            forecast_mask[eval_indices] = True
+
+            forecasts_per_lt: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
+
+            # Use a cache to avoid recomputing percentiles unnecessarily
+            cached_q_hat = np.full(len(self.quantiles), np.nan)
+            dirty = False
+
+            for idx, (_, y) in enumerate(tqdm(zip(timestamps, target_vals), total=len(timestamps), desc=f"RQP: generate forecasts for item_id {item_id}")):
+                # Update history
+                if not np.isnan(y):
+                    item_history.append(y)
+                    dirty = True
+
+                # If not forecasting at this row, continue
+                if idx not in eval_indices:
+                    continue
+
+                # Refresh cache if history was updated
+                if dirty:
+                    arr = np.asarray(item_history)
+                    if arr.size == 0:
+                        cached_q_hat = np.full(len(self.quantiles), np.nan)
+                    else:
+                        cached_q_hat = np.percentile(arr, percentiles)
+                    dirty = False
+
+                # Append the same forecast for all lead times (trivial persistence)
+                for lt in self.lead_times:
+                    forecasts_per_lt[lt].append(cached_q_hat)
+
+            # Wrap forecasts per lead time
+            horizon_dict = {}
+            for lt in self.lead_times:
+                preds = np.stack(forecasts_per_lt[lt]) if forecasts_per_lt[lt] else np.empty((0, len(self.quantiles)))
+                horizon_dict[lt] = HorizonForecast(
+                    lead_time=lt,
+                    predictions=torch.tensor(preds, dtype=torch.float32),
+                )
+
+            ts_forecast[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=horizon_dict,
+                data=data_sub.copy(),
+                freq=self.freq,
+                quantiles=self.quantiles,
+                forecast_mask=forecast_mask,
+            )
+
+        return ForecastCollection(item_ids=ts_forecast)
+
+    def predict2(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
