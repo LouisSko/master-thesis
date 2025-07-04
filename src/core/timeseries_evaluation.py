@@ -188,7 +188,8 @@ class TimeSeriesForecast(BaseModel):
         Returns:
             float: The mean CRPS score across all samples.
         """
-        data = self.to_dataframe(forecast_horizon)[: -max(self.get_lead_times())]  # get rid of incomplete predictions
+
+        data = self.to_dataframe(forecast_horizon)
         quantile_predictions = data[self.quantiles].to_numpy()
         target = data["target"].to_numpy()
 
@@ -354,7 +355,7 @@ class TimeSeriesForecast(BaseModel):
                 if ql not in selected_predictions or qu not in selected_predictions:
                     continue  # silently skip if quantiles are missing
                 alpha = 0.2 + 0.15 * (n - 1 - i)
-                print(alpha)
+
                 ax.fill_between(
                     selected_predictions.index,
                     selected_predictions[ql],
@@ -377,7 +378,12 @@ class TimeSeriesForecast(BaseModel):
                 raise ValueError(f"Timestamp {start} not found in data index.")
             start_idx = timestamps.get_loc(start)
         elif isinstance(start, int):
-            start_idx = start % len(self.data)  # handle negative indexing
+            if start < 0:
+                start_idx = start % len(self.data)  # handle negative indexing
+            elif start > len(self.data):
+                start_idx = len(self.data) - 1
+            else:
+                start_idx = start - 1
         else:
             start_idx = len(self.data) - 1
 
