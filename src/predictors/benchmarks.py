@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional, Union, Deque
 import torch
 from tqdm.auto import tqdm
 from src.core.base import AbstractPredictor
-from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TARGET
 import logging
 from pydantic import Field
 from pathlib import Path
@@ -476,72 +476,6 @@ class RollingQuantilePredictor(AbstractPredictor):
 
         return ForecastCollection(item_ids=ts_forecast)
 
-    def predict2(
-        self,
-        data: TimeSeriesDataFrame,
-        previous_context_data: Optional[TimeSeriesDataFrame] = None,
-        predict_only_last_timestep: bool = False,
-    ) -> ForecastCollection:
-        """
-        Generate forecasts using rolling quantiles over past target values.
-
-        Forecast quantiles for each lead time using rolling history of target values.
-
-        Parameters
-        ----------
-        data : TimeSeriesDataFrame
-            Time series data used to update history and for which forecasts are required.
-        previous_context_data : Optional[TimeSeriesDataFrame], optional
-            Contextual data used to pre-fill history before forecasting.
-        predict_only_last_timestep : bool, optional
-            Not used in this implementation.
-
-        Returns
-        -------
-        ForecastCollection
-            Forecasted quantiles for each item and lead time.
-        """
-        if previous_context_data is not None:
-            logging.info("Building history from provided context_data.")
-            history = self._build_history_from_context(previous_context_data)
-        else:
-            logging.info("Initializing empty history.")
-            history = self._initialize_history(data.item_ids)
-
-        ts_forecast: Dict[int, TimeSeriesForecast] = {}
-        percentiles = (np.array(self.quantiles) * 100).astype(int)
-
-        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
-            data_sub = data.loc[[item_id]]
-            forecasts = []
-            item_history = history[item_id]
-
-            timestamps = data_sub.index.get_level_values("timestamp")
-            target_vals = data_sub["target"].values
-
-            for timestamp, target_val in zip(timestamps, target_vals):
-                if not np.isnan(target_val):
-                    item_history.append(target_val)
-
-                arr = np.array(history.get(item_id, []))
-                if arr.size == 0:
-                    forecasts.append(np.full(len(self.quantiles), np.nan))
-                else:
-                    forecasts.append(np.percentile(arr, percentiles))
-
-            forecasts = np.stack(forecasts)
-            lt_forcast: Dict[int, HorizonForecast] = {}
-
-            for lead_time in self.lead_times:
-                lt_forcast[lead_time] = HorizonForecast(
-                    lead_time=lead_time,
-                    predictions=torch.tensor(forecasts),  # same trivial forecast for each lead time
-                )
-
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
-
-        return ForecastCollection(item_ids=ts_forecast)
-
 
 class RandomWalkBenchmark(AbstractPredictor):
     """
@@ -594,7 +528,10 @@ class RandomWalkBenchmark(AbstractPredictor):
         """
 
         for id in data_train.item_ids:
-            data_sub = data_train.loc[[id]]["target"].values
+            data_sub = data_train.loc[[id]][TARGET].values
+
+            if any(data_sub <= 0):
+                raise ValueError("This model can only be used with strictly positive time series.")
 
             y = np.log(data_sub)
             y_diff = np.diff(y)
@@ -607,7 +544,8 @@ class RandomWalkBenchmark(AbstractPredictor):
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
-        predict_only_last_timestep: bool = False,
+        rolling: bool = False,
+        stride: int = 1,
     ) -> ForecastCollection:
         """
         Generate quantile forecasts using a Gaussian random walk in log space.
@@ -622,8 +560,10 @@ class RandomWalkBenchmark(AbstractPredictor):
             Time series data used to update history and for which forecasts are required.
         previous_context_data : Optional[TimeSeriesDataFrame], optional
             Contextual data used to pre-fill history before forecasting. Not used in this implementation.
-        predict_only_last_timestep : bool, optional
-            Whether to forecast only the final time step. Not used in this implementation.
+        rolling : bool, optional
+            Whether to forecast repeatedly in a rolling fashion.
+        stride : int, optional
+            Step size for rolling forecasts.
 
         Returns
         -------
@@ -636,7 +576,7 @@ class RandomWalkBenchmark(AbstractPredictor):
         h_steps = np.array(self.lead_times).reshape(-1, 1)
         z = stats.norm.ppf(np.array(self.quantiles)).reshape(1, -1)
 
-        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
+        for item_id in tqdm(data.item_ids, desc="Predicting using Random Walk Benchmark"):
             data_sub = data.loc[[item_id]]
 
             timestamps = data_sub.index.get_level_values("timestamp")
@@ -644,18 +584,44 @@ class RandomWalkBenchmark(AbstractPredictor):
 
             q_fc_matrix = np.sqrt(h_steps) @ z * self.sd_yd[item_id]
 
+            # Decide at which rows to forecast
+            if rolling:
+                eval_indices = list(range(0, len(timestamps), stride))
+            else:
+                eval_indices = [len(timestamps) - 1]
+
+            forecast_mask = np.zeros(len(timestamps), dtype=bool)
+            forecast_mask[eval_indices] = True
+
             q_fc_y = []
 
-            for timestamp, log_y in zip(timestamps, log_targets):
-                q_fc_y.append(q_fc_matrix + log_y)
+            for idx, (timestamp, log_y) in enumerate(zip(timestamps, log_targets)):
+
+                if idx not in eval_indices:
+                    continue
+
+                if np.isnan(log_y):
+                    q_fc_y.append(np.full_like(q_fc_matrix, np.nan))
+                else:
+                    q_fc_y.append(q_fc_matrix + log_y)
 
             q_fc_y = np.exp(np.stack(q_fc_y, axis=0))
 
             lt_forcast: Dict[int, HorizonForecast] = {}
 
             for i, lead_time in enumerate(self.lead_times):
-                lt_forcast[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(q_fc_y[:, i, :]))
+                lt_forcast[lead_time] = HorizonForecast(
+                    lead_time=lead_time,
+                    predictions=torch.tensor(q_fc_y[:, i, :]),
+                )
 
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
+            ts_forecast[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=lt_forcast,
+                data=data_sub.copy(),
+                freq=self.freq,
+                quantiles=self.quantiles,
+                forecast_mask=forecast_mask,
+            )
 
         return ForecastCollection(item_ids=ts_forecast)
