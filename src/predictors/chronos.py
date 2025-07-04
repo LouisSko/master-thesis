@@ -1,4 +1,4 @@
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import torch
 from chronos import BaseChronosPipeline
 from chronos.chronos_bolt import ChronosBoltPipeline
