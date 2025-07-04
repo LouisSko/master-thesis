@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any, List, Optional, Union, Deque
 import torch
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from src.core.base import AbstractPredictor
-from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TARGET
 import logging
 from pydantic import Field
 from pathlib import Path
 from pandas.tseries.frequencies import to_offset
 from collections import deque
 from scipy import stats
+import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -67,20 +68,19 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         - Hourly: by weekday and hour.
         - Minute-level: by weekday, hour, and time slot.
         """
-        fstr = self.offset.freqstr  # e.g. "1H","B","15T","D"
-        code = fstr[-1]
+        fstr = self.offset.rule_code  # e.g. "1H","B","15T","D"
 
-        if code.upper() in ("D", "B"):
+        if fstr.upper() in ("D", "B"):
             # daily or business‐day: bucket by weekday only
             self._make_key = lambda ts: str(ts.weekday())
             self.bucket_keys = [str(d) for d in range(7)]
 
-        elif code.upper() == "H":
+        elif fstr.upper() == "H":
             # hourly: bucket by weekday_hour
             self._make_key = lambda ts: f"{ts.weekday()}_{ts.hour}"
             self.bucket_keys = [f"{d}_{h}" for d in range(7) for h in range(24)]
 
-        elif code.upper() == "T":
+        elif (fstr.upper() == "T") or (fstr.upper() == "MIN"):
             # minute frequency, e.g. 15T, 5T, etc.
             n = self.offset.n  # number of minutes
 
@@ -94,7 +94,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
             self.bucket_keys = [f"{d}_{h}_{slot}" for d in range(7) for h in range(24) for slot in range(slots_per_hour)]
 
         else:
-            raise ValueError(f"Unsupported frequency '{fstr}' for NNPredictor")
+            raise ValueError(f"Unsupported frequency '{fstr}' for RollingSeasonalQuantilePredictor")
 
     def _initialize_history(self, item_ids: List[Any]) -> Dict[int, Dict[int, Deque[float]]]:
         """
@@ -153,72 +153,135 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
-        predict_only_last_timestep: bool = False,
+        rolling: bool = False,
+        stride: int = 1,
     ) -> ForecastCollection:
         """
-        Generate forecasts using rolling quantiles over past target values.
+        Generate seasonal-quantile forecasts.
 
-        Forecast quantiles for each lead time using seasonal rolling history of target values.
+        Two operating modes
+        --------------------
+        1. **Single-shot (rolling=False)**
+           *Forecast once* from the most recent observation in ``data``
+           (all earlier rows are used solely to update the history).
 
-        Update historical buckets with new target values and compute forecasts.
-
-        For each (item_id, timestamp), the method:
-        - Updates the appropriate bucket with the latest observation.
-        - Computes quantile forecasts for each lead time based on the future timestamp's bucket.
+        2. **Rolling backtest (rolling=True)**
+           Forecast repeatedly as a sliding window moves through the series.
+           The window is advanced by ``stride`` rows (≥ 1).
+           *Example:* with ``stride=3`` you obtain forecasts at rows
+           0, 3, 6, … (per item).
 
         Parameters
         ----------
-        data : TimeSeriesDataFrame
-            Time series data used to update history and for which forecasts are required.
-        previous_context_data : Optional[TimeSeriesDataFrame], optional
-            Contextual data used to pre-fill history before forecasting.
-        predict_only_last_timestep : bool, optional
-            Not used in this implementation.
+        data
+            Time-stamped target values for each item.  They both *update*
+            the in-memory history and (depending on ``rolling`` / ``stride``)
+            serve as forecast start points.
+        previous_context_data
+            Optional context to *pre-seed* the history **before** processing
+            ``data``.
+        rolling
+            If ``True`` → rolling backtest.  If ``False`` → single-shot.
+        stride
+            Positive integer ≥ 1.  Ignored when ``rolling=False``.
 
         Returns
         -------
         ForecastCollection
-            Forecasted quantiles for each item and lead time.
+            Nested structure  ``item_id → lead_time → HorizonForecast``.
         """
+        if stride < 1:
+            raise ValueError("stride must be a positive integer (≥1)")
+
+        # 1. Initialise / pre-seed bucket history
         if previous_context_data is not None:
-            logging.info("Building history from provided context_data.")
+            logging.info("Building history from provided context data.")
             history = self._build_history_from_context(previous_context_data)
         else:
-            logging.info("Initializing empty history.")
+            logging.info("Initialising empty history.")
             history = self._initialize_history(data.item_ids)
 
-        ts_forecast: Dict[int, TimeSeriesForecast] = {}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
+        ts_forecast: Dict[int, TimeSeriesForecast] = {}
 
-        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
-            data_sub = data.loc[[item_id]]
-            item_history = history[item_id]
-            forecasts = {lt: [] for lt in self.lead_times}
+        # 2. Per-item loop
+        for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
+            item_df = data.loc[[item_id]]
+            item_hist = history[item_id]  # shortcut
+            timestamps = item_df.index.get_level_values("timestamp")
+            target_vals = item_df["target"].values
 
-            timestamps = data_sub.index.get_level_values("timestamp")
-            target_vals = data_sub["target"].values
+            # --- cache: bucket_key -> q_hat vector ---------------------------------
+            bucket_q_cache: dict[str, np.ndarray] = {
+                key: np.percentile(np.asarray(vals), percentiles) if vals else np.full(len(self.quantiles), np.nan) for key, vals in item_hist.items()
+            }
+            dirty: set[str] = set()  # buckets whose history we just ch
 
-            for timestamp, target_val in zip(timestamps, target_vals):
-                if not np.isnan(target_val):
-                    key_now = self._make_key(timestamp)
-                    item_history[key_now].append(target_val)
+            # Decide at which row indices we will actually issue a forecast
+            if rolling:
+                eval_indices = list(range(0, len(timestamps), stride))
 
-                for lead_time in self.lead_times:
-                    pred_timestamp = timestamp + self.offset * lead_time
-                    key_pred = self._make_key(pred_timestamp)
-                    arr = np.array(item_history.get(key_pred, []))
-                    if arr.size == 0:
-                        forecasts[lead_time].append(np.full(len(self.quantiles), np.nan))
-                    else:
-                        forecasts[lead_time].append(np.percentile(arr, percentiles))
+            else:  # single-shot
+                eval_indices = [len(timestamps) - 1]
 
-            lt_forcast: Dict[int, HorizonForecast] = {}
-            for lead_time in self.lead_times:
-                lt_forcast[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(np.stack(forecasts[lead_time])))
+            forecast_mask = np.zeros(len(timestamps), dtype=bool)
+            forecast_mask[eval_indices] = True
 
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
+            forecasts_per_lt: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
+
+            # 2a. Single pass over the rows: update history, optionally forecast
+            for idx, (ts, y) in enumerate(tqdm(zip(timestamps, target_vals), total=len(timestamps), desc=f"RSQP: generate forecasts for item_id {item_id}")):
+                # Update history with *current* observation (if not NaN)
+                if not np.isnan(y):
+                    key_now = self._make_key(ts)
+                    item_hist[key_now].append(y)
+                    dirty.add(key_now)
+
+                # Skip forecasting if this row is not an evaluation point
+                if idx not in eval_indices:
+                    continue
+
+                # 3) refresh the cache only for buckets that changed
+                for key in dirty:
+                    vals = np.asarray(item_hist[key])
+                    bucket_q_cache[key] = np.percentile(vals, percentiles) if vals.size else np.full(len(self.quantiles), np.nan)
+                dirty.clear()
+
+                # 4) fetch forecasts for all lead-times
+                for lt in self.lead_times:
+                    future_key = self._make_key(ts + self.offset * lt)
+                    q_hat = bucket_q_cache.get(future_key, np.full(len(self.quantiles), np.nan))  # unseen bucket
+                    forecasts_per_lt[lt].append(q_hat)
+
+            # 2b. Wrap forecasts for this item in HorizonForecast containers
+            horizon_dict: Dict[int, HorizonForecast] = {}
+            for lt in self.lead_times:
+                preds = np.stack(forecasts_per_lt[lt]) if forecasts_per_lt[lt] else np.empty((0, len(self.quantiles)))  # shape [n_eval, n_q]
+                horizon_dict[lt] = HorizonForecast(
+                    lead_time=lt,
+                    predictions=torch.tensor(preds, dtype=torch.float32),
+                )
+
+            ts_forecast[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=horizon_dict,
+                data=item_df.copy(),
+                freq=self.freq,
+                quantiles=self.quantiles,
+                forecast_mask=forecast_mask,
+            )
 
         return ForecastCollection(item_ids=ts_forecast)
+
+    def _fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+    ) -> None:
+        """
+        No fitting required. This predictor uses only historical patterns at predict time.
+        """
+        logging.info("RollingSeasonalQuantilePredictor: No fit step; provide data in predict() function.")
 
 
 class RollingQuantilePredictor(AbstractPredictor):
@@ -312,7 +375,8 @@ class RollingQuantilePredictor(AbstractPredictor):
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
-        predict_only_last_timestep: bool = False,
+        rolling: bool = False,
+        stride: int = 1,
     ) -> ForecastCollection:
         """
         Generate forecasts using rolling quantiles over past target values.
@@ -325,14 +389,19 @@ class RollingQuantilePredictor(AbstractPredictor):
             Time series data used to update history and for which forecasts are required.
         previous_context_data : Optional[TimeSeriesDataFrame], optional
             Contextual data used to pre-fill history before forecasting.
-        predict_only_last_timestep : bool, optional
-            Not used in this implementation.
+        rolling : bool, optional
+            Whether to perform rolling forecasts at each stride.
+        stride : int, optional
+            Number of steps to move the evaluation window each time.
 
         Returns
         -------
         ForecastCollection
             Forecasted quantiles for each item and lead time.
         """
+        if stride < 1:
+            raise ValueError("stride must be a positive integer (≥1)")
+
         if previous_context_data is not None:
             logging.info("Building history from provided context_data.")
             history = self._build_history_from_context(previous_context_data)
@@ -343,34 +412,67 @@ class RollingQuantilePredictor(AbstractPredictor):
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
-        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
+        for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
             data_sub = data.loc[[item_id]]
-            forecasts = []
             item_history = history[item_id]
-
             timestamps = data_sub.index.get_level_values("timestamp")
             target_vals = data_sub["target"].values
 
-            for timestamp, target_val in zip(timestamps, target_vals):
-                if not np.isnan(target_val):
-                    item_history.append(target_val)
+            # Decide which rows we forecast at
+            if rolling:
+                eval_indices = list(range(0, len(timestamps), stride))
+            else:
+                eval_indices = [len(timestamps) - 1]
 
-                arr = np.array(history.get(item_id, []))
-                if arr.size == 0:
-                    forecasts.append(np.full(len(self.quantiles), np.nan))
-                else:
-                    forecasts.append(np.percentile(arr, percentiles))
+            forecast_mask = np.zeros(len(timestamps), dtype=bool)
+            forecast_mask[eval_indices] = True
 
-            forecasts = np.stack(forecasts)
-            lt_forcast: Dict[int, HorizonForecast] = {}
+            forecasts_per_lt: Dict[int, List[np.ndarray]] = {lt: [] for lt in self.lead_times}
 
-            for lead_time in self.lead_times:
-                lt_forcast[lead_time] = HorizonForecast(
-                    lead_time=lead_time,
-                    predictions=torch.tensor(forecasts),  # same trivial forecast for each lead time
+            # Use a cache to avoid recomputing percentiles unnecessarily
+            cached_q_hat = np.full(len(self.quantiles), np.nan)
+            dirty = False
+
+            for idx, (_, y) in enumerate(tqdm(zip(timestamps, target_vals), total=len(timestamps), desc=f"RQP: generate forecasts for item_id {item_id}")):
+                # Update history
+                if not np.isnan(y):
+                    item_history.append(y)
+                    dirty = True
+
+                # If not forecasting at this row, continue
+                if idx not in eval_indices:
+                    continue
+
+                # Refresh cache if history was updated
+                if dirty:
+                    arr = np.asarray(item_history)
+                    if arr.size == 0:
+                        cached_q_hat = np.full(len(self.quantiles), np.nan)
+                    else:
+                        cached_q_hat = np.percentile(arr, percentiles)
+                    dirty = False
+
+                # Append the same forecast for all lead times (trivial persistence)
+                for lt in self.lead_times:
+                    forecasts_per_lt[lt].append(cached_q_hat)
+
+            # Wrap forecasts per lead time
+            horizon_dict = {}
+            for lt in self.lead_times:
+                preds = np.stack(forecasts_per_lt[lt]) if forecasts_per_lt[lt] else np.empty((0, len(self.quantiles)))
+                horizon_dict[lt] = HorizonForecast(
+                    lead_time=lt,
+                    predictions=torch.tensor(preds, dtype=torch.float32),
                 )
 
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
+            ts_forecast[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=horizon_dict,
+                data=data_sub.copy(),
+                freq=self.freq,
+                quantiles=self.quantiles,
+                forecast_mask=forecast_mask,
+            )
 
         return ForecastCollection(item_ids=ts_forecast)
 
@@ -426,7 +528,10 @@ class RandomWalkBenchmark(AbstractPredictor):
         """
 
         for id in data_train.item_ids:
-            data_sub = data_train.loc[[id]]["target"].values
+            data_sub = data_train.loc[[id]][TARGET].values
+
+            if any(data_sub <= 0):
+                raise ValueError("This model can only be used with strictly positive time series.")
 
             y = np.log(data_sub)
             y_diff = np.diff(y)
@@ -439,7 +544,8 @@ class RandomWalkBenchmark(AbstractPredictor):
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
-        predict_only_last_timestep: bool = False,
+        rolling: bool = False,
+        stride: int = 1,
     ) -> ForecastCollection:
         """
         Generate quantile forecasts using a Gaussian random walk in log space.
@@ -454,8 +560,10 @@ class RandomWalkBenchmark(AbstractPredictor):
             Time series data used to update history and for which forecasts are required.
         previous_context_data : Optional[TimeSeriesDataFrame], optional
             Contextual data used to pre-fill history before forecasting. Not used in this implementation.
-        predict_only_last_timestep : bool, optional
-            Whether to forecast only the final time step. Not used in this implementation.
+        rolling : bool, optional
+            Whether to forecast repeatedly in a rolling fashion.
+        stride : int, optional
+            Step size for rolling forecasts.
 
         Returns
         -------
@@ -468,7 +576,7 @@ class RandomWalkBenchmark(AbstractPredictor):
         h_steps = np.array(self.lead_times).reshape(-1, 1)
         z = stats.norm.ppf(np.array(self.quantiles)).reshape(1, -1)
 
-        for item_id in tqdm(data.item_ids, desc="Predicting using Rolling Window Benchmark"):
+        for item_id in tqdm(data.item_ids, desc="Predicting using Random Walk Benchmark"):
             data_sub = data.loc[[item_id]]
 
             timestamps = data_sub.index.get_level_values("timestamp")
@@ -476,18 +584,44 @@ class RandomWalkBenchmark(AbstractPredictor):
 
             q_fc_matrix = np.sqrt(h_steps) @ z * self.sd_yd[item_id]
 
+            # Decide at which rows to forecast
+            if rolling:
+                eval_indices = list(range(0, len(timestamps), stride))
+            else:
+                eval_indices = [len(timestamps) - 1]
+
+            forecast_mask = np.zeros(len(timestamps), dtype=bool)
+            forecast_mask[eval_indices] = True
+
             q_fc_y = []
 
-            for timestamp, log_y in zip(timestamps, log_targets):
-                q_fc_y.append(q_fc_matrix + log_y)
+            for idx, (timestamp, log_y) in enumerate(zip(timestamps, log_targets)):
+
+                if idx not in eval_indices:
+                    continue
+
+                if np.isnan(log_y):
+                    q_fc_y.append(np.full_like(q_fc_matrix, np.nan))
+                else:
+                    q_fc_y.append(q_fc_matrix + log_y)
 
             q_fc_y = np.exp(np.stack(q_fc_y, axis=0))
 
             lt_forcast: Dict[int, HorizonForecast] = {}
 
             for i, lead_time in enumerate(self.lead_times):
-                lt_forcast[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(q_fc_y[:, i, :]))
+                lt_forcast[lead_time] = HorizonForecast(
+                    lead_time=lead_time,
+                    predictions=torch.tensor(q_fc_y[:, i, :]),
+                )
 
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data_sub.copy(), freq=self.freq, quantiles=self.quantiles)
+            ts_forecast[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=lt_forcast,
+                data=data_sub.copy(),
+                freq=self.freq,
+                quantiles=self.quantiles,
+                forecast_mask=forecast_mask,
+            )
 
         return ForecastCollection(item_ids=ts_forecast)

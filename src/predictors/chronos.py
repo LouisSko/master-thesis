@@ -1,4 +1,4 @@
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import torch
 from chronos import BaseChronosPipeline
 from chronos.chronos_bolt import ChronosBoltPipeline
@@ -102,17 +102,22 @@ class ChronosBacktestingDataset(Dataset):
         self,
         data: TimeSeriesDataFrame,
         context_length: int,
+        stride: int = 1,
+        skip_first_n_samples: Optional[Dict[int, int]] = None,
         target_column: str = "target",
         return_target: bool = False,
         prediction_length: Optional[int] = None,
         tokenizer: Optional["ChronosTokenizer"] = None,
     ):
         assert context_length > 0, "context_length must be greater than 0"
-        self.context_length = context_length
+        assert stride > 0, "stride must be greater than 0"
 
+        self.context_length = context_length
+        self.stride = stride
         self.return_target = return_target
         self.prediction_length = prediction_length
         self.tokenizer = tokenizer
+        self.skip_first_n_samples = skip_first_n_samples
 
         if self.return_target:
             if self.prediction_length is None:
@@ -127,9 +132,42 @@ class ChronosBacktestingDataset(Dataset):
         self.indptr = np.append(0, cum_sizes).astype(np.int32)
         self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in np.unique(self.item_ids)}
 
+        self.valid_idx_per_item_id = {}
+        self.valid_idx_ranges = {}
+        self.valid_idx = self._build_valid_indices()
+
+    def _build_valid_indices(self) -> np.ndarray:
+        """Pre-compute the positions that become samples, based on stride and
+        the context / prediction length constraints, series-by-series."""
+        keep = []
+        for item_id in np.unique(self.item_ids):
+            mask = self.item_ids_mask[item_id]
+            series_len = mask.sum()
+
+            # global offset of this series in target_array
+            offset = self.indptr[item_id]
+
+            # first start index
+            start = self.skip_first_n_samples.get(item_id, 0) if self.skip_first_n_samples else 0
+
+            # last index we can use (need future targets if return_target=True) # TODO: check if this is correct
+            end = series_len - (self.prediction_length or 0) - 1
+
+            idxs = offset + np.arange(start, end + 1, self.stride)
+            self.valid_idx_per_item_id[item_id] = idxs
+            keep.extend(idxs)
+
+        # Build helper
+        start = 0
+        for key, item in self.valid_idx_per_item_id.items():
+            self.valid_idx_ranges[key] = (start, start + len(item))  # np.arange(start, start + len(item))
+            start += len(item)
+
+        return np.asarray(keep, dtype=np.int32)
+
     def __len__(self):
         """Returns the total number of time steps in the dataset."""
-        return len(self.target_array)
+        return len(self.valid_idx)
 
     def _get_context(self, a: np.ndarray, pad_value=np.nan):
         """Extracts the context window, padding with a specified value if needed."""
@@ -167,10 +205,11 @@ class ChronosBacktestingDataset(Dataset):
     def __getitem__(self, idx) -> np.ndarray:
         """Retrieves the context window for the given index within its corresponding time series."""
 
-        item_id = self.item_ids[idx]
+        real_idx = self.valid_idx[idx]
+        item_id = self.item_ids[real_idx]
         item_id_start_idx = self.indptr[item_id]
         # idx in the target_array controlled for the item_id_start_idx
-        start_idx = idx - item_id_start_idx
+        start_idx = real_idx - item_id_start_idx
         # get array of corresponding item id
         target_sub_array = self.target_array[self.item_ids_mask[item_id]]
         context = self._get_context(target_sub_array[: start_idx + 1])
@@ -323,6 +362,7 @@ class Chronos(AbstractPredictor):
             data_train (TimeSeriesDataFrame): Training data (not used).
             data_val (TimeSeriesDataFrame): Evaluation data (optional).
         """
+
         def _build_model(
             source: Union[str, Path],  # name or ckpt dir
             mode: Literal["full", "last_layer", "LoRa", "new_rows"],
@@ -465,63 +505,132 @@ class Chronos(AbstractPredictor):
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
-        predict_only_last_timestep: bool = False,
+        rolling: bool = False,
+        stride: int = 1,
     ) -> ForecastCollection:
-        """Predicts future values for the given time series data using a pretrained Chronos model.
-
-        Parameters:
-            data (TimeSeriesDataFrame): The target data to forecast.
-            predict_only_last_timestep (bool): Whether to forecast only the last timestep of each series.
-            previous_context_data (Optional[TimeSeriesDataFrame]): Optional preceding data to provide context.
-
-        Returns:
-            PredictionCollection: A nested dict structure holding item_id -> lead_time -> TimeSeriesForecast.
         """
+        Generates forecasts for each time series.
 
+        This method can perform either:
+        - *single-shot prediction* (predicting from the most recent context window), or
+        - *rolling backtesting* (sliding a window across the time series to predict at each time point).
+
+        Parameters
+        ----------
+        data : TimeSeriesDataFrame
+            The time series data to forecast.
+        previous_context_data : Optional[TimeSeriesDataFrame], default=None
+            Optional preceding time series data for extending the context window.
+        rolling : bool, default=False
+            If True, performs rolling evaluation across all available time steps.
+            If False, predicts only from the latest observation.
+        stride : int, default=1
+            The stride to advance the sliding window when rolling=True.
+
+        Returns
+        -------
+        ForecastCollection
+            A nested dictionary mapping each item_id to lead time forecasts.
+        """
+        # Combine context data if given
         if previous_context_data is not None:
-            data_merged = self._merge_data(data, previous_context_data, self.context_length)
+            # skip_first: Dict[item_id -> how many prepended rows], used for dataset indexing
+            data_merged, skip_first = self._merge_data(data, previous_context_data, self.context_length)
         else:
             data_merged = data
+            skip_first = None
 
-        if predict_only_last_timestep:
-            ds = ChronosInferenceDataset(data_merged, self.context_length)
-            data = data.slice_by_timestep(start_index=-1)
+        # Choose the appropriate dataset for single-shot or rolling prediction
+        if rolling:
+            ds = ChronosBacktestingDataset(
+                data_merged,
+                self.context_length,
+                stride,
+                skip_first,
+            )
         else:
-            ds = ChronosBacktestingDataset(data_merged, self.context_length)
+            ds = ChronosInferenceDataset(
+                data_merged,
+                self.context_length,
+            )
 
-        dl = DataLoader(ds, batch_size=16)
+        dl = DataLoader(ds, batch_size=64)
 
         forecasts = []
-        for batch in tqdm(dl, desc="Predicting using Chronos"):
-            # TODO: make this nicer by using chronos predict_quantiles function directly
-            # explicit sampling is done only for chronos-bolt. chronos-t5 does that by default behaviour
-            if self.sampling:
-                forecast = self.pipeline.predict_sampling(context=batch, prediction_length=self.prediction_length)
-            else:
-                forecast = self.pipeline.predict(context=batch, prediction_length=self.prediction_length)
 
-                # chronos-t5 forecast output shape: [batch_size, num_trajectories, prediction_length]
+        # Iterate batches and generate predictions
+        for batch in tqdm(dl, desc="Predicting using Chronos"):
+            if self.sampling:
+                forecast = self.pipeline.predict_sampling(
+                    context=batch,
+                    prediction_length=self.prediction_length,
+                )
+            else:
+                forecast = self.pipeline.predict(
+                    context=batch,
+                    prediction_length=self.prediction_length,
+                )
                 if isinstance(self.pipeline, ChronosPipeline):
-                    forecast = torch.quantile(forecast, q=torch.tensor(self.quantiles, dtype=forecast.dtype), dim=1).swapaxes(1, 0)
+                    # Convert trajectories to quantiles
+                    forecast = torch.quantile(
+                        forecast,
+                        q=torch.tensor(self.quantiles, dtype=forecast.dtype),
+                        dim=1,
+                    ).swapaxes(1, 0)
 
             forecasts.append(forecast)
-        forecasts = torch.vstack(forecasts)  #  output shape: [batch_size, quantiles, prediction_length]
 
-        if not predict_only_last_timestep:
-            mask = data_merged.index.isin(data.index)
-            forecasts = forecasts[mask, ...]
+        # Concatenate batches
+        forecasts = torch.vstack(forecasts)
+        assert forecasts.shape[0] == len(ds), "row count mismatch"
+
+        # If rolling, output data covers all input rows
+        if rolling:
+            output_data = data
+        else:
+            # Only the most recent timestep per series
+            output_data = data.slice_by_timestep(start_index=-1)
 
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
 
-        for item_id in data.item_ids:
-            lt_forcast: Dict[int, HorizonForecast] = {}
-            item_mask = data.index.get_level_values("item_id") == item_id
+        # Build forecasts per item
+        for item_id in output_data.item_ids:
+            lt_forecast: Dict[int, HorizonForecast] = {}
+
+            # Subset of output data for this item_id
+            output_data_item_id = output_data.loc[[item_id]].copy()
+
+            if rolling:
+                # Get start/end indices into the flat forecasts array
+                idx_rng = ds.valid_idx_ranges[item_id]
+                item_preds = forecasts[idx_rng[0] : idx_rng[1], ...]
+
+                # The timestamps that correspond to predictions
+                predicted_mi = data_merged.index[ds.valid_idx[idx_rng[0] : idx_rng[1]]]
+            else:
+                # predict only last timestep
+                mask = output_data.index.get_level_values("item_id") == item_id
+                item_preds = forecasts[mask]
+                predicted_mi = output_data_item_id.index
+
+            # Build boolean mask: which rows in output_data_item_id were predicted.
+            # If stride is enabled, we do not make predictions for all rows
+            forecast_mask = output_data_item_id.index.isin(predicted_mi)
+
+            # Build HorizonForecasts for each lead time
             for lt in self.lead_times:
-                lt_forcast[lt] = HorizonForecast(
+                lt_forecast[lt] = HorizonForecast(
                     lead_time=lt,
-                    predictions=forecasts[item_mask, :, lt - 1],
+                    predictions=item_preds[..., lt - 1],
                 )
-            ts_forecast[item_id] = TimeSeriesForecast(item_id=item_id, lead_time_forecasts=lt_forcast, data=data.loc[item_mask].copy(), freq=self.freq)
+
+            ts_forecast[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=lt_forecast,
+                data=output_data_item_id,  # needs to be fixed
+                freq=self.freq,
+                forecast_mask=forecast_mask,
+            )
 
         return ForecastCollection(item_ids=ts_forecast)
 
@@ -610,6 +719,7 @@ def fine_tune(
     train_dataset = ChronosBacktestingDataset(
         data=data_train,
         context_length=context_length,
+        stride=1,
         target_column=TARGET,
         return_target=True,
         prediction_length=prediction_length,
@@ -622,6 +732,7 @@ def fine_tune(
         eval_dataset = ChronosBacktestingDataset(
             data=data_val,
             context_length=context_length,
+            stride=prediction_length,
             target_column=TARGET,
             return_target=True,
             prediction_length=prediction_length,

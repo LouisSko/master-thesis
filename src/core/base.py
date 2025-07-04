@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Any
 import pandas as pd
-from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame
+from src.core.timeseries_evaluation import TARGET, ForecastCollection, TimeSeriesForecast, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 from typing import Dict, List, Optional, Type, Union, Literal
 from pathlib import Path
@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # Keep a reference to the original _stop method so we can call it later
 _orig_stop = ResourceTracker._stop
 
+
 def _safe_stop(self, *args, **kwargs):
     """
     Replacement for ResourceTracker._stop that suppresses the benign
@@ -33,6 +34,7 @@ def _safe_stop(self, *args, **kwargs):
         # Ignore the error, since it simply means "no child processes"
         # are left to clean up—and it’s harmless.
         pass
+
 
 # Overwrite the tracker’s stop method with our safe version
 ResourceTracker._stop = _safe_stop
@@ -47,6 +49,7 @@ class AbstractPredictor(ABC):
     ) -> None:
 
         self.lead_times = lead_times
+        self.prediction_length = max(lead_times)
         self.freq = freq
         self.output_dir = None
         if output_dir:
@@ -67,7 +70,7 @@ class AbstractPredictor(ABC):
         pass
 
     @abstractmethod
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> ForecastCollection:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, stride: int = 1) -> ForecastCollection:
         pass
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
@@ -110,9 +113,11 @@ class AbstractPredictor(ABC):
         # add the context length to data
         previous_context_data = previous_context_data.loc[data.item_ids]
         previous_context_data = previous_context_data.groupby("item_id").tail(context_length)
+        
+        len_prepended_context = previous_context_data.groupby("item_id").count().to_dict()[TARGET]
         data_merged = pd.concat([previous_context_data, data]).sort_index()
 
-        return TimeSeriesDataFrame(data_merged)
+        return TimeSeriesDataFrame(data_merged), len_prepended_context
 
     def save(self, file_path: Optional[Path] = None) -> None:
 
@@ -342,7 +347,7 @@ class AbstractPipeline(ABC):
         """
 
     @abstractmethod
-    def train_predictor(
+    def train_predictor_model(
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
@@ -363,13 +368,19 @@ class AbstractPipeline(ABC):
         """
 
     @abstractmethod
-    def predict(
+    def generate_forecasts(
         self,
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        rolling: bool = False,
+        stride: int = 1,
     ) -> Dict[str, ForecastCollection]:
         """
-        predict on the test data.
+        Generates forecasts for each time series using the predictor.
+
+        This method can perform either:
+        - *single-shot prediction* (predicting from the most recent context window), or
+        - *rolling backtesting* (sliding a window across the time series to predict at each time point).
 
         Parameters
         ----------
@@ -377,10 +388,16 @@ class AbstractPipeline(ABC):
             The test dataset.
         data_previous_context : Union[TimeSeriesDataFrame, TabularDataFrame]
             The previous context data. This is used by some predictors.
+        rolling : bool, default=False
+            If True, performs rolling evaluation across all available time steps.
+            If False, predicts only from the latest observation.
+        stride : int, default=1
+            The stride to advance the sliding window when rolling=True.
+
         Returns
         -------
         Dict[str, ForecastCollection]
-            Dictionary with raw predictions.
+            Dictionary with predictions stored in a ForecastCollection object.
         """
 
     @abstractmethod
@@ -395,9 +412,9 @@ class AbstractPipeline(ABC):
         """
 
     @abstractmethod
-    def apply_postprocessing(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
+    def apply_postprocessors_to_forecasts(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
         """
-        Apply postprocessing to predictions.
+        Apply postprocessing to forecasts.
 
         Parameters
         ----------

@@ -44,15 +44,15 @@ class ForecastingPipeline(AbstractPipeline):
         self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
 
         # create predictor and postprocessor
-        self.create_predictor()
+        self._initialize_predictor()
         if self.postprocessors is not None:
-            self.create_postprocessors()
+            self._initialize_postprocessors()
 
-    def create_predictor(self):
+    def _initialize_predictor(self):
         self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
         self.predictor = self.model(**self.model_kwargs)
 
-    def create_postprocessors(self):
+    def _initialize_postprocessors(self):
         if self.postprocessors is None:
             raise ValueError("No postprocessors specified.")
 
@@ -69,7 +69,7 @@ class ForecastingPipeline(AbstractPipeline):
             pp_instance = pp(**kwargs)
             self.postprocessor_dict.update({pp_instance.class_name: pp_instance})
 
-    def save(self) -> None:
+    def save_pipeline(self) -> None:
         """Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib."""
 
         logging.info("Saving Pipeline to specified output directory: %s", self.output_dir)
@@ -208,14 +208,14 @@ class ForecastingPipeline(AbstractPipeline):
                 test_window_size = pd.DateOffset(years=1)
 
             while test_start_date < test_end_date:
-                results[test_start_date], info[test_start_date] = self._train_predict_postprocess(
-                    data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on, evaluate=True
+                results[test_start_date], info[test_start_date] = self._run_backtest_iteration(
+                    data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on
                 )
                 test_start_date += test_window_size
 
-            results = self._merge_results(results)
+            results = self._combine_backtest_results(results)
         else:
-            results, info = self._train_predict_postprocess(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on, evaluate=True)
+            results, info = self._run_backtest_iteration(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
 
         if save_results:
             backtest_params = {
@@ -229,11 +229,11 @@ class ForecastingPipeline(AbstractPipeline):
                 "calibration_based_on": calibration_based_on,
                 "additional_info": info,
             }
-            self._save_backtest_results(results, backtest_params)
+            self._store_backtest_outputs(results, backtest_params)
 
         return results, info
 
-    def _save_backtest_results(self, results: Dict[str, ForecastCollection], backtest_params: Dict) -> None:
+    def _store_backtest_outputs(self, results: Dict[str, ForecastCollection], backtest_params: Dict) -> None:
         """Save backtest results and config."""
 
         logging.info("Storing backtest results...")
@@ -258,7 +258,7 @@ class ForecastingPipeline(AbstractPipeline):
             # Save predictions
             result.save(save_path / "predictions.joblib")
 
-    def split_data(
+    def split_time_series_data(
         self,
         data: Union[TimeSeriesDataFrame, TabularDataFrame],
         test_start_date: pd.Timestamp,
@@ -313,7 +313,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         return data_train, data_val, data_test
 
-    def train_predictor(
+    def train_predictor_model(
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
@@ -347,7 +347,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # Initialize the predictor
         logging.info("Initializing predictor with model: %s", self.model.__name__)
-        self.create_predictor()
+        self._initialize_predictor()
 
         # Fit the predictor with training (and optional validation) data
         logging.info("Fitting predictor to the training data...")
@@ -359,13 +359,19 @@ class ForecastingPipeline(AbstractPipeline):
 
         return info
 
-    def predict(
+    def generate_forecasts(
         self,
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        rolling: bool = False,
+        stride: int = 1,
     ) -> Dict[str, ForecastCollection]:
         """
-        predict on the test data.
+        Generates forecasts for each time series using the predictor.
+
+        This method can perform either:
+        - *single-shot prediction* (predicting from the most recent context window), or
+        - *rolling backtesting* (sliding a window across the time series to predict at each time point).
 
         Parameters
         ----------
@@ -373,63 +379,49 @@ class ForecastingPipeline(AbstractPipeline):
             The test dataset.
         data_previous_context : Union[TimeSeriesDataFrame, TabularDataFrame]
             The previous context data. This is used by some predictors.
+        rolling : bool, default=False
+            If True, performs rolling evaluation across all available time steps.
+            If False, predicts only from the latest observation.
+        stride : int, default=1
+            The stride to advance the sliding window when rolling=True.
+
         Returns
         -------
         Dict[str, ForecastCollection]
-            Dictionary with raw predictions.
+            Dictionary with predictions stored in a ForecastCollection object.
         """
-
+        logging.info(
+            "Starting forecast generation of model %s for data_test from %s to %s",
+            self.predictor.__class__.__name__,
+            data_test.index.get_level_values("timestamp").min(),
+            data_test.index.get_level_values("timestamp").max(),
+        )
         start_time = pd.Timestamp.now()
-        logging.info("Starting prediction for test data from %s to %s", data_test.index.get_level_values("timestamp").min(), data_test.index.get_level_values("timestamp").max())
-
-        # Run the prediction
-        logging.info("Running prediction using the model: %s", self.predictor.__class__.__name__)
-        predictions = self.predictor.predict(data=data_test, previous_context_data=data_previous_context)
-        logging.info("Prediction completed successfully.")
-
+        predictions = self.predictor.predict(data_test, data_previous_context, rolling, stride)
         end_time = pd.Timestamp.now()
         logging.info("Prediction completed in %s seconds.", (end_time - start_time).total_seconds())
 
         return {self.predictor.__class__.__name__: predictions}
 
-    def train_postprocessors(
-        self, calibration_data: Union[TimeSeriesDataFrame, TabularDataFrame], previous_context_data: Union[TimeSeriesDataFrame, TabularDataFrame, None] = None
-    ) -> Dict:
+    def train_postprocessors(self, calibration_predictions: ForecastCollection) -> Dict:
         """
         Fit the postprocessors based on calibration data.
 
         Parameters
         ----------
-        calibration_data : Union[TimeSeriesDataFrame, TabularDataFrame]
-            The calibration data. Used to fit the postprocessor.
-        previous_context_data : Optional[TimeSeriesDataFrame], default=None
-            Optional preceding data to provide initial context before the evaluation period. This is used by some predictors to extend the context length.
+        calibration_predictions : ForecastCollection
+            The generated forecasts of the predictor on the calibration data.
         """
         info = {}
 
-        start_time = pd.Timestamp.now()
-        logging.info(
-            "Starting postprocessor training with calibration data from %s to %s",
-            calibration_data.index.get_level_values("timestamp").min(),
-            calibration_data.index.get_level_values("timestamp").max(),
-        )
-
-        # Check if postprocessors are available
-        if not self.postprocessors:
-            logging.error("No postprocessors specified. Cannot proceed with training.")
-            raise ValueError("No postprocessors specified.")
-
-        # Generate calibration predictions
-        logging.info("Running prediction on calibration data using the model: %s", self.predictor.__class__.__name__)
-        calibration_predictions = self.predictor.predict(calibration_data, previous_context_data)
-        logging.info("Calibration predictions completed successfully.")
-
         # initialize postprocessors
-        self.create_postprocessors()
+        self._initialize_postprocessors()
 
         info["postprocessors_execution_time"] = {}
 
-        # Fit postprocessors
+        start_time = pd.Timestamp.now()
+
+        logging.info("Start training postprocessors...")
         for name, postprocessor in self.postprocessor_dict.items():
 
             # Fit postprocessor on calibration data
@@ -443,9 +435,9 @@ class ForecastingPipeline(AbstractPipeline):
 
         return info
 
-    def apply_postprocessing(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
+    def apply_postprocessors_to_forecasts(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
         """
-        Apply postprocessing to predictions.
+        Apply postprocessing to forecasts.
 
         Parameters
         ----------
@@ -472,7 +464,7 @@ class ForecastingPipeline(AbstractPipeline):
         logging.info("Postprocessing completed for all models.")
         return predictions
 
-    def _train_predict_postprocess(
+    def _run_backtest_iteration(
         self,
         data: Union[TimeSeriesDataFrame, TabularDataFrame],
         test_start_date: pd.Timestamp,
@@ -481,44 +473,71 @@ class ForecastingPipeline(AbstractPipeline):
         val_window_size: Optional[pd.DateOffset],
         test_window_size: Optional[pd.DateOffset],
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
-        evaluate: bool = False,
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
 
         info = {}
 
-        data_train, data_val, data_test = self.split_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
+        data_train, data_val, data_test = self.split_time_series_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
 
-        if evaluate:
-            logging.info("evaluate is set to true. Removing all item_ids which contain only nans in target column.")
-            data_test = data_test[data_test.groupby(level=ITEMID)[TARGET].transform(lambda x: not x.isna().all())].copy()
-            if len(data_test) == 0:
-                raise ValueError("Test data is empty after dropping all rows with target=nan. Check data.")
+        logging.info("Removing all item_ids which contain only nans in target column.")
+        data_test = data_test[data_test.groupby(level=ITEMID)[TARGET].transform(lambda x: not x.isna().all())].copy()
+        if len(data_test) == 0:
+            raise ValueError("Test data is empty after dropping all rows with target=nan. Check data.")
+
+        # ---------- train the predictor ----------
         if train:
-            info["model"] = self.train_predictor(data_train, data_val)
+            info["model"] = self.train_predictor_model(data_train, data_val)
             # TODO: save model directly
         else:
             logging.info("Skipping model training because `train=False`.")
 
-        # check whether predictions exist
-        predictions = self.predict(data_test, data.split_by_time(data_test.index.get_level_values("timestamp").min())[0])
-        # TODO: save predictions directly
+        # ---------- predictions generated by predictor ----------
+        predictions_test_data = self.generate_forecasts(
+            data_test=data_test,
+            data_previous_context=data.split_by_time(data_test.index.get_level_values("timestamp").min())[0],
+            rolling=True,
+            stride=1,
+        )  # TODO: save predictions directly
+
+        # ---------- define calibration dataset ----------
         if self.postprocessors is not None:
             if calibration_based_on == "val":
                 calibration_data = data_val
+                context_data = data_train
             elif calibration_based_on == "train":
                 calibration_data = data_train
+                context_data = None
             elif calibration_based_on == "train_val":
                 calibration_data = pd.concat([data_train, data_val]).sort_index()
+                context_data = None
             else:
                 raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
 
-            info["postprocessors"] = self.train_postprocessors(calibration_data)
-            predictions = self.apply_postprocessing(predictions)
+            logging.info(
+                "Use calibration data from %s to %s for fitting postprocessors",
+                calibration_data.index.get_level_values("timestamp").min(),
+                calibration_data.index.get_level_values("timestamp").max(),
+            )
 
-        return predictions, info
+            # ---------- generate forecasts on calibration dataset using the predictor ----------
+            logging.info("Generating forecasts on calibration data...")
+            predictions_calibration_data = self.generate_forecasts(
+                data_test=calibration_data,
+                data_previous_context=context_data,
+                rolling=True,
+                stride=1,
+            )
 
-    def _merge_results(self, backtest_results: Dict[pd.Timestamp, Dict[str, ForecastCollection]]) -> Dict[str, ForecastCollection]:
+            # ---------- train postprocessors ----------
+            info["postprocessors"] = self.train_postprocessors(predictions_calibration_data)
+
+            # ---------- create postprocessed forecasts ----------
+            calibrated_predictions_test_data = self.apply_postprocessors_to_forecasts(predictions_test_data)
+
+        return calibrated_predictions_test_data, info
+
+    def _combine_backtest_results(self, backtest_results: Dict[pd.Timestamp, Dict[str, ForecastCollection]]) -> Dict[str, ForecastCollection]:
 
         all_predictors = {key for result in backtest_results.values() for key in result}
 
@@ -526,13 +545,13 @@ class ForecastingPipeline(AbstractPipeline):
 
         merged_results = {}
         for predictor_name in all_predictors:
-            merged_results[predictor_name] = self.merge_predictor_backtest(backtest_results, predictor_name)
+            merged_results[predictor_name] = self.combine_forecast_windows(backtest_results, predictor_name)
 
         logging.info("Merge completed.")
 
         return merged_results
 
-    def merge_predictor_backtest(
+    def combine_forecast_windows(
         self,
         backtest_results: Dict[pd.Timestamp, Dict[str, ForecastCollection]],
         predictor_name: str,
