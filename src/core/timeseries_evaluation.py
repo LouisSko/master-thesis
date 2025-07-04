@@ -380,32 +380,34 @@ class TimeSeriesForecast(BaseModel):
         elif isinstance(start, int):
             if start < 0:
                 start_idx = start % len(self.data)  # handle negative indexing
-            elif start > len(self.data):
+            elif start >= len(self.data):
                 start_idx = len(self.data) - 1
             else:
-                start_idx = start - 1
+                start_idx = start
         else:
             start_idx = len(self.data) - 1
 
-        # get the origin timestamp
+        # get the corrected timestamps. Relevant if forecast_mask has some false values
         start_date = timestamps[start_idx]
         forecasted_ts = timestamps[self.forecast_mask]
         start_idx_preds = forecasted_ts.get_indexer([start_date], method="backfill")[0]
-
+        corrected_start_date = forecasted_ts[start_idx_preds]
+        corrected_start_idx = timestamps.get_indexer([corrected_start_date])[0]
+        
         # Collect prediction tensor
         preds = torch.stack([hf.predictions for hf in self.lead_time_forecasts.values()], dim=1)  # shape: [num_samples, num_lead_times, num_quantiles]
 
         # Past context
-        historic_start_idx = max(0, start_idx - context_length) if start_idx >= 0 else start_idx - context_length
-        past = self.data.iloc[historic_start_idx:start_idx].reset_index(level=0, drop=True)
+        historic_start_idx = max(0, corrected_start_idx - context_length) if corrected_start_idx >= 0 else corrected_start_idx - context_length
+        past = self.data.iloc[historic_start_idx:corrected_start_idx].reset_index(level=0, drop=True)
 
         # Future truth Horizon: up to max lead-time
         max_lt = max(self.get_lead_times())
-        future = self.data.iloc[start_idx : start_idx + max_lt].reset_index(level=0, drop=True)
+        future = self.data.iloc[corrected_start_idx : corrected_start_idx + max_lt].reset_index(level=0, drop=True)
 
         # Align forecast tensor with corresponding timestamp index
         freq_offset = pd.tseries.frequencies.to_offset(self.freq)
-        prediction_dates = [start_date + freq_offset * lt for lt in self.get_lead_times()]
+        prediction_dates = [corrected_start_date + freq_offset * lt for lt in self.get_lead_times()]
         selected_predictions = pd.DataFrame(data=preds[start_idx_preds].numpy(), columns=self.quantiles, index=prediction_dates)  # shape: [num_lead_times, num_quantiles]
 
         plt.figure(figsize=(12, 6))
@@ -419,10 +421,10 @@ class TimeSeriesForecast(BaseModel):
         intervals = [(0.4, 0.6), (0.3, 0.7), (0.2, 0.8), (0.1, 0.9)]
         _add_prediction_intervals(plt.gca(), selected_predictions, intervals, base_color="orange")
 
-        plt.axvline(start_date, color="gray", linestyle=":", label="Prediction start")
+        plt.axvline(corrected_start_date, color="gray", linestyle=":", label="Prediction start")
         plt.xlabel("Date")
         plt.ylabel("Value")
-        plt.title(f"Forecast for item_id={self.item_id} from {start_date}")
+        plt.title(f"Forecast for item_id={self.item_id} from {corrected_start_date}")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
