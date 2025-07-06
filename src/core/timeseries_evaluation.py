@@ -295,7 +295,7 @@ class TimeSeriesForecast(BaseModel):
         plt.grid(True)
         plt.show()
 
-    def plot_forecasts(self, start: Optional[Union[int, pd.Timestamp]] = None, q_lower: float = 0.2, q_upper: float = 0.8, context_length: int = 100) -> None:
+    def plot_forecasts(self, start: Optional[Union[int, pd.Timestamp]] = None, context_length: int = 100) -> None:
         """
         Plot past data, true future values, and quantile forecasts for a given starting point.
 
@@ -305,12 +305,6 @@ class TimeSeriesForecast(BaseModel):
             - If int: Index into the time series to start the forecast from.
             - If pd.Timestamp: Timestamp to start the forecast from. Must exist in the time series index.
             - If None: Defaults to the last available index.
-
-        q_lower : float
-            Lower quantile to use for the prediction interval shading (e.g., 0.2 for 20%).
-
-        q_upper : float
-            Upper quantile to use for the prediction interval shading (e.g., 0.8 for 80%).
 
         context_length : int
             Number of historical data points to include in the plot before the forecast start.
