@@ -66,4 +66,11 @@ class PostprocessorGB(AbstractPostprocessor):
             adjusted_predictions = np.column_stack(adjusted_predictions)
             results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(adjusted_predictions))
 
-        return TimeSeriesForecast(item_id=data.item_id, lead_time_forecasts=results_lt, data=data.data, freq=data.freq, quantiles=data.quantiles)
+        return TimeSeriesForecast(
+            item_id=data.item_id,
+            lead_time_forecasts=results_lt,
+            data=data.data,
+            freq=data.freq,
+            quantiles=data.quantiles,
+            forecast_mask=data.forecast_mask,
+        )

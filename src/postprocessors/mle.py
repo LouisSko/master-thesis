@@ -157,7 +157,14 @@ class PostprocessorMLE(AbstractPostprocessor):
 
             results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(predictions))
 
-        return TimeSeriesForecast(item_id=data.item_id, lead_time_forecasts=results_lt, data=data.data, freq=data.freq, quantiles=data.quantiles)
+        return TimeSeriesForecast(
+            item_id=data.item_id,
+            lead_time_forecasts=results_lt,
+            data=data.data,
+            freq=data.freq,
+            quantiles=data.quantiles,
+            forecast_mask=data.forecast_mask,
+        )
 
     def _neg_log_likelihood(self, params: list, M: np.ndarray, IQR: np.ndarray, y: np.ndarray):
         """
