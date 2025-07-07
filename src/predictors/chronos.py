@@ -40,7 +40,7 @@ class ChronosLoraConfig(LoraConfig):
         return base
 
 
-class BacktestingDataset(Dataset):
+class BaseTimeSeriesDataset(Dataset):
     """
     A dataset for rolling backtesting and inference with time series data.
 
@@ -157,15 +157,11 @@ class BacktestingDataset(Dataset):
     def to_chronos_bolt_format(self, context: np.ndarray, future_target: np.ndarray):
         return {"context": context, "target": future_target}
 
-    def to_patchtst_format(self, context: np.ndarray, item_id: int, timestamp: float):
-        return {"item_id": item_id, "target": context, "start": timestamp}
-
     def __getitem__(self, idx) -> np.ndarray:
         """Retrieves the context window for the given index within its corresponding time series."""
 
         real_idx = self.valid_idx[idx]
         item_id = self.item_ids[real_idx]
-        timestamp = self.timestamps[real_idx].timestamp()
         item_start = self.indptr[item_id]
         pos_in_series = real_idx - item_start
 
@@ -176,8 +172,6 @@ class BacktestingDataset(Dataset):
 
         if self.return_target:
             future_target = self._get_future_targets(series[pos_in_series + 1 :])
-
-            # return self.to_patchtst_format(context, item_id, timestamp)
 
             if self.tokenizer is not None:
                 return self.to_chronos_format(context, future_target)
@@ -209,6 +203,7 @@ class BacktestingDataset(Dataset):
 
         predictions is a tensor [N x num_quantiles x prediction length]
         """
+        
         preds_df = pd.DataFrame(
             {
                 "item_id": self.item_ids[self.valid_idx],
@@ -555,7 +550,7 @@ class Chronos(AbstractPredictor):
             skip_first = None
 
         # Choose the appropriate dataset for single-shot or rolling prediction
-        ds = BacktestingDataset(
+        ds = BaseTimeSeriesDataset(
             data_merged,
             self.context_length,
             stride,
