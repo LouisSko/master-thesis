@@ -40,62 +40,12 @@ class ChronosLoraConfig(LoraConfig):
         return base
 
 
-class ChronosInferenceDataset(Dataset):
-    """A dataset for inference with time series data.
-
-    This dataset extracts fixed-length context windows from time series data
-    for inference tasks.
-
-    Args:
-        target_df (TimeSeriesDataFrame): The time series data containing target values.
-        context_length (int): The number of time steps to use as context.
-        target_column (str, optional): The column name containing the target values. Defaults to "target".
+class BacktestingDataset(Dataset):
     """
+    A dataset for rolling backtesting and inference with time series data.
 
-    def __init__(
-        self,
-        target_df: TimeSeriesDataFrame,
-        context_length: int,
-        target_column: str = "target",
-    ):
-        assert context_length > 0, "context_length must be greater than 0"
-        self.context_length = context_length
-        self.target_array = target_df[target_column].to_numpy(dtype=np.float32)
-        self.freq = target_df.freq
-
-        # Store pointer to start:end of each time series
-        cum_sizes = target_df.num_timesteps_per_item().values.cumsum()
-        self.indptr = np.append(0, cum_sizes).astype(np.int32)
-
-    def __len__(self):
-        """Returns the number of time series in the dataset."""
-        return len(self.indptr) - 1
-
-    def _get_context(self, a: np.ndarray, pad_value=np.nan):
-        """Extracts the context window, padding with a specified value if needed."""
-        a = a[-self.context_length :]
-        pad_size = self.context_length - len(a)
-        if pad_size > 0:
-            pad = np.full(shape=(pad_size,), fill_value=pad_value)
-            a = np.concatenate((pad, a))
-        return a
-
-    def __getitem__(self, idx) -> np.ndarray:
-        """Retrieves the context window for the given index."""
-        start_idx = self.indptr[idx]
-        end_idx = self.indptr[idx + 1]
-        return self._get_context(self.target_array[start_idx:end_idx])
-
-
-class ChronosBacktestingDataset(Dataset):
-    """A dataset for backtesting with time series data.
-
-    This dataset extracts historical context windows for backtesting purposes.
-
-    Args:
-        data (TimeSeriesDataFrame): The time series data containing target values.
-        context_length (int): The number of time steps to use as context.
-        target_column (str, optional): The column name containing the target values. Defaults to "target".
+    Extracts multiple historical context windows (with optional targets).
+    Also provides helper to assemble forecasts.
     """
 
     def __init__(
@@ -108,6 +58,7 @@ class ChronosBacktestingDataset(Dataset):
         return_target: bool = False,
         prediction_length: Optional[int] = None,
         tokenizer: Optional["ChronosTokenizer"] = None,
+        rolling: bool = False,
     ):
         assert context_length > 0, "context_length must be greater than 0"
         assert stride > 0, "stride must be greater than 0"
@@ -118,52 +69,57 @@ class ChronosBacktestingDataset(Dataset):
         self.prediction_length = prediction_length
         self.tokenizer = tokenizer
         self.skip_first_n_samples = skip_first_n_samples
+        self.rolling = rolling
+
+        if self.return_target and self.prediction_length is None:
+            raise ValueError("prediction_length must be set when return_target=True")
 
         if self.return_target:
-            if self.prediction_length is None:
-                raise ValueError("prediction_length needs to be specified if return target is set to true.")
-            # when target should be returned, the dataset is used for training/evaluation and we should reorder based on timestamps
-            data = data.sort_values(by=[ITEMID, TIMESTAMP])
+            data = data.sort_values([ITEMID, TIMESTAMP])
 
-        self.target_array = data[target_column].to_numpy(dtype=np.float32)
-        self.freq = data.freq
+        self.target_array = data[target_column].to_numpy(np.float32)
         self.item_ids = pd.factorize(data.index.get_level_values(ITEMID))[0]
-        cum_sizes = data.num_timesteps_per_item().values.cumsum()
-        self.indptr = np.append(0, cum_sizes).astype(np.int32)
+        self.timestamps = data.index.get_level_values(TIMESTAMP)
+
+        cum_sizes = data.num_timesteps_per_item().cumsum()
+        self.indptr = np.append(0, cum_sizes)
         self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in np.unique(self.item_ids)}
 
-        self.valid_idx_per_item_id = {}
-        self.valid_idx_ranges = {}
-        self.valid_idx = self._build_valid_indices()
+        self._compute_valid_indices(skip_first_n_samples)
 
-    def _build_valid_indices(self) -> np.ndarray:
-        """Pre-compute the positions that become samples, based on stride and
-        the context / prediction length constraints, series-by-series."""
-        keep = []
+        if self.rolling:
+            self._compute_valid_indices(skip_first_n_samples)
+        else:
+            # only last observation per series
+            self.valid_idx = self._compute_latest_indices()
+
+    def _compute_latest_indices(self):
+        indices = []
         for item_id in np.unique(self.item_ids):
             mask = self.item_ids_mask[item_id]
+            idx = np.where(mask)[0][-1]
+            indices.append(idx)
+        return np.array(indices)
+
+    def _compute_valid_indices(self, skip_first_n_samples):
+        self.valid_idx = []
+        self.ranges = {}  # item_id -> (start, stop)
+
+        pointer = 0
+        for item_id in np.unique(self.item_ids):
+            mask = self.item_ids == item_id
             series_len = mask.sum()
-
-            # global offset of this series in target_array
             offset = self.indptr[item_id]
-
-            # first start index
-            start = self.skip_first_n_samples.get(item_id, 0) if self.skip_first_n_samples else 0
-
-            # last index we can use (need future targets if return_target=True) # TODO: check if this is correct
-            end = series_len - (self.prediction_length or 0) - 1
+            start = skip_first_n_samples.get(item_id, 0) if skip_first_n_samples else 0
+            end = series_len - 1
 
             idxs = offset + np.arange(start, end + 1, self.stride)
-            self.valid_idx_per_item_id[item_id] = idxs
-            keep.extend(idxs)
+            self.valid_idx.extend(idxs)
 
-        # Build helper
-        start = 0
-        for key, item in self.valid_idx_per_item_id.items():
-            self.valid_idx_ranges[key] = (start, start + len(item))  # np.arange(start, start + len(item))
-            start += len(item)
+            self.ranges[item_id] = (pointer, pointer + len(idxs))
+            pointer += len(idxs)
 
-        return np.asarray(keep, dtype=np.int32)
+        self.valid_idx = np.array(self.valid_idx)
 
     def __len__(self):
         """Returns the total number of time steps in the dataset."""
@@ -188,7 +144,6 @@ class ChronosBacktestingDataset(Dataset):
         return a.astype(np.float32)
 
     def to_chronos_format(self, context: np.ndarray, future_target: np.ndarray):
-
         input_ids, attention_mask, scale = self.tokenizer.context_input_transform(torch.tensor(context).unsqueeze(0))
         labels, labels_mask = self.tokenizer.label_input_transform(torch.tensor(future_target).unsqueeze(0), scale)
         labels[labels_mask == 0] = -100
@@ -202,20 +157,27 @@ class ChronosBacktestingDataset(Dataset):
     def to_chronos_bolt_format(self, context: np.ndarray, future_target: np.ndarray):
         return {"context": context, "target": future_target}
 
+    def to_patchtst_format(self, context: np.ndarray, item_id: int, timestamp: float):
+        return {"item_id": item_id, "target": context, "start": timestamp}
+
     def __getitem__(self, idx) -> np.ndarray:
         """Retrieves the context window for the given index within its corresponding time series."""
 
         real_idx = self.valid_idx[idx]
         item_id = self.item_ids[real_idx]
-        item_id_start_idx = self.indptr[item_id]
-        # idx in the target_array controlled for the item_id_start_idx
-        start_idx = real_idx - item_id_start_idx
-        # get array of corresponding item id
-        target_sub_array = self.target_array[self.item_ids_mask[item_id]]
-        context = self._get_context(target_sub_array[: start_idx + 1])
+        timestamp = self.timestamps[real_idx].timestamp()
+        item_start = self.indptr[item_id]
+        pos_in_series = real_idx - item_start
+
+        series = self.target_array[self.item_ids_mask[item_id]]
+        # get series of corresponding item id
+        series = self.target_array[self.item_ids_mask[item_id]]
+        context = self._get_context(series[: pos_in_series + 1])
 
         if self.return_target:
-            future_target = self._get_future_targets(target_sub_array[start_idx + 1 :])
+            future_target = self._get_future_targets(series[pos_in_series + 1 :])
+
+            # return self.to_patchtst_format(context, item_id, timestamp)
 
             if self.tokenizer is not None:
                 return self.to_chronos_format(context, future_target)
@@ -223,6 +185,58 @@ class ChronosBacktestingDataset(Dataset):
                 return self.to_chronos_bolt_format(context, future_target)
 
         return context
+
+    @property
+    def pred_index(self):
+        return pd.MultiIndex.from_arrays(
+            [self.item_ids[self.valid_idx], self.timestamps[self.valid_idx]],
+            names=[ITEMID, TIMESTAMP],
+        )
+
+    @property
+    def valid_item_ids(self):
+        return self.item_ids[self.valid_idx]
+
+    @property
+    def valid_timestamps(self):
+        return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
+
+    def to_forecast_collection(
+        self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
+    ) -> ForecastCollection:
+        """
+        Assemble a ForecastCollection given model predictions.
+
+        predictions is a tensor [N x num_quantiles x prediction length]
+        """
+        preds_df = pd.DataFrame(
+            {
+                "item_id": self.item_ids[self.valid_idx],
+                "timestamp": self.timestamps[self.valid_idx],
+            }
+        )
+
+        assert len(preds_df) == predictions.shape[0]
+
+        forecasts = {}
+        for item_id, group in preds_df.groupby("item_id"):
+            s, e = group.index.min(), group.index.max() + 1
+            preds = predictions[s:e]
+            timestamps = group["timestamp"]
+
+            mask = output_data.loc[[item_id]].index.get_level_values(TIMESTAMP).isin(timestamps)
+
+            lt_forecasts = {lt: HorizonForecast(lead_time=lt, predictions=preds[..., lt - 1]) for lt in lead_times}
+
+            forecasts[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=lt_forecasts,
+                data=output_data.loc[[item_id]],
+                freq=freq,
+                forecast_mask=mask,
+            )
+
+        return ForecastCollection(item_ids=forecasts)
 
 
 class Chronos(AbstractPredictor):
@@ -541,18 +555,13 @@ class Chronos(AbstractPredictor):
             skip_first = None
 
         # Choose the appropriate dataset for single-shot or rolling prediction
-        if rolling:
-            ds = ChronosBacktestingDataset(
-                data_merged,
-                self.context_length,
-                stride,
-                skip_first,
-            )
-        else:
-            ds = ChronosInferenceDataset(
-                data_merged,
-                self.context_length,
-            )
+        ds = BacktestingDataset(
+            data_merged,
+            self.context_length,
+            stride,
+            skip_first,
+            rolling=rolling,
+        )
 
         dl = DataLoader(ds, batch_size=64)
 
@@ -591,48 +600,9 @@ class Chronos(AbstractPredictor):
             # Only the most recent timestep per series
             output_data = data.slice_by_timestep(start_index=-1)
 
-        ts_forecast: Dict[int, TimeSeriesForecast] = {}
+        collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data, freq=self.freq)
 
-        # Build forecasts per item
-        for item_id in output_data.item_ids:
-            lt_forecast: Dict[int, HorizonForecast] = {}
-
-            # Subset of output data for this item_id
-            output_data_item_id = output_data.loc[[item_id]].copy()
-
-            if rolling:
-                # Get start/end indices into the flat forecasts array
-                idx_rng = ds.valid_idx_ranges[item_id]
-                item_preds = forecasts[idx_rng[0] : idx_rng[1], ...]
-
-                # The timestamps that correspond to predictions
-                predicted_mi = data_merged.index[ds.valid_idx[idx_rng[0] : idx_rng[1]]]
-            else:
-                # predict only last timestep
-                mask = output_data.index.get_level_values("item_id") == item_id
-                item_preds = forecasts[mask]
-                predicted_mi = output_data_item_id.index
-
-            # Build boolean mask: which rows in output_data_item_id were predicted.
-            # If stride is enabled, we do not make predictions for all rows
-            forecast_mask = output_data_item_id.index.isin(predicted_mi)
-
-            # Build HorizonForecasts for each lead time
-            for lt in self.lead_times:
-                lt_forecast[lt] = HorizonForecast(
-                    lead_time=lt,
-                    predictions=item_preds[..., lt - 1],
-                )
-
-            ts_forecast[item_id] = TimeSeriesForecast(
-                item_id=item_id,
-                lead_time_forecasts=lt_forecast,
-                data=output_data_item_id,  # needs to be fixed
-                freq=self.freq,
-                forecast_mask=forecast_mask,
-            )
-
-        return ForecastCollection(item_ids=ts_forecast)
+        return collection
 
 
 ############## Functions for fine tuning and hp optimization ##############
@@ -716,20 +686,14 @@ def fine_tune(
         return callbacks
 
     logging.info("Preparing training dataset...")
-    train_dataset = ChronosBacktestingDataset(
-        data=data_train,
-        context_length=context_length,
-        stride=1,
-        target_column=TARGET,
-        return_target=True,
-        prediction_length=prediction_length,
-        tokenizer=tokenizer,
+    train_dataset = BacktestingDataset(
+        data=data_train, context_length=context_length, stride=1, target_column=TARGET, return_target=True, prediction_length=prediction_length, tokenizer=tokenizer, rolling=True
     )
 
     eval_dataset = None
     if data_val is not None:
         logging.info("Preparing validation dataset...")
-        eval_dataset = ChronosBacktestingDataset(
+        eval_dataset = BacktestingDataset(
             data=data_val,
             context_length=context_length,
             stride=prediction_length,
@@ -737,6 +701,7 @@ def fine_tune(
             return_target=True,
             prediction_length=prediction_length,
             tokenizer=tokenizer,
+            rolling=True,
         )
 
     # Create separate directory for final training
