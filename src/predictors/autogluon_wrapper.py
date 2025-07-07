@@ -1,5 +1,5 @@
 from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
-from typing import List, Optional, Union, Dict
+from typing import List, Optional, Union
 import pandas as pd
 from src.core.base import AbstractPredictor
 import logging
@@ -10,11 +10,13 @@ from gluonts.dataset.common import ListDataset
 from torch.utils.data import DataLoader
 from src.predictors.chronos import BaseTimeSeriesDataset
 from tqdm.auto import tqdm
-from src.core.timeseries_evaluation import HorizonForecast, ForecastCollection, TimeSeriesForecast
+from src.core.timeseries_evaluation import ForecastCollection
 import torch
 import numpy as np
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+
+# TODO: reload trained models
 
 
 class GluonTSDataset(BaseTimeSeriesDataset):
@@ -41,9 +43,7 @@ class GluonTSDataset(BaseTimeSeriesDataset):
 
 class AutogluonPredictor(AbstractPredictor):
     """
-    Quantile Regression predictor for time series forecasting.
-
-    This model fits separate quantile regression models for each quantile, lead time, and item ID.
+    Wrapper around Autogluon TimeSeriesPredictor.
 
     Parameters
     ----------
@@ -63,11 +63,17 @@ class AutogluonPredictor(AbstractPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Path] = None,
+        predictor_kwargs: Optional[dict] = None,
+        predict_kwargs: Optional[dict] = None,
+        fit_kwargs: Optional[dict] = None,
     ) -> None:
         super().__init__(lead_times, freq, output_dir)
 
         self.quantiles = quantiles
         self.predictor: TimeSeriesPredictor = None
+        self.predictor_kwargs = predictor_kwargs or {}
+        self.fit_kwargs = fit_kwargs or {}
+        self.predict_kwargs = predict_kwargs or {}
         self.context_length = 512
 
     def _init_model(self):
@@ -75,6 +81,7 @@ class AutogluonPredictor(AbstractPredictor):
         return TimeSeriesPredictor(
             prediction_length=self.prediction_length,
             freq=self.freq,
+            **self.predictor_kwargs,
         )
 
     def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
@@ -83,8 +90,9 @@ class AutogluonPredictor(AbstractPredictor):
         self.predictor.fit(
             train_data=data_train,
             tuning_data=data_val,
-            hyperparameters={"PatchTST": {}},
-        )  # This means: use the default PatchTST configuration
+            verbosity=4,
+            **self.fit_kwargs,
+        )
 
     def predict(
         self,
@@ -125,63 +133,56 @@ class AutogluonPredictor(AbstractPredictor):
             data_merged = data
             skip_first = None
 
-        # Choose the appropriate dataset for single-shot or rolling prediction
-        if rolling:
-            ds = GluonTSDataset(
-                data_merged,
-                self.context_length,
-                stride,
-                skip_first,
-                rolling=rolling,
+        ds = GluonTSDataset(
+            data_merged,
+            self.context_length,
+            stride,
+            skip_first,
+            rolling=rolling,
+        )
+
+        dl = DataLoader(ds, batch_size=512)
+
+        all_forecast_chunks = []
+        next_item_id = 0
+
+        for batch in tqdm(dl, desc="Predicting rolling windows"):
+            # Build ListDataset
+            list_ds = ListDataset(
+                [
+                    {
+                        "target": target.numpy(),
+                        "start": pd.Timestamp.utcfromtimestamp(float(start)),
+                    }
+                    for target, start in zip(batch["target"], batch["start"])
+                ],
+                freq=self.freq,
             )
 
-            dl = DataLoader(ds, batch_size=128)
+            ts_data = TimeSeriesDataFrame.from_iterable_dataset(list_ds)
 
-            all_forecasts = []
-            current_sample = 0
+            # Reindex: shift item_ids by next_item_id
+            idx = ts_data.index
+            # Build new MultiIndex
+            new_index = pd.MultiIndex(
+                levels=[idx.levels[0] + next_item_id, idx.levels[1]],
+                codes=idx.codes,
+                names=idx.names,
+            )
+            ts_data.index = new_index
 
-            for batch in tqdm(dl):
-                gluonts_batch = ListDataset(
-                    [
-                        {"item_id": item_id, "target": target, "start": pd.to_datetime(start.item(), unit="s", utc=True), "feat_static_cat": [item_id]}
-                        for (item_id, target, start) in zip(batch["item_id"], batch["target"], batch["start"])
-                    ],
-                    freq=self.freq,
-                )
+            forecasts_df = self.predictor.predict(ts_data, **self.predict_kwargs)
 
-                # item_id refers to sample in this case
-                batch_ts = TimeSeriesDataFrame.from_iterable_dataset(gluonts_batch)
+            all_forecast_chunks.append(forecasts_df)
 
-                # update idxs
-                idx = batch_ts.index
-                # get unique old labels
-                old_levels = idx.levels[0]
-                # increment them
-                new_levels = old_levels + current_sample
+            next_item_id += len(ts_data.item_ids)
 
-                # build new index with same codes but shifted labels
-                new_index = pd.MultiIndex(levels=[new_levels, idx.levels[1]], codes=idx.codes, names=idx.names)
-
-                batch_ts.index = new_index
-
-                forecasts = self.predictor.predict(batch_ts, model="PatchTST")
-
-                forecasts["item_ids"] = batch["item_id"].repeat_interleave(self.prediction_length)
-
-                current_sample += len(batch["target"])
-
-                all_forecasts.append(forecasts)
-
-            all_forecasts = pd.concat(all_forecasts)
-
-        else:
-            all_forecasts = self.predictor.predict(data, model="PatchTST")
-            ds = None
+        all_forecasts_df = pd.concat(all_forecast_chunks)
 
         quantile_names = [str(q) for q in self.quantiles]
-        all_forecasts = np.stack([group[quantile_names].values.T for sample, group in all_forecasts.groupby(level=0)])
+        forecasts_array = np.stack([group[quantile_names].values.T for sample, group in all_forecasts_df.groupby(level=0)])
 
-        assert all_forecasts.shape[0] == len(ds), "row count mismatch"
+        assert forecasts_array.shape[0] == len(ds), "row count mismatch"
 
         # If rolling, output data covers all input rows
         if rolling:
@@ -190,4 +191,55 @@ class AutogluonPredictor(AbstractPredictor):
             # Only the most recent timestep per series
             output_data = data.slice_by_timestep(start_index=-1)
 
-        return ds.to_forecast_collection(predictions=torch.tensor(all_forecasts), lead_times=self.lead_times, output_data=output_data, freq=self.freq)
+        return ds.to_forecast_collection(predictions=torch.tensor(forecasts_array), lead_times=self.lead_times, output_data=output_data, freq=self.freq)
+
+
+class PatchTST_Ag(AutogluonPredictor):
+
+    def __init__(
+        self,
+        quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        output_dir: Optional[Path] = None,
+    ) -> None:
+
+        predictor_kwargs = {}
+        fit_kwargs = {"hyperparameters": {"PatchTST": {}}}
+        predict_kwargs = {"model": "PatchTST"}
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
+        self.context_length = 96
+
+
+class TiDE_Ag(AutogluonPredictor):
+
+    def __init__(
+        self,
+        quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        output_dir: Optional[Path] = None,
+    ) -> None:
+
+        predictor_kwargs = {}
+        fit_kwargs = {"hyperparameters": {"TiDE": {}}}
+        predict_kwargs = {"model": "TiDE"}
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
+        self.context_length = 512
+
+
+class Chronos_Ag(AutogluonPredictor):
+
+    def __init__(
+        self,
+        quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        output_dir: Optional[Path] = None,
+    ) -> None:
+
+        predictor_kwargs = {}
+        fit_kwargs = {"hyperparameters": {"Chronos": {"model_path": "amazon/chronos-bolt-tiny"}}}
+        predict_kwargs = {}
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
+        self.context_length = 2048
