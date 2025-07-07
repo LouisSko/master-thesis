@@ -254,7 +254,7 @@ class Chronos(AbstractPredictor):
         Whether to sample multiple trajectories. Defaults to False.
     freq : pd.Timedelta, optional
         Frequency of the time series data. Defaults to 1 hour.
-    finetuning_type : {"full", "last_layer", "LoRa"}, optional
+    finetuning_type : {"full", "last_layer", "LoRA"}, optional
         Type of fine-tuning to apply. Defaults to "full".
     finetuning_adjust_pretrained_prediction_length : bool, defaults to True
         Whether the original pretrained prediction length should be overwritten.
@@ -278,7 +278,7 @@ class Chronos(AbstractPredictor):
         lead_times: List[int] = [1, 2, 3],
         sampling: bool = False,
         freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
-        finetuning_type: Literal["full", "last_layer", "LoRa"] = "full",
+        finetuning_type: Literal["full", "last_layer", "LoRA"] = "full",
         finetuning_adjust_pretrained_prediction_length: bool = True,
         finetuning_hp_search: Optional[bool] = False,
         finetuning_hp_search_trials: Optional[int] = 10,
@@ -329,7 +329,7 @@ class Chronos(AbstractPredictor):
 
         # add lora weights if adapter_config exists in directory
         if (Path(pretrained_model_name_or_path) / "adapter_config.json").exists():
-            logging.info(f"Found LoRa configuration in {pretrained_model_name_or_path}.")
+            logging.info(f"Found LoRA configuration in {pretrained_model_name_or_path}.")
 
             with open(Path(pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
                 adapter_config: dict = json.load(f)
@@ -344,7 +344,7 @@ class Chronos(AbstractPredictor):
             # TODO: this is a hack. it produces a warning, that there is an unexpected keyword argument. Should get fixed
             if isinstance(pipeline, ChronosPipeline):
                 pred_length = adapter_config.get("prediction_length")
-                logging.info("Setting prediction length of chronos-t5 to %s based on LoRa configuration.", pred_length)
+                logging.info("Setting prediction length of chronos-t5 to %s based on LoRA configuration.", pred_length)
                 pipeline.inner_model.config.prediction_length = pred_length
                 pipeline.inner_model.config.chronos_config["prediction_length"] = pred_length
                 pipeline.model.config.prediction_length = pred_length
@@ -352,7 +352,7 @@ class Chronos(AbstractPredictor):
             # Apply LoRA adapters
             pipeline.inner_model = PeftModel.from_pretrained(pipeline.inner_model, pretrained_model_name_or_path, is_trainable=False)
             self.lora = True
-            logging.info("LoRa adapters applied successfully.")
+            logging.info("LoRA adapters applied successfully.")
 
         else:
             logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
@@ -374,7 +374,7 @@ class Chronos(AbstractPredictor):
 
         def _build_model(
             source: Union[str, Path],  # name or ckpt dir
-            mode: Literal["full", "last_layer", "LoRa", "new_rows"],
+            mode: Literal["full", "last_layer", "LoRA", "new_rows"],
         ) -> PreTrainedModel:
             """Helper that creates a pipeline (optionally from a checkpoint) and prepares it according to `mode`"""
 
@@ -409,7 +409,7 @@ class Chronos(AbstractPredictor):
                 # attached the gradient mask and left requires_grad=True
                 pass
 
-            elif mode == "LoRa":
+            elif mode == "LoRA":
                 # attach LoRA adapters (all original params stay frozen)
                 if isinstance(pipe, ChronosPipeline):
                     lcfg = ChronosLoraConfig(
@@ -446,12 +446,12 @@ class Chronos(AbstractPredictor):
             return _build_model(self.pretrained_model_name_or_path, "last_layer")
 
         def init_lora():
-            return _build_model(self.pretrained_model_name_or_path, "LoRa")
+            return _build_model(self.pretrained_model_name_or_path, "LoRA")
 
         def init_new_rows():
             return _build_model(self.pretrained_model_name_or_path, "new_rows")
 
-        model_inits = {"full": init_full, "last_layer": init_last, "LoRa": init_lora}
+        model_inits = {"full": init_full, "last_layer": init_last, "LoRA": init_lora}
 
         # Ensure config.prediction_length is up-to-date for T5 (no head resize)
         if self.finetuning_adjust_pretrained_prediction_length:
