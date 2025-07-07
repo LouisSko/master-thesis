@@ -681,14 +681,14 @@ def fine_tune(
         return callbacks
 
     logging.info("Preparing training dataset...")
-    train_dataset = BacktestingDataset(
+    train_dataset = BaseTimeSeriesDataset(
         data=data_train, context_length=context_length, stride=1, target_column=TARGET, return_target=True, prediction_length=prediction_length, tokenizer=tokenizer, rolling=True
     )
 
     eval_dataset = None
     if data_val is not None:
         logging.info("Preparing validation dataset...")
-        eval_dataset = BacktestingDataset(
+        eval_dataset = BaseTimeSeriesDataset(
             data=data_val,
             context_length=context_length,
             stride=prediction_length,
