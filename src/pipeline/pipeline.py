@@ -11,6 +11,7 @@ import json
 from typing import Type
 import joblib
 import logging
+import numpy as np
 
 PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
 
@@ -169,7 +170,7 @@ class ForecastingPipeline(AbstractPipeline):
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         save_results: bool = False,
-    ) -> Dict[str, ForecastCollection]:
+    ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """
         Run a backtest over the specified time period.
 
@@ -198,8 +199,10 @@ class ForecastingPipeline(AbstractPipeline):
 
         Returns
         -------
-        ForecastCollection
-            The predictions over the backtest period.
+        Tuple[Dict[str, ForecastCollection], Dict]
+                    A tuple containing:
+                    - A dictionary containing the forecasts for predictors/postprocessors inside a dict.
+                    - An info dictionary containing metadata and details about the backtest.
         """
 
         logging.info("Start E2E backtesting...")
@@ -215,11 +218,15 @@ class ForecastingPipeline(AbstractPipeline):
                 logging.info("test_window_size not specified. Set it to 1 year as default")
                 test_window_size = pd.DateOffset(years=1)
 
+            i = 0
             while test_start_date < test_end_date:
-                results[test_start_date], info[test_start_date] = self._run_backtest_iteration(
+                results[test_start_date], info[f"backtest_{i}"] = self._run_backtest_iteration(
                     data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on
                 )
+                info[f"backtest_{i}"]["start"] = test_start_date
                 test_start_date += test_window_size
+                info[f"backtest_{i}"]["end"] = test_start_date
+                i += 1
 
             results = self._combine_backtest_results(results)
         else:
@@ -621,7 +628,7 @@ class ForecastingPipeline(AbstractPipeline):
 
             # 5) concatenate underlying dataframes
             data_concat = pd.concat([ts.data for ts in ts_list])
-
+            forecast_mask = np.concatenate([ts.forecast_mask for ts in ts_list])
             # 6) for each lead time, stack predictions
             lead_time_forecasts: Dict[int, HorizonForecast] = {}
             for lt in lead_times:
@@ -637,6 +644,7 @@ class ForecastingPipeline(AbstractPipeline):
                 data=data_concat,
                 quantiles=quantiles,
                 freq=freq,
+                forecast_mask=forecast_mask,
             )
 
         return ForecastCollection(item_ids=merged_ts)
