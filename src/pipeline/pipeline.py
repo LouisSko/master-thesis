@@ -596,9 +596,9 @@ class ForecastingPipeline(AbstractPipeline):
             info["postprocessors"] = self.train_postprocessors(predictions_calibration_data[self.predictor.__class__.__name__])
 
             # ---------- create postprocessed forecasts ----------
-            calibrated_predictions_test_data = self.apply_postprocessors_to_forecasts(predictions_test_data)
+            predictions_test_data = self.apply_postprocessors_to_forecasts(predictions_test_data)
 
-        return calibrated_predictions_test_data, info
+        return predictions_test_data, info
 
     def _combine_backtest_results(self, backtest_results: Dict[pd.Timestamp, Dict[str, ForecastCollection]]) -> Dict[str, ForecastCollection]:
 
