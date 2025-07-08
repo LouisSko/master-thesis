@@ -154,44 +154,37 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
-        Generate seasonal-quantile forecasts.
+        Generates forecasts for each time series.
 
-        Two operating modes
-        --------------------
-        1. **Single-shot (rolling=False)**
-           *Forecast once* from the most recent observation in ``data``
-           (all earlier rows are used solely to update the history).
-
-        2. **Rolling backtest (rolling=True)**
-           Forecast repeatedly as a sliding window moves through the series.
-           The window is advanced by ``stride`` rows (≥ 1).
-           *Example:* with ``stride=3`` you obtain forecasts at rows
-           0, 3, 6, … (per item).
+        This method can perform either:
+        - *single-shot prediction* (predicting from the most recent context window), or
+        - *rolling backtesting* (sliding a window across the time series to predict at each time point).
 
         Parameters
         ----------
-        data
-            Time-stamped target values for each item.  They both *update*
-            the in-memory history and (depending on ``rolling`` / ``stride``)
-            serve as forecast start points.
-        previous_context_data
-            Optional context to *pre-seed* the history **before** processing
-            ``data``.
-        rolling
-            If ``True`` → rolling backtest.  If ``False`` → single-shot.
-        stride
-            Positive integer ≥ 1.  Ignored when ``rolling=False``.
+        data : TimeSeriesDataFrame
+            The time series data to forecast.
+        previous_context_data : Optional[TimeSeriesDataFrame], default=None
+            Optional preceding time series data for extending the context window.
+        rolling : bool, default=False
+            If True, performs rolling evaluation across all available time steps.
+            If False, predicts only from the latest observation.
+        window_step : int, default=1
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
         ForecastCollection
-            Nested structure  ``item_id → lead_time → HorizonForecast``.
+            A nested dictionary mapping each item_id to lead time forecasts.
         """
-        if stride < 1:
-            raise ValueError("stride must be a positive integer (≥1)")
+        if window_step < 1:
+            raise ValueError("window_step must be a positive integer (≥1)")
 
         # 1. Initialise / pre-seed bucket history
         if previous_context_data is not None:
@@ -221,7 +214,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
 
             # Decide at which row indices we will actually issue a forecast
             if rolling:
-                eval_indices = list(range(0, len(timestamps), stride))
+                eval_indices = list(range(0, len(timestamps), window_step))
 
             else:  # single-shot
                 eval_indices = [len(timestamps) - 1]
@@ -373,7 +366,7 @@ class RollingQuantilePredictor(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
         Generate forecasts using rolling quantiles over past target values.
@@ -387,17 +380,20 @@ class RollingQuantilePredictor(AbstractPredictor):
         previous_context_data : Optional[TimeSeriesDataFrame], optional
             Contextual data used to pre-fill history before forecasting.
         rolling : bool, optional
-            Whether to perform rolling forecasts at each stride.
-        stride : int, optional
-            Number of steps to move the evaluation window each time.
+            Whether to perform rolling forecasts at each window_step.
+        window_step : int, optional
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
         ForecastCollection
             Forecasted quantiles for each item and lead time.
         """
-        if stride < 1:
-            raise ValueError("stride must be a positive integer (≥1)")
+        if window_step < 1:
+            raise ValueError("window_step must be a positive integer (≥1)")
 
         if previous_context_data is not None:
             logging.info("Building history from provided context_data.")
@@ -419,7 +415,7 @@ class RollingQuantilePredictor(AbstractPredictor):
 
             # Decide which rows we forecast at
             if rolling:
-                eval_indices = list(range(0, len(timestamps), stride))
+                eval_indices = list(range(0, len(timestamps), window_step))
             else:
                 eval_indices = [len(timestamps) - 1]
 
@@ -538,7 +534,7 @@ class RandomWalkBenchmark(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
         Generate quantile forecasts using a Gaussian random walk in log space.
@@ -555,8 +551,11 @@ class RandomWalkBenchmark(AbstractPredictor):
             Contextual data used to pre-fill history before forecasting. Not used in this implementation.
         rolling : bool, optional
             Whether to forecast repeatedly in a rolling fashion.
-        stride : int, optional
-            Step size for rolling forecasts.
+        window_step : int, optional
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
@@ -581,7 +580,7 @@ class RandomWalkBenchmark(AbstractPredictor):
 
             # Decide at which rows to forecast
             if rolling:
-                eval_indices = list(range(0, len(timestamps), stride))
+                eval_indices = list(range(0, len(timestamps), window_step))
             else:
                 eval_indices = [len(timestamps) - 1]
 

@@ -396,7 +396,7 @@ class ForecastingPipeline(AbstractPipeline):
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> Dict[str, ForecastCollection]:
         """
         Generates forecasts for each time series using the predictor.
@@ -414,8 +414,11 @@ class ForecastingPipeline(AbstractPipeline):
         rolling : bool, default=False
             If True, performs rolling evaluation across all available time steps.
             If False, predicts only from the latest observation.
-        stride : int, default=1
-            The stride to advance the sliding window when rolling=True.
+        window_step : int, default=1
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
@@ -434,7 +437,7 @@ class ForecastingPipeline(AbstractPipeline):
             data_test.index.get_level_values("timestamp").max(),
         )
         start_time = pd.Timestamp.now()
-        predictions = self.predictor.predict(data_test, data_previous_context, rolling, stride)
+        predictions = self.predictor.predict(data_test, data_previous_context, rolling, window_step)
         end_time = pd.Timestamp.now()
         logging.info("Prediction completed in %s seconds.", (end_time - start_time).total_seconds())
 
@@ -534,7 +537,7 @@ class ForecastingPipeline(AbstractPipeline):
             data_test=data_test,
             data_previous_context=data.split_by_time(data_test.index.get_level_values("timestamp").min())[0],
             rolling=True,
-            stride=1,
+            window_step=1,
         )  # TODO: save predictions directly
 
         # ---------- define calibration dataset ----------
@@ -563,7 +566,7 @@ class ForecastingPipeline(AbstractPipeline):
                 data_test=calibration_data,
                 data_previous_context=context_data,
                 rolling=True,
-                stride=1,
+                window_step=1,
             )
 
             # ---------- train postprocessors ----------

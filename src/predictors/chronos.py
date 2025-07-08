@@ -52,7 +52,7 @@ class BaseTimeSeriesDataset(Dataset):
         self,
         data: TimeSeriesDataFrame,
         context_length: int,
-        stride: int = 1,
+        window_step: int = 1,
         skip_first_n_samples: Optional[Dict[int, int]] = None,
         target_column: str = "target",
         return_target: bool = False,
@@ -61,10 +61,10 @@ class BaseTimeSeriesDataset(Dataset):
         rolling: bool = False,
     ):
         assert context_length > 0, "context_length must be greater than 0"
-        assert stride > 0, "stride must be greater than 0"
+        assert window_step > 0, "window_step must be greater than 0"
 
         self.context_length = context_length
-        self.stride = stride
+        self.window_step = window_step
         self.return_target = return_target
         self.prediction_length = prediction_length
         self.tokenizer = tokenizer
@@ -113,7 +113,7 @@ class BaseTimeSeriesDataset(Dataset):
             start = skip_first_n_samples.get(item_id, 0) if skip_first_n_samples else 0
             end = series_len - 1
 
-            idxs = offset + np.arange(start, end + 1, self.stride)
+            idxs = offset + np.arange(start, end + 1, self.window_step)
             self.valid_idx.extend(idxs)
 
             self.ranges[item_id] = (pointer, pointer + len(idxs))
@@ -512,7 +512,7 @@ class Chronos(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series.
@@ -530,8 +530,11 @@ class Chronos(AbstractPredictor):
         rolling : bool, default=False
             If True, performs rolling evaluation across all available time steps.
             If False, predicts only from the latest observation.
-        stride : int, default=1
-            The stride to advance the sliding window when rolling=True.
+        window_step : int, default=1
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
@@ -550,7 +553,7 @@ class Chronos(AbstractPredictor):
         ds = BaseTimeSeriesDataset(
             data_merged,
             self.context_length,
-            stride,
+            window_step,
             skip_first,
             rolling=rolling,
         )
@@ -679,7 +682,14 @@ def fine_tune(
 
     logging.info("Preparing training dataset...")
     train_dataset = BaseTimeSeriesDataset(
-        data=data_train, context_length=context_length, stride=1, target_column=TARGET, return_target=True, prediction_length=prediction_length, tokenizer=tokenizer, rolling=True
+        data=data_train,
+        context_length=context_length,
+        window_step=1,
+        target_column=TARGET,
+        return_target=True,
+        prediction_length=prediction_length,
+        tokenizer=tokenizer,
+        rolling=True,
     )
 
     eval_dataset = None
@@ -688,7 +698,7 @@ def fine_tune(
         eval_dataset = BaseTimeSeriesDataset(
             data=data_val,
             context_length=context_length,
-            stride=prediction_length,
+            window_step=prediction_length,
             target_column=TARGET,
             return_target=True,
             prediction_length=prediction_length,

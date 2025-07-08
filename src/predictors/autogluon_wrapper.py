@@ -133,7 +133,7 @@ class AutogluonPredictor(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series.
@@ -151,8 +151,11 @@ class AutogluonPredictor(AbstractPredictor):
         rolling : bool, default=False
             If True, performs rolling evaluation across all available time steps.
             If False, predicts only from the latest observation.
-        stride : int, default=1
-            The stride to advance the sliding window when rolling=True.
+        window_step : int, default=1
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
@@ -170,7 +173,7 @@ class AutogluonPredictor(AbstractPredictor):
         ds = GluonTSDataset(
             data_merged,
             self.context_length,
-            stride,
+            window_step,
             skip_first,
             rolling=rolling,
         )

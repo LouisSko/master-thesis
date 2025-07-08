@@ -68,7 +68,7 @@ class AbstractPredictor(ABC):
         pass
 
     @abstractmethod
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, stride: int = 1) -> ForecastCollection:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
         pass
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
@@ -372,7 +372,7 @@ class AbstractPipeline(ABC):
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> Dict[str, ForecastCollection]:
         """
         Generates forecasts for each time series using the predictor.
@@ -390,8 +390,11 @@ class AbstractPipeline(ABC):
         rolling : bool, default=False
             If True, performs rolling evaluation across all available time steps.
             If False, predicts only from the latest observation.
-        stride : int, default=1
-            The stride to advance the sliding window when rolling=True.
+        window_step : int, default=1
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
