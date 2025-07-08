@@ -25,7 +25,7 @@ class GluonTSDataset(BaseTimeSeriesDataset):
     """
 
     def __getitem__(self, idx) -> np.ndarray:
-       """
+        """
         Retrieve the context window for the specified index.
 
         Parameters
@@ -84,6 +84,9 @@ class AutogluonPredictor(AbstractPredictor):
         Additional keyword arguments passed to TimeSeriesPredictor.predict.
     fit_kwargs : dict or None, optional
         Additional keyword arguments passed to TimeSeriesPredictor.fit.
+    context_length : int or None, optional
+        Max context length of the time series produced by the dataset/dataloader during predictions.
+
     """
 
     def __init__(
@@ -95,6 +98,7 @@ class AutogluonPredictor(AbstractPredictor):
         predictor_kwargs: Optional[dict] = None,
         predict_kwargs: Optional[dict] = None,
         fit_kwargs: Optional[dict] = None,
+        context_length: Optional[int] = 512,
     ) -> None:
         super().__init__(lead_times, output_dir)
 
@@ -103,7 +107,7 @@ class AutogluonPredictor(AbstractPredictor):
         self.predictor_kwargs = predictor_kwargs or {}
         self.fit_kwargs = fit_kwargs or {}
         self.predict_kwargs = predict_kwargs or {}
-        self.context_length = 512  # basic context length which can be overwritten
+        self.context_length = context_length
         self.freq = freq
 
     def _init_model(self):
@@ -237,8 +241,7 @@ class PatchTST_Ag(AutogluonPredictor):
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"PatchTST": {}}}
         predict_kwargs = {"model": "PatchTST"}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
-        self.context_length = 96
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 96)
 
 
 class TiDE_Ag(AutogluonPredictor):
@@ -254,8 +257,7 @@ class TiDE_Ag(AutogluonPredictor):
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"TiDE": {}}}
         predict_kwargs = {"model": "TiDE"}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
-        self.context_length = 512
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 512)
 
 
 class SeasonalNaive_Ag(AutogluonPredictor):
@@ -272,8 +274,7 @@ class SeasonalNaive_Ag(AutogluonPredictor):
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"SeasonalNaive": {"seasonal_period": seasonal_period}}}
         predict_kwargs = {}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
-        self.context_length = 2048
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 2048)
 
 
 class Chronos_Ag(AutogluonPredictor):
@@ -289,5 +290,4 @@ class Chronos_Ag(AutogluonPredictor):
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"Chronos": {"model_path": "amazon/chronos-bolt-tiny"}}}
         predict_kwargs = {}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
-        self.context_length = 2048
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 2048)
