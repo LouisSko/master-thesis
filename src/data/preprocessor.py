@@ -77,7 +77,7 @@ def read_smard_data(
 
     # check frequency of the df
     if ts_df.freq != freq:
-        logging.info("Frequency of data does not match frequency defined in the pipeline.")
+        logging.info("Frequency of data '%s' does not match defined frequency '%s'.", ts_df.freq, freq)
         ts_df = ts_df.convert_frequency(freq)
         logging.info("Data resampled to %s", ts_df.freq)
 
@@ -150,7 +150,7 @@ def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_r
 
     # check frequency of the df
     if ts_df.freq != freq:
-        logging.info("Frequency of data does not match frequency defined in the pipeline.")
+        logging.info("Frequency of data '%s' does not match defined frequency '%s'.", ts_df.freq, freq)
         ts_df = ts_df.convert_frequency(freq)
         logging.info("Data resampled to %s", ts_df.freq)
 
