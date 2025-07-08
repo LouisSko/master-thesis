@@ -135,7 +135,7 @@ class AbstractPredictor(ABC):
 
 class AbstractPostprocessor(ABC):
     def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, n_jobs: int = 1) -> None:
-        self.ignore_first_n_train_entries = 200
+        self.ignore_first_n_train_entries = 0
         self.class_name = name or self.__class__.__name__
         self.params = {}
         self.additional_info = {}
