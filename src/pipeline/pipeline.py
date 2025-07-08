@@ -167,6 +167,7 @@ class ForecastingPipeline(AbstractPipeline):
         train_window_size: Optional[pd.DateOffset] = None,
         val_window_size: Optional[pd.DateOffset] = None,
         test_window_size: Optional[pd.DateOffset] = None,
+        test_window_step: int = 1,
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         save_results: bool = False,
@@ -190,6 +191,11 @@ class ForecastingPipeline(AbstractPipeline):
             Size of the validation window. Defaults to None.
         test_window_size : Optional[pd.DateOffset], optional
             Size of the test window. Defaults to None.
+        test_window_step : int, Defaults to 1.
+            The number of time steps to move the sliding prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
         train : bool, optional
             Whether to train the model during backtesting. Defaults to False.
         calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], optional
@@ -221,7 +227,14 @@ class ForecastingPipeline(AbstractPipeline):
             i = 0
             while test_start_date < test_end_date:
                 results[test_start_date], info[f"backtest_{i}"] = self._run_backtest_iteration(
-                    data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on
+                    data,
+                    test_start_date,
+                    train,
+                    train_window_size,
+                    val_window_size,
+                    test_window_size,
+                    test_window_step,
+                    calibration_based_on,
                 )
                 info[f"backtest_{i}"]["start"] = test_start_date
                 test_start_date += test_window_size
@@ -230,7 +243,16 @@ class ForecastingPipeline(AbstractPipeline):
 
             results = self._combine_backtest_results(results)
         else:
-            results, info = self._run_backtest_iteration(data, test_start_date, train, train_window_size, val_window_size, test_window_size, calibration_based_on)
+            results, info = self._run_backtest_iteration(
+                data,
+                test_start_date,
+                train,
+                train_window_size,
+                val_window_size,
+                test_window_size,
+                test_window_step,
+                calibration_based_on,
+            )
 
         if save_results:
             backtest_params = {
@@ -512,6 +534,7 @@ class ForecastingPipeline(AbstractPipeline):
         train_window_size: Optional[pd.DateOffset],
         val_window_size: Optional[pd.DateOffset],
         test_window_size: Optional[pd.DateOffset],
+        test_window_step: int,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
@@ -537,7 +560,7 @@ class ForecastingPipeline(AbstractPipeline):
             data_test=data_test,
             data_previous_context=data.split_by_time(data_test.index.get_level_values("timestamp").min())[0],
             rolling=True,
-            window_step=1,
+            window_step=test_window_step,
         )  # TODO: save predictions directly
 
         # ---------- define calibration dataset ----------
