@@ -45,6 +45,12 @@ class AutogluonPredictor(AbstractPredictor):
     """
     Wrapper around Autogluon TimeSeriesPredictor.
 
+    Only supports univariate time series 
+    Currently no support for 
+        - known_covariates
+        - past covariates
+        - static_features
+
     Parameters
     ----------
     quantiles : List[float], optional
@@ -61,20 +67,21 @@ class AutogluonPredictor(AbstractPredictor):
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
         predictor_kwargs: Optional[dict] = None,
         predict_kwargs: Optional[dict] = None,
         fit_kwargs: Optional[dict] = None,
     ) -> None:
-        super().__init__(lead_times, freq, output_dir)
+        super().__init__(lead_times, output_dir)
 
         self.quantiles = quantiles
         self.predictor: TimeSeriesPredictor = None
         self.predictor_kwargs = predictor_kwargs or {}
         self.fit_kwargs = fit_kwargs or {}
         self.predict_kwargs = predict_kwargs or {}
-        self.context_length = 512
+        self.context_length = 512 # basic context length which can be overwritten
+        self.freq = freq
 
     def _init_model(self):
 
@@ -200,7 +207,7 @@ class PatchTST_Ag(AutogluonPredictor):
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
     ) -> None:
 
@@ -217,7 +224,7 @@ class TiDE_Ag(AutogluonPredictor):
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
     ) -> None:
 
@@ -227,6 +234,21 @@ class TiDE_Ag(AutogluonPredictor):
         super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
         self.context_length = 512
 
+class SeasonalNaive_Ag(AutogluonPredictor):
+
+    def __init__(
+        self,
+        quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        freq: Union[str, pd.DateOffset] = "1h",
+        output_dir: Optional[Path] = None,
+    ) -> None:
+
+        predictor_kwargs = {}
+        fit_kwargs = {"hyperparameters": {"SeasonalNaive": {"seasonal_period": 672}}}
+        predict_kwargs = {}
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
+        self.context_length = 2048
 
 class Chronos_Ag(AutogluonPredictor):
 
@@ -234,7 +256,7 @@ class Chronos_Ag(AutogluonPredictor):
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
     ) -> None:
 
