@@ -260,7 +260,7 @@ class TimeSeriesForecast(BaseModel):
             None: Displays the histogram plot.
         """
         pit_values = self.get_pit_values(forecast_horizon)
-        bins = len(self.quantiles)
+        bins = len(self.quantiles)+1
 
         plt.hist(pit_values, bins=bins, range=(0, 1), density=False, alpha=0.7, edgecolor="black")
         plt.axhline(len(pit_values) / bins, color="red", linestyle="dashed", label="Uniform(0,1) reference")
