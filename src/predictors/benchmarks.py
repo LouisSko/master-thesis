@@ -33,9 +33,9 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
     lead_times : List[int], optional
         List of lead times (in time steps) for which forecasts should be produced.
-    freq : Union[str, pd.Timedelta, pd.DateOffset], optional
+    freq : Union[str, pd.DateOffset], Optional
         Frequency of the time series data; can be a pandas-parsable string
-        (e.g., "1h", "1D"), a Timedelta, or a DateOffset.
+        (e.g., "1h", "1D"), or a DateOffset.
     last_n_samples : int, optional
         Number of most recent samples per bucket to use for quantile estimation.
     output_dir : Optional[Union[str, Path]], optional
@@ -46,13 +46,13 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        freq: Union[str, pd.DateOffset] = "1h",
         last_n_samples: Optional[int] = 10,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
         # Normalize freq into a pandas DateOffset
         self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
@@ -201,6 +201,8 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
             logging.info("Initialising empty history.")
             history = self._initialize_history(data.item_ids)
 
+        freq = pd.tseries.frequencies.to_offset(data.freq)
+
         percentiles = (np.array(self.quantiles) * 100).astype(int)
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
 
@@ -266,7 +268,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
                 item_id=item_id,
                 lead_time_forecasts=horizon_dict,
                 data=item_df.copy(),
-                freq=self.freq,
+                freq=freq,
                 quantiles=self.quantiles,
                 forecast_mask=forecast_mask,
             )
@@ -299,9 +301,6 @@ class RollingQuantilePredictor(AbstractPredictor):
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
     lead_times : List[int], optional
         List of lead times (in time steps) for which forecasts should be produced.
-    freq : Union[str, pd.Timedelta, pd.DateOffset], optional
-        Frequency of the time series data; can be a pandas-parsable string
-        (e.g., "1h", "1D"), a Timedelta, or a DateOffset.
     last_n_samples : int, optional
         Number of most recent samples to use for quantile estimation.
     output_dir : Optional[Union[str, Path]], optional
@@ -312,12 +311,10 @@ class RollingQuantilePredictor(AbstractPredictor):
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         last_n_samples: Optional[int] = 100,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
-        self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
@@ -412,6 +409,8 @@ class RollingQuantilePredictor(AbstractPredictor):
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
+        freq = pd.tseries.frequencies.to_offset(data.freq)
+
         for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
             data_sub = data.loc[[item_id]]
             item_history = history[item_id]
@@ -469,7 +468,7 @@ class RollingQuantilePredictor(AbstractPredictor):
                 item_id=item_id,
                 lead_time_forecasts=horizon_dict,
                 data=data_sub.copy(),
-                freq=self.freq,
+                freq=freq,
                 quantiles=self.quantiles,
                 forecast_mask=forecast_mask,
             )
@@ -491,9 +490,6 @@ class RandomWalkBenchmark(AbstractPredictor):
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
     lead_times : List[int], optional
         List of lead times (in time steps) for which forecasts should be produced.
-    freq : Union[str, pd.Timedelta, pd.DateOffset], optional
-        Frequency of the time series data; can be a pandas-parsable string
-        (e.g., "1h", "1D"), a Timedelta, or a DateOffset.
     output_dir : Optional[Union[str, Path]], optional
         Directory to store model outputs or logs.
     """
@@ -502,12 +498,9 @@ class RandomWalkBenchmark(AbstractPredictor):
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = [1, 2, 3],
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
-        # Normalize freq into a pandas DateOffset
-        self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, output_dir=output_dir)
         self.quantiles = quantiles
         self.sd_yd = {}  # standard deviation for each item id
 
@@ -571,6 +564,8 @@ class RandomWalkBenchmark(AbstractPredictor):
             Forecasted quantiles for each item and lead time.
         """
 
+        freq = pd.tseries.frequencies.to_offset(data.freq)
+
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
 
         h_steps = np.array(self.lead_times).reshape(-1, 1)
@@ -619,7 +614,7 @@ class RandomWalkBenchmark(AbstractPredictor):
                 item_id=item_id,
                 lead_time_forecasts=lt_forcast,
                 data=data_sub.copy(),
-                freq=self.freq,
+                freq=freq,
                 quantiles=self.quantiles,
                 forecast_mask=forecast_mask,
             )

@@ -23,6 +23,7 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
+        freq: Union[str, pd.DateOffset],
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
         postprocessor_kwargs: Optional[List[Dict]] = None,
         output_dir: Optional[Union[Path, str]] = None,
@@ -47,6 +48,13 @@ class ForecastingPipeline(AbstractPipeline):
         self._initialize_predictor()
         if self.postprocessors is not None:
             self._initialize_postprocessors()
+
+        if isinstance(freq, str):
+            self.freq = pd.tseries.frequencies.to_offset(freq)
+        elif isinstance(freq, pd.DateOffset):
+            self.freq = freq
+        else:
+            raise ValueError("freq needs to be a str or pd.DateOffset")
 
     def _initialize_predictor(self):
         self.model_kwargs.update({"output_dir": self.pipeline_dir_models})
@@ -313,6 +321,20 @@ class ForecastingPipeline(AbstractPipeline):
 
         return data_train, data_val, data_test
 
+    def validate_data(self, data: TimeSeriesDataFrame):
+
+        if not data.index.is_monotonic_increasing:
+            logging.info("Data index is not monotonic increasing. Reorder dataframe")
+            data = data.sort_index()
+            data.freq = None
+
+        # check frequency of the df
+        if data.freq != self.freq.freqstr:
+            logging.info("CAUTION: Frequency of data '%s' does not match frequency defined in the pipeline '%s'.", data.freq, self.freq.freqstr)
+            data = data.convert_frequency(self.freq)
+            logging.info("Data resampled to %s", data.freq)
+        return data
+
     def train_predictor_model(
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
@@ -339,8 +361,11 @@ class ForecastingPipeline(AbstractPipeline):
         start_time = pd.Timestamp.now()
         logging.info("Starting training process from %s to %s", data_train.index.get_level_values("timestamp").min(), data_train.index.get_level_values("timestamp").max())
 
+        data_train = self.validate_data(data_train)
+
         # Check if validation data is provided and log accordingly
         if data_val is not None:
+            data_val = self.validate_data(data_val)
             logging.info("Validation data from %s to %s", data_val.index.get_level_values("timestamp").min(), data_val.index.get_level_values("timestamp").max())
         else:
             logging.info("No validation data provided.")
@@ -390,6 +415,11 @@ class ForecastingPipeline(AbstractPipeline):
         Dict[str, ForecastCollection]
             Dictionary with predictions stored in a ForecastCollection object.
         """
+
+        data_test = self.validate_data(data_test)
+        if data_previous_context is not None:
+            data_previous_context = self.validate_data(data_previous_context)
+
         logging.info(
             "Starting forecast generation of model %s for data_test from %s to %s",
             self.predictor.__class__.__name__,

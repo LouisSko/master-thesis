@@ -44,13 +44,11 @@ class AbstractPredictor(ABC):
     def __init__(
         self,
         lead_times: List[int] = [1, 2, 3],
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
 
         self.lead_times = lead_times
         self.prediction_length = max(lead_times)
-        self.freq = freq
         self.output_dir = None
         if output_dir:
             self.output_dir = Path(output_dir)
@@ -95,6 +93,8 @@ class AbstractPredictor(ABC):
         # get item ids (unique time series)
         shared_ids = data.item_ids.intersection(previous_context_data.item_ids)
 
+        freq_as_offset = pd.tseries.frequencies.to_offset(data.freq)
+
         # verify if there are gaps between data and previous_context_data
         for item_id in shared_ids:
             prev_series = previous_context_data.loc[item_id]
@@ -106,7 +106,7 @@ class AbstractPredictor(ABC):
             last_prev_time = prev_series.index[-1]
             first_curr_time = curr_series.index[0]
 
-            expected_next_time = last_prev_time + self.freq
+            expected_next_time = last_prev_time + freq_as_offset
             if expected_next_time != first_curr_time:
                 logging.warning(f"Data for item_id '{item_id}' is not consecutive. " f"Expected {expected_next_time}, got {first_curr_time}.")
 

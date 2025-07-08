@@ -195,15 +195,15 @@ class BaseTimeSeriesDataset(Dataset):
     def valid_timestamps(self):
         return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
 
-    def to_forecast_collection(
-        self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame, freq: Union[pd.Timedelta, pd.DateOffset]
-    ) -> ForecastCollection:
+    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame) -> ForecastCollection:
         """
         Assemble a ForecastCollection given model predictions.
 
         predictions is a tensor [N x num_quantiles x prediction length]
         """
-        
+
+        freq = pd.tseries.frequencies.to_offset(output_data.freq)
+
         preds_df = pd.DataFrame(
             {
                 "item_id": self.item_ids[self.valid_idx],
@@ -252,8 +252,6 @@ class Chronos(AbstractPredictor):
         List of prediction steps ahead (lead times). Defaults to [1, 2, 3].
     sampling: bool, optional
         Whether to sample multiple trajectories. Defaults to False.
-    freq : pd.Timedelta, optional
-        Frequency of the time series data. Defaults to 1 hour.
     finetuning_type : {"full", "last_layer", "LoRA"}, optional
         Type of fine-tuning to apply. Defaults to "full".
     finetuning_adjust_pretrained_prediction_length : bool, defaults to True
@@ -277,7 +275,6 @@ class Chronos(AbstractPredictor):
         context_length: int = 2048,
         lead_times: List[int] = [1, 2, 3],
         sampling: bool = False,
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         finetuning_type: Literal["full", "last_layer", "LoRA"] = "full",
         finetuning_adjust_pretrained_prediction_length: bool = True,
         finetuning_hp_search: Optional[bool] = False,
@@ -285,7 +282,7 @@ class Chronos(AbstractPredictor):
         finetuning_warmup_new_neurons: bool = True,
         output_dir: Optional[Path] = Path("./models/"),
     ) -> None:
-        super().__init__(lead_times, freq, output_dir)
+        super().__init__(lead_times, output_dir)
         self.context_length = context_length
         self.prediction_length = max(self.lead_times)
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
@@ -595,7 +592,7 @@ class Chronos(AbstractPredictor):
             # Only the most recent timestep per series
             output_data = data.slice_by_timestep(start_index=-1)
 
-        collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data, freq=self.freq)
+        collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data)
 
         return collection
 
@@ -889,7 +886,7 @@ def build_train_args(
 def check_model_parameters(chronos: Chronos, model_name: str = "amazon/chronos-bolt-tiny"):
     """Helper function to verify, if weights have changed."""
 
-    chronos_copy = Chronos(model_name=model_name, device_map="mps", lead_times=np.arange(1, 65), freq=pd.Timedelta("1h"))
+    chronos_copy = Chronos(model_name=model_name, device_map="mps", lead_times=np.arange(1, 65))
 
     for (name1, p1), (name2, p2) in zip(chronos_copy.pipeline.inner_model.named_parameters(), chronos.pipeline.inner_model.named_parameters()):
         if not torch.equal(p1, p2):

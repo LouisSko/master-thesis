@@ -11,7 +11,7 @@ def read_smard_data(
     file_paths: List[Path],
     selected_time_series: Optional[List[str]] = None,
     cols_to_drop: Optional[List[str]] = None,
-    freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+    freq: Union[str, pd.DateOffset] = "1h",
 ) -> Tuple[pd.DataFrame, Dict[int, str]]:
     """
     Reads and processes SMARD data from multiple CSV files into a unified long-format DataFrame.
@@ -31,6 +31,8 @@ def read_smard_data(
         - A long-format DataFrame with columns ['timestamp', 'item_id', 'target'].
         - A mapping from integer item_ids to original time series names.
     """
+
+    freq = pd.tseries.frequencies.to_offset(freq).freqstr
 
     logging.info("Reading SMARD data...")
 
@@ -71,11 +73,19 @@ def read_smard_data(
 
     logging.info(f"Mapped {len(mapping)} unique time series.")
 
+    ts_df = TimeSeriesDataFrame(df)
+
+    # check frequency of the df
+    if ts_df.freq != freq:
+        logging.info("Frequency of data does not match frequency defined in the pipeline.")
+        ts_df = ts_df.convert_frequency(freq)
+        logging.info("Data resampled to %s", ts_df.freq)
+
     # Step 5: Log memory usage
-    mem_mb = df.memory_usage(deep=True).sum() / 1024**2
+    mem_mb = ts_df.memory_usage(deep=True).sum() / 1024**2
     logging.info(f"Final DataFrame memory usage: {mem_mb:.2f} MB")
 
-    return TimeSeriesDataFrame(df), mapping, freq
+    return ts_df, mapping
 
 
 def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_rates/")) -> Tuple[pd.DataFrame, Dict[int, str]]:
@@ -136,10 +146,16 @@ def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_r
 
     logging.info(f"Mapped {len(mapping)} unique exchange rate series.")
 
+    ts_df = TimeSeriesDataFrame(df)
+
+    # check frequency of the df
+    if ts_df.freq != freq:
+        logging.info("Frequency of data does not match frequency defined in the pipeline.")
+        ts_df = ts_df.convert_frequency(freq)
+        logging.info("Data resampled to %s", ts_df.freq)
+
     # Step 5: Log memory usage
-    mem_mb = df.memory_usage(deep=True).sum() / 1024**2
+    mem_mb = ts_df.memory_usage(deep=True).sum() / 1024**2
     logging.info(f"Final DataFrame memory usage: {mem_mb:.2f} MB")
 
-    logging.info("Finished reading and preprocessing exchange rates data.")
-
-    return TimeSeriesDataFrame(df), mapping, freq
+    return ts_df, mapping
