@@ -113,8 +113,7 @@ class AbstractPredictor(ABC):
         # add the context length to data
         previous_context_data = previous_context_data.loc[data.item_ids]
         previous_context_data = previous_context_data.groupby("item_id").tail(context_length)
-        
-        len_prepended_context = previous_context_data.groupby("item_id").count().to_dict()[TARGET]
+        len_prepended_context = previous_context_data.groupby("item_id").size().to_dict()
         data_merged = pd.concat([previous_context_data, data]).sort_index()
 
         return TimeSeriesDataFrame(data_merged), len_prepended_context
