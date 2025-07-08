@@ -25,8 +25,25 @@ class GluonTSDataset(BaseTimeSeriesDataset):
     """
 
     def __getitem__(self, idx) -> np.ndarray:
-        """Retrieves the context window for the given index within its corresponding time series."""
+       """
+        Retrieve the context window for the specified index.
 
+        Parameters
+        ----------
+        idx : int
+            Index within the dataset.
+
+        Returns
+        -------
+        dict
+            A dictionary containing:
+            - 'item_id' : int
+                The ID of the time series this observation belongs to.
+            - 'target' : np.ndarray
+                The array of target values up to and including the given position.
+            - 'start' : float
+                The timestamp (POSIX float) of the first observation in the window.
+        """
         real_idx = self.valid_idx[idx]
         item_id = self.item_ids[real_idx]
         timestamp = self.timestamps[real_idx].timestamp()
@@ -43,24 +60,30 @@ class GluonTSDataset(BaseTimeSeriesDataset):
 
 class AutogluonPredictor(AbstractPredictor):
     """
-    Wrapper around Autogluon TimeSeriesPredictor.
+    Wrapper around AutoGluon TimeSeriesPredictor.
 
-    Only supports univariate time series 
-    Currently no support for 
+    Only supports univariate time series.
+    Currently does not support:
         - known_covariates
         - past covariates
         - static_features
 
     Parameters
     ----------
-    quantiles : List[float], optional
+    quantiles : list of float, optional
         List of quantiles to predict. Defaults to [0.1, 0.2, ..., 0.9].
-    lead_times : List[int], optional
+    lead_times : list of int, optional
         List of lead times (forecast horizons) to predict. Defaults to [1, 2, 3].
-    freq : pd.Timedelta, optional
-        Frequency of the time series data. Defaults to 1 hour.
-    output_dir : Optional[Path], optional
+    freq : str or pd.DateOffset, optional
+        Frequency of the time series data. Defaults to '1h'.
+    output_dir : Path or None, optional
         Directory to save the fitted model. Defaults to None.
+    predictor_kwargs : dict or None, optional
+        Additional keyword arguments passed to TimeSeriesPredictor constructor.
+    predict_kwargs : dict or None, optional
+        Additional keyword arguments passed to TimeSeriesPredictor.predict.
+    fit_kwargs : dict or None, optional
+        Additional keyword arguments passed to TimeSeriesPredictor.fit.
     """
 
     def __init__(
@@ -80,7 +103,7 @@ class AutogluonPredictor(AbstractPredictor):
         self.predictor_kwargs = predictor_kwargs or {}
         self.fit_kwargs = fit_kwargs or {}
         self.predict_kwargs = predict_kwargs or {}
-        self.context_length = 512 # basic context length which can be overwritten
+        self.context_length = 512  # basic context length which can be overwritten
         self.freq = freq
 
     def _init_model(self):
@@ -198,7 +221,7 @@ class AutogluonPredictor(AbstractPredictor):
             # Only the most recent timestep per series
             output_data = data.slice_by_timestep(start_index=-1)
 
-        return ds.to_forecast_collection(predictions=torch.tensor(forecasts_array), lead_times=self.lead_times, output_data=output_data, freq=self.freq)
+        return ds.to_forecast_collection(predictions=torch.tensor(forecasts_array), lead_times=self.lead_times, output_data=output_data)
 
 
 class PatchTST_Ag(AutogluonPredictor):
@@ -234,6 +257,7 @@ class TiDE_Ag(AutogluonPredictor):
         super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
         self.context_length = 512
 
+
 class SeasonalNaive_Ag(AutogluonPredictor):
 
     def __init__(
@@ -241,14 +265,16 @@ class SeasonalNaive_Ag(AutogluonPredictor):
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: Union[str, pd.DateOffset] = "1h",
+        seasonal_period: int = 7,
         output_dir: Optional[Path] = None,
     ) -> None:
 
         predictor_kwargs = {}
-        fit_kwargs = {"hyperparameters": {"SeasonalNaive": {"seasonal_period": 672}}}
+        fit_kwargs = {"hyperparameters": {"SeasonalNaive": {"seasonal_period": seasonal_period}}}
         predict_kwargs = {}
         super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs)
         self.context_length = 2048
+
 
 class Chronos_Ag(AutogluonPredictor):
 
