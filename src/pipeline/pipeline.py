@@ -560,7 +560,7 @@ class ForecastingPipeline(AbstractPipeline):
             )
 
             # ---------- train postprocessors ----------
-            info["postprocessors"] = self.train_postprocessors(predictions_calibration_data)
+            info["postprocessors"] = self.train_postprocessors(predictions_calibration_data[self.predictor.__class__.__name__])
 
             # ---------- create postprocessed forecasts ----------
             calibrated_predictions_test_data = self.apply_postprocessors_to_forecasts(predictions_test_data)
