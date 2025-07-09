@@ -1,16 +1,32 @@
-from src.data.preprocessor import read_smard_data
 from src.pipeline.pipeline import ForecastingPipeline
 from src.predictors.chronos import Chronos
 from src.predictors.benchmarks import RandomWalkBenchmark, RollingSeasonalQuantilePredictor
-import pandas as pd
 import eval_constants
 import torch
 from src.predictors.autogluon_wrapper import SeasonalNaive_Ag, PatchTST_Ag, TiDE_Ag
-
-# TODO: define a dict for each dataset with all relevant settings.
+import argparse
 
 
 def evaluate():
+
+    # specify chronos variant
+    chronos_variant = "tiny"
+
+    # 3 dataset to chose from
+    DAP = "day_ahead_prices"
+    EC = "electricity_consumption"
+    ER = "exchange_rates"
+    parser = argparse.ArgumentParser(description="Run evaluation pipeline for selected dataset.")
+    parser.add_argument("--dataset", type=str, required=True, choices=[DAP, EC, ER], help="Dataset to evaluate")
+
+    args = parser.parse_args()
+
+    if args.dataset == EC:
+        dataset_config = eval_constants.electricity_consumption_config
+    elif args.dataset == DAP:
+        dataset_config = eval_constants.day_ahead_prices_config
+    elif args.dataset == ER:
+        dataset_config = eval_constants.exchange_rate_config
 
     # common settings
     lead_times = eval_constants.lead_times
@@ -18,22 +34,14 @@ def evaluate():
     test_start_date = eval_constants.test_start_date
     postprocessors = eval_constants.postprocessors
     postprocessor_kwargs = eval_constants.postprocessor_kwargs
-    chronos_variant = "tiny"
 
     # dataset specific:
-    freq = "15 min"
-    val_window_size = pd.DateOffset(years=1)
-    test_window_step = 96
-    output_dir = eval_constants.output_dir_electricity_consumption
-    seasonal_period = 4 * 24 * 7  # 672
-    data, mapping = read_smard_data(
-        file_paths=[
-            "data/electricity_consumption/Actual_consumption_201501010000_202001010000_Quarterhour.csv",
-            "data/electricity_consumption/Actual_consumption_202001010000_202506120000_Quarterhour.csv",
-        ],
-        selected_time_series=["grid load [MWh] Original resolutions", "Residual load [MWh] Original resolutions"],
-        freq=freq,
-    )
+    freq = dataset_config["freq"]
+    val_window_size = dataset_config["val_window_size"]
+    test_window_step = dataset_config["test_window_step"]
+    output_dir = dataset_config["output_dir"]
+    seasonal_period = dataset_config["seasonal_period"]
+    data = dataset_config["data"]
 
     if torch.cuda.is_available():
         device_map = "cuda"
@@ -42,8 +50,7 @@ def evaluate():
     else:
         device_map = "cpu"
 
-    torch.cuda.set_device(1)
-
+    # torch.cuda.set_device(1)
 
     # ------------------------ Chronos-Bolt ------------------------
 
@@ -145,7 +152,37 @@ def evaluate():
     del pipeline
     del results
 
-    # ------------------------ Chronos-t5 ------------------------
+    # # ------------------------ Chronos-t5 ------------------------
+
+    # chronos-t5 zero-shot w/o postprocessing due to speed limitations
+    pipeline = ForecastingPipeline(
+        model=Chronos,
+        model_kwargs={
+            "pretrained_model_name_or_path": f"amazon/chronos-t5-{chronos_variant}",
+            "device_map": device_map,
+            "lead_times": lead_times,
+        },
+        postprocessors=None,
+        postprocessor_kwargs=None,
+        freq=freq,
+        output_dir=output_dir / f"chronos-t5-{chronos_variant}-zero-shot",
+    )
+
+    results = pipeline.backtest(
+        data=data,
+        test_start_date=test_start_date,
+        rolling_window_eval=False,
+        train=False,
+        val_window_size=val_window_size,
+        train_window_size=None,
+        test_window_size=None,
+        calibration_based_on="train",
+        save_results=True,
+        test_window_step=test_window_step,
+    )
+
+    del pipeline
+    del results
 
     # chronos-t5 zero-shot
     pipeline = ForecastingPipeline(
