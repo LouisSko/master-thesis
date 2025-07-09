@@ -29,7 +29,7 @@ class ForecastingPipeline(AbstractPipeline):
         postprocessor_kwargs: Optional[List[Dict]] = None,
         output_dir: Optional[Union[Path, str]] = None,
     ):
-        super().__init__(model, model_kwargs, postprocessors, postprocessor_kwargs, output_dir)
+        super().__init__(model, model_kwargs, freq, postprocessors, postprocessor_kwargs, output_dir)
 
         # define storage directory
         self.pipeline_dir_models = self.output_dir / DIR_MODELS
@@ -49,13 +49,6 @@ class ForecastingPipeline(AbstractPipeline):
         self._initialize_predictor()
         if self.postprocessors is not None:
             self._initialize_postprocessors()
-
-        if isinstance(freq, str):
-            self.freq = pd.tseries.frequencies.to_offset(freq)
-        elif isinstance(freq, pd.DateOffset):
-            self.freq = freq
-        else:
-            raise ValueError("freq needs to be a str or pd.DateOffset")
 
     def _initialize_predictor(self):
         self.model_kwargs.update({"output_dir": self.pipeline_dir_models})

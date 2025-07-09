@@ -274,6 +274,7 @@ class AbstractPipeline(ABC):
         self,
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
+        freq: Union[str, pd.DateOffset],
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
         postprocessor_kwargs: Optional[List[Dict]] = None,
         output_dir: Optional[Union[str, Path]] = None,
@@ -286,6 +287,8 @@ class AbstractPipeline(ABC):
             The predictor model class to use
         model_kwargs : Dict
             Keyword arguments to pass to the model constructor
+        freq : Union[str, pd.DateOffset]
+            Frequency of the data 
         postprocessors : Optional[List[Type[AbstractPostprocessor]]], default=None
             Optional list of postprocessors for refining predictions
         output_dir : Optional[Union[str, Path]], default=None
@@ -298,6 +301,14 @@ class AbstractPipeline(ABC):
         self.model_kwargs = model_kwargs
         self.postprocessors = postprocessors
         self.postprocessor_kwargs = postprocessor_kwargs
+
+        if isinstance(freq, str):
+            self.freq = pd.tseries.frequencies.to_offset(freq)
+        elif isinstance(freq, pd.DateOffset):
+            self.freq = freq
+        else:
+            raise ValueError("freq needs to be a str or pd.DateOffset")
+
 
     @abstractmethod
     def backtest(
