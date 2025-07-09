@@ -514,10 +514,13 @@ class ForecastCollection(BaseModel):
 
             scores = np.vstack(scores).T
 
-            idx = [item_id] if mean_time else item.to_dataframe(lt).index[: -max(self.get_lead_times())]
+            idx = [item_id] if mean_time else item.to_dataframe(lt).index
             all_scores.append(pd.DataFrame(scores, index=idx, columns=lead_times))
 
         crps_scores = pd.concat(all_scores)
+
+        # drop rows with missing values
+        crps_scores = crps_scores.dropna()
 
         if mean_lead_times:
             crps_scores = pd.DataFrame(crps_scores.mean(axis=1), columns=["Mean CRPS"])
