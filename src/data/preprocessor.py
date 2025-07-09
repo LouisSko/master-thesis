@@ -12,9 +12,9 @@ def read_smard_data(
     selected_time_series: Optional[List[str]] = None,
     cols_to_drop: Optional[List[str]] = None,
     freq: Union[str, pd.DateOffset] = "1h",
-) -> Tuple[pd.DataFrame, Dict[int, str]]:
+) -> Tuple[TimeSeriesDataFrame, Dict[int, str]]:
     """
-    Reads and processes SMARD data from multiple CSV files into a unified long-format DataFrame.
+    Reads and processes SMARD data from multiple CSV files into a unified long-format TimeSeriesDataFrame.
 
     Parameters
     ----------
@@ -27,8 +27,8 @@ def read_smard_data(
 
     Returns
     -------
-    Tuple[pd.DataFrame, Dict[int, str]]
-        - A long-format DataFrame with columns ['timestamp', 'item_id', 'target'].
+    Tuple[TimeSeriesDataFrame, Dict[int, str]]
+        - A long-format TimeSeriesDataFrame with columns ['timestamp', 'item_id', 'target'].
         - A mapping from integer item_ids to original time series names.
     """
 
@@ -88,9 +88,9 @@ def read_smard_data(
     return ts_df, mapping
 
 
-def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_rates/")) -> Tuple[pd.DataFrame, Dict[int, str]]:
+def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_rates/")) -> Tuple[TimeSeriesDataFrame, Dict[int, str]]:
     """
-    Reads and processes exchange rate data from FRED into a unified long-format DataFrame.
+    Reads and processes exchange rate data from FRED into a unified long-format TimeSeriesDataFrame.
 
     Parameters
     ----------
@@ -99,8 +99,8 @@ def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_r
 
     Returns
     -------
-    Tuple[pd.DataFrame, Dict[int, str]]
-        - A long-format DataFrame with columns ['timestamp', 'item_id', 'target'].
+    Tuple[TimeSeriesDataFrame, Dict[int, str]]
+        - A long-format TimeSeriesDataFrame with columns ['timestamp', 'item_id', 'target'].
         - A mapping from integer item_ids to currency pairs.
     """
 
