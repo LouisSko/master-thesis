@@ -33,9 +33,9 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
     lead_times : List[int], optional
         List of lead times (in time steps) for which forecasts should be produced.
-    freq : Union[str, pd.Timedelta, pd.DateOffset], optional
+    freq : Union[str, pd.DateOffset], Optional
         Frequency of the time series data; can be a pandas-parsable string
-        (e.g., "1h", "1D"), a Timedelta, or a DateOffset.
+        (e.g., "1h", "1D"), or a DateOffset.
     last_n_samples : int, optional
         Number of most recent samples per bucket to use for quantile estimation.
     output_dir : Optional[Union[str, Path]], optional
@@ -46,13 +46,13 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
+        freq: Union[str, pd.DateOffset] = "1h",
         last_n_samples: Optional[int] = 10,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
         # Normalize freq into a pandas DateOffset
         self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
@@ -154,44 +154,37 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
-        Generate seasonal-quantile forecasts.
+        Generates forecasts for each time series.
 
-        Two operating modes
-        --------------------
-        1. **Single-shot (rolling=False)**
-           *Forecast once* from the most recent observation in ``data``
-           (all earlier rows are used solely to update the history).
-
-        2. **Rolling backtest (rolling=True)**
-           Forecast repeatedly as a sliding window moves through the series.
-           The window is advanced by ``stride`` rows (≥ 1).
-           *Example:* with ``stride=3`` you obtain forecasts at rows
-           0, 3, 6, … (per item).
+        This method can perform either:
+        - *single-shot prediction* (predicting from the most recent context window), or
+        - *rolling backtesting* (sliding a window across the time series to predict at each time point).
 
         Parameters
         ----------
-        data
-            Time-stamped target values for each item.  They both *update*
-            the in-memory history and (depending on ``rolling`` / ``stride``)
-            serve as forecast start points.
-        previous_context_data
-            Optional context to *pre-seed* the history **before** processing
-            ``data``.
-        rolling
-            If ``True`` → rolling backtest.  If ``False`` → single-shot.
-        stride
-            Positive integer ≥ 1.  Ignored when ``rolling=False``.
+        data : TimeSeriesDataFrame
+            The time series data to forecast.
+        previous_context_data : Optional[TimeSeriesDataFrame], default=None
+            Optional preceding time series data for extending the context window.
+        rolling : bool, default=False
+            If True, performs rolling evaluation across all available time steps.
+            If False, predicts only from the latest observation.
+        window_step : int, default=1
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
         ForecastCollection
-            Nested structure  ``item_id → lead_time → HorizonForecast``.
+            A nested dictionary mapping each item_id to lead time forecasts.
         """
-        if stride < 1:
-            raise ValueError("stride must be a positive integer (≥1)")
+        if window_step < 1:
+            raise ValueError("window_step must be a positive integer (≥1)")
 
         # 1. Initialise / pre-seed bucket history
         if previous_context_data is not None:
@@ -200,6 +193,8 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         else:
             logging.info("Initialising empty history.")
             history = self._initialize_history(data.item_ids)
+
+        freq = pd.tseries.frequencies.to_offset(data.freq)
 
         percentiles = (np.array(self.quantiles) * 100).astype(int)
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
@@ -219,7 +214,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
 
             # Decide at which row indices we will actually issue a forecast
             if rolling:
-                eval_indices = list(range(0, len(timestamps), stride))
+                eval_indices = list(range(0, len(timestamps), window_step))
 
             else:  # single-shot
                 eval_indices = [len(timestamps) - 1]
@@ -266,7 +261,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
                 item_id=item_id,
                 lead_time_forecasts=horizon_dict,
                 data=item_df.copy(),
-                freq=self.freq,
+                freq=freq,
                 quantiles=self.quantiles,
                 forecast_mask=forecast_mask,
             )
@@ -299,9 +294,6 @@ class RollingQuantilePredictor(AbstractPredictor):
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
     lead_times : List[int], optional
         List of lead times (in time steps) for which forecasts should be produced.
-    freq : Union[str, pd.Timedelta, pd.DateOffset], optional
-        Frequency of the time series data; can be a pandas-parsable string
-        (e.g., "1h", "1D"), a Timedelta, or a DateOffset.
     last_n_samples : int, optional
         Number of most recent samples to use for quantile estimation.
     output_dir : Optional[Union[str, Path]], optional
@@ -312,12 +304,10 @@ class RollingQuantilePredictor(AbstractPredictor):
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         last_n_samples: Optional[int] = 100,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
-        self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
@@ -376,7 +366,7 @@ class RollingQuantilePredictor(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
         Generate forecasts using rolling quantiles over past target values.
@@ -390,17 +380,20 @@ class RollingQuantilePredictor(AbstractPredictor):
         previous_context_data : Optional[TimeSeriesDataFrame], optional
             Contextual data used to pre-fill history before forecasting.
         rolling : bool, optional
-            Whether to perform rolling forecasts at each stride.
-        stride : int, optional
-            Number of steps to move the evaluation window each time.
+            Whether to perform rolling forecasts at each window_step.
+        window_step : int, optional
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
         ForecastCollection
             Forecasted quantiles for each item and lead time.
         """
-        if stride < 1:
-            raise ValueError("stride must be a positive integer (≥1)")
+        if window_step < 1:
+            raise ValueError("window_step must be a positive integer (≥1)")
 
         if previous_context_data is not None:
             logging.info("Building history from provided context_data.")
@@ -412,6 +405,8 @@ class RollingQuantilePredictor(AbstractPredictor):
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
         percentiles = (np.array(self.quantiles) * 100).astype(int)
 
+        freq = pd.tseries.frequencies.to_offset(data.freq)
+
         for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
             data_sub = data.loc[[item_id]]
             item_history = history[item_id]
@@ -420,7 +415,7 @@ class RollingQuantilePredictor(AbstractPredictor):
 
             # Decide which rows we forecast at
             if rolling:
-                eval_indices = list(range(0, len(timestamps), stride))
+                eval_indices = list(range(0, len(timestamps), window_step))
             else:
                 eval_indices = [len(timestamps) - 1]
 
@@ -469,7 +464,7 @@ class RollingQuantilePredictor(AbstractPredictor):
                 item_id=item_id,
                 lead_time_forecasts=horizon_dict,
                 data=data_sub.copy(),
-                freq=self.freq,
+                freq=freq,
                 quantiles=self.quantiles,
                 forecast_mask=forecast_mask,
             )
@@ -491,9 +486,6 @@ class RandomWalkBenchmark(AbstractPredictor):
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
     lead_times : List[int], optional
         List of lead times (in time steps) for which forecasts should be produced.
-    freq : Union[str, pd.Timedelta, pd.DateOffset], optional
-        Frequency of the time series data; can be a pandas-parsable string
-        (e.g., "1h", "1D"), a Timedelta, or a DateOffset.
     output_dir : Optional[Union[str, Path]], optional
         Directory to store model outputs or logs.
     """
@@ -502,12 +494,9 @@ class RandomWalkBenchmark(AbstractPredictor):
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = [1, 2, 3],
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
-        # Normalize freq into a pandas DateOffset
-        self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, freq=freq, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, output_dir=output_dir)
         self.quantiles = quantiles
         self.sd_yd = {}  # standard deviation for each item id
 
@@ -545,7 +534,7 @@ class RandomWalkBenchmark(AbstractPredictor):
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> ForecastCollection:
         """
         Generate quantile forecasts using a Gaussian random walk in log space.
@@ -562,14 +551,19 @@ class RandomWalkBenchmark(AbstractPredictor):
             Contextual data used to pre-fill history before forecasting. Not used in this implementation.
         rolling : bool, optional
             Whether to forecast repeatedly in a rolling fashion.
-        stride : int, optional
-            Step size for rolling forecasts.
+        window_step : int, optional
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
         ForecastCollection
             Forecasted quantiles for each item and lead time.
         """
+
+        freq = pd.tseries.frequencies.to_offset(data.freq)
 
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
 
@@ -586,7 +580,7 @@ class RandomWalkBenchmark(AbstractPredictor):
 
             # Decide at which rows to forecast
             if rolling:
-                eval_indices = list(range(0, len(timestamps), stride))
+                eval_indices = list(range(0, len(timestamps), window_step))
             else:
                 eval_indices = [len(timestamps) - 1]
 
@@ -619,7 +613,7 @@ class RandomWalkBenchmark(AbstractPredictor):
                 item_id=item_id,
                 lead_time_forecasts=lt_forcast,
                 data=data_sub.copy(),
-                freq=self.freq,
+                freq=freq,
                 quantiles=self.quantiles,
                 forecast_mask=forecast_mask,
             )

@@ -44,13 +44,11 @@ class AbstractPredictor(ABC):
     def __init__(
         self,
         lead_times: List[int] = [1, 2, 3],
-        freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
 
         self.lead_times = lead_times
         self.prediction_length = max(lead_times)
-        self.freq = freq
         self.output_dir = None
         if output_dir:
             self.output_dir = Path(output_dir)
@@ -70,7 +68,7 @@ class AbstractPredictor(ABC):
         pass
 
     @abstractmethod
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, stride: int = 1) -> ForecastCollection:
+    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
         pass
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
@@ -95,6 +93,8 @@ class AbstractPredictor(ABC):
         # get item ids (unique time series)
         shared_ids = data.item_ids.intersection(previous_context_data.item_ids)
 
+        freq_as_offset = pd.tseries.frequencies.to_offset(data.freq)
+
         # verify if there are gaps between data and previous_context_data
         for item_id in shared_ids:
             prev_series = previous_context_data.loc[item_id]
@@ -106,15 +106,14 @@ class AbstractPredictor(ABC):
             last_prev_time = prev_series.index[-1]
             first_curr_time = curr_series.index[0]
 
-            expected_next_time = last_prev_time + self.freq
+            expected_next_time = last_prev_time + freq_as_offset
             if expected_next_time != first_curr_time:
                 logging.warning(f"Data for item_id '{item_id}' is not consecutive. " f"Expected {expected_next_time}, got {first_curr_time}.")
 
         # add the context length to data
         previous_context_data = previous_context_data.loc[data.item_ids]
         previous_context_data = previous_context_data.groupby("item_id").tail(context_length)
-        
-        len_prepended_context = previous_context_data.groupby("item_id").count().to_dict()[TARGET]
+        len_prepended_context = previous_context_data.groupby("item_id").size().to_dict()
         data_merged = pd.concat([previous_context_data, data]).sort_index()
 
         return TimeSeriesDataFrame(data_merged), len_prepended_context
@@ -136,7 +135,7 @@ class AbstractPredictor(ABC):
 
 class AbstractPostprocessor(ABC):
     def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, n_jobs: int = 1) -> None:
-        self.ignore_first_n_train_entries = 200
+        self.ignore_first_n_train_entries = 0
         self.class_name = name or self.__class__.__name__
         self.params = {}
         self.additional_info = {}
@@ -275,6 +274,7 @@ class AbstractPipeline(ABC):
         self,
         model: Type[AbstractPredictor],
         model_kwargs: Dict,
+        freq: Union[str, pd.DateOffset],
         postprocessors: Optional[List[Type[AbstractPostprocessor]]] = None,
         postprocessor_kwargs: Optional[List[Dict]] = None,
         output_dir: Optional[Union[str, Path]] = None,
@@ -287,6 +287,8 @@ class AbstractPipeline(ABC):
             The predictor model class to use
         model_kwargs : Dict
             Keyword arguments to pass to the model constructor
+        freq : Union[str, pd.DateOffset]
+            Frequency of the data 
         postprocessors : Optional[List[Type[AbstractPostprocessor]]], default=None
             Optional list of postprocessors for refining predictions
         output_dir : Optional[Union[str, Path]], default=None
@@ -299,6 +301,14 @@ class AbstractPipeline(ABC):
         self.model_kwargs = model_kwargs
         self.postprocessors = postprocessors
         self.postprocessor_kwargs = postprocessor_kwargs
+
+        if isinstance(freq, str):
+            self.freq = pd.tseries.frequencies.to_offset(freq)
+        elif isinstance(freq, pd.DateOffset):
+            self.freq = freq
+        else:
+            raise ValueError("freq needs to be a str or pd.DateOffset")
+
 
     @abstractmethod
     def backtest(
@@ -373,7 +383,7 @@ class AbstractPipeline(ABC):
         data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
         rolling: bool = False,
-        stride: int = 1,
+        window_step: int = 1,
     ) -> Dict[str, ForecastCollection]:
         """
         Generates forecasts for each time series using the predictor.
@@ -391,8 +401,11 @@ class AbstractPipeline(ABC):
         rolling : bool, default=False
             If True, performs rolling evaluation across all available time steps.
             If False, predicts only from the latest observation.
-        stride : int, default=1
-            The stride to advance the sliding window when rolling=True.
+        window_step : int, default=1
+            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
+            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
+            forecasts, while a larger value skips more observations between windows.
+            The rolling procedure is applied independently to each time series in the dataset.
 
         Returns
         -------
