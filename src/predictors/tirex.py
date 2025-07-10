@@ -191,10 +191,9 @@ class TiRex(AbstractPredictor):
             out_num_quantiles = int(response.headers["X-num_quantiles"])
             out_dtype = np.dtype(response.headers["X-dtype"])
 
-            logging.debug(f"Received tensor with shape=({out_batch}, {out_num_quantiles}, {out_pred_len}), dtype={out_dtype}")
+            logging.debug(f"Received tensor with shape=({out_batch}, {out_pred_len}, {out_num_quantiles}), dtype={out_dtype}")
 
-            out_np = np.frombuffer(response.content, dtype=out_dtype).reshape((out_batch, out_num_quantiles, out_pred_len))
-
+            out_np = np.frombuffer(response.content, dtype=out_dtype).reshape((out_batch, out_pred_len, out_num_quantiles)).swapaxes(1,2).copy()
             return torch.from_numpy(out_np)
 
         except KeyError as e:
