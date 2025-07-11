@@ -1,10 +1,16 @@
 from src.pipeline.pipeline import ForecastingPipeline
 from src.predictors.chronos import Chronos
+from src.predictors.tirex import TiRex
 from src.predictors.benchmarks import RandomWalkBenchmark, RollingSeasonalQuantilePredictor
 import eval_constants
 import torch
 from src.predictors.autogluon_wrapper import SeasonalNaive_Ag, PatchTST_Ag, TiDE_Ag
 import argparse
+
+# 3 dataset to chose from
+DAP = "day_ahead_prices"
+EC = "electricity_consumption"
+ER = "exchange_rates"
 
 
 def evaluate():
@@ -12,21 +18,17 @@ def evaluate():
     # specify chronos variant
     chronos_variant = "tiny"
 
-    # 3 dataset to chose from
-    DAP = "day_ahead_prices"
-    EC = "electricity_consumption"
-    ER = "exchange_rates"
     parser = argparse.ArgumentParser(description="Run evaluation pipeline for selected dataset.")
     parser.add_argument("--dataset", type=str, required=True, choices=[DAP, EC, ER], help="Dataset to evaluate")
 
     args = parser.parse_args()
 
     if args.dataset == EC:
-        dataset_config = eval_constants.electricity_consumption_config
+        dataset_config = eval_constants.get_electricity_consumption_config()
     elif args.dataset == DAP:
-        dataset_config = eval_constants.day_ahead_prices_config
+        dataset_config = eval_constants.get_day_ahead_prices_config()
     elif args.dataset == ER:
-        dataset_config = eval_constants.exchange_rate_config
+        dataset_config = eval_constants.get_exchange_rate_config()
 
     # common settings
     lead_times = eval_constants.lead_times
@@ -50,7 +52,7 @@ def evaluate():
     else:
         device_map = "cpu"
 
-    # torch.cuda.set_device(1)
+    # torch.cuda.set_device(0)
 
     # ------------------------ Chronos-Bolt ------------------------
 
