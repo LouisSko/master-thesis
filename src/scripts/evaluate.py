@@ -413,6 +413,36 @@ def evaluate():
     del pipeline
     del results
 
+    # ------------------------ TiRex ------------------------
+
+    # chronos zero shot results
+    pipeline = ForecastingPipeline(
+        model=TiRex,
+        model_kwargs={
+            "lead_times": lead_times,
+            "tirex_service_url": "http://localhost:8000",
+        },
+        postprocessors=postprocessors,
+        postprocessor_kwargs=postprocessor_kwargs,
+        freq=freq,
+        output_dir=output_dir / "tirex_new",
+    )
+
+    results = pipeline.backtest(
+        data=data,
+        test_start_date=test_start_date,
+        rolling_window_eval=False,
+        train=False,
+        val_window_size=None,
+        train_window_size=None,
+        test_window_size=None,
+        calibration_based_on="train",
+        save_results=True,
+        test_window_step=test_window_step,
+    )
+
+    del pipeline
+    del results
 
 if __name__ == "__main__":
     evaluate()
