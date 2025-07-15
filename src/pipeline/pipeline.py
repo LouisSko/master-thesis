@@ -2,7 +2,7 @@ import torch
 from typing import Dict, List, Optional, Type, Union, Literal, Tuple
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS, ITEMID, TARGET
 from src.core.base import AbstractPostprocessor, AbstractPredictor, load_class_from_path
-from src.core.utils import CustomJSONEncoder
+from src.core.utils import CustomJSONEncoder, set_global_seed
 from autogluon.timeseries import TimeSeriesDataFrame
 import pandas as pd
 from src.core.base import AbstractPipeline
@@ -17,6 +17,7 @@ PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 
 class ForecastingPipeline(AbstractPipeline):

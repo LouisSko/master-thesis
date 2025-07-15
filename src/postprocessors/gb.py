@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from src.core.base import AbstractPostprocessor
+from src.core.utils import set_global_seed
 from src.core.timeseries_evaluation import TimeSeriesForecast, HorizonForecast
 from pathlib import Path
 import logging
@@ -8,7 +9,7 @@ from typing import Any, Optional
 from lightgbm import LGBMRegressor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
-
+set_global_seed()
 
 class PostprocessorGB(AbstractPostprocessor):
     """Gradient boosting postprocessor"""

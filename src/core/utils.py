@@ -5,7 +5,9 @@ import re
 import numpy as np
 import pandas as pd
 from pathlib import Path
-
+import torch
+import random
+import os
 import logging
 
 
@@ -135,3 +137,21 @@ def timestamp_decoder(obj):
         return value
 
     return process_value(obj)
+
+
+def set_global_seed(seed: int = 42):
+    # Python random
+    random.seed(seed)
+    # NumPy
+    np.random.seed(seed)
+    # PyTorch
+    torch.manual_seed(seed)
+    # For GPU
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # Some operations use environment variables
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # Optional: Make cuDNN deterministic (may slow down training)
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False

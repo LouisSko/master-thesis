@@ -11,8 +11,10 @@ from fastai.tabular.core import add_datepart
 import statsmodels.api as sm
 from pydantic import Field
 from pathlib import Path
+from src.core.utils import set_global_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 
 class TargetScaler:

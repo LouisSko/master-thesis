@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional, Union, Deque
 import torch
 from tqdm.auto import tqdm
 from src.core.base import AbstractPredictor
+from src.core.utils import set_global_seed
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TARGET
 import logging
 from pydantic import Field
@@ -15,6 +16,7 @@ from scipy import stats
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 
 class RollingSeasonalQuantilePredictor(AbstractPredictor):

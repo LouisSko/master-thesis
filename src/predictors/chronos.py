@@ -10,6 +10,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
 from src.core.base import AbstractPredictor
+from src.core.utils import set_global_seed
 from src.core.timeseries_evaluation import TARGET, ITEMID, TIMESTAMP
 import logging
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast
@@ -25,6 +26,7 @@ from transformers import TrainerCallback, EarlyStoppingCallback, TrainerState, T
 import torch.nn as nn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 
 class ChronosLoraConfig(LoraConfig):
@@ -872,6 +874,8 @@ def build_train_args(
         num_train_epochs=epochs,
         gradient_accumulation_steps=1,
         dataloader_num_workers=4,
+        seed=42,
+        data_seed=42,
         tf32=False,
         fp16=fp16,
         report_to="tensorboard",

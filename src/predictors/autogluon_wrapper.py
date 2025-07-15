@@ -2,6 +2,7 @@ from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
 from typing import List, Optional, Union
 import pandas as pd
 from src.core.base import AbstractPredictor
+from src.core.utils import set_global_seed
 import logging
 from src.core.timeseries_evaluation import ForecastCollection
 from pydantic import Field
@@ -15,6 +16,7 @@ import torch
 import numpy as np
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 # TODO: reload trained models
 

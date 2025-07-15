@@ -3,6 +3,7 @@ import statsmodels.api as sm
 import scipy.stats as stats
 from scipy.optimize import minimize
 from src.core.base import AbstractPostprocessor
+from src.core.utils import set_global_seed
 from src.core.timeseries_evaluation import TimeSeriesForecast, HorizonForecast
 from src.data.transformer import DataTransformer
 import torch
@@ -12,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 
 class PostprocessorMLE(AbstractPostprocessor):

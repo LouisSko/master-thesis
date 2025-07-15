@@ -3,6 +3,7 @@ from typing import List, Optional
 from src.core.base import AbstractPredictor
 import logging
 from src.core.timeseries_evaluation import ForecastCollection
+from src.core.utils import set_global_seed
 from pydantic import Field
 from pathlib import Path
 from torch.utils.data import DataLoader
@@ -14,6 +15,7 @@ import numpy as np
 import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 
 class TiRex(AbstractPredictor):
@@ -193,7 +195,7 @@ class TiRex(AbstractPredictor):
 
             logging.debug(f"Received tensor with shape=({out_batch}, {out_pred_len}, {out_num_quantiles}), dtype={out_dtype}")
 
-            out_np = np.frombuffer(response.content, dtype=out_dtype).reshape((out_batch, out_pred_len, out_num_quantiles)).swapaxes(1,2).copy()
+            out_np = np.frombuffer(response.content, dtype=out_dtype).reshape((out_batch, out_pred_len, out_num_quantiles)).swapaxes(1, 2).copy()
             return torch.from_numpy(out_np)
 
         except KeyError as e:

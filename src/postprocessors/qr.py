@@ -4,11 +4,13 @@ import torch
 from src.core.base import AbstractPostprocessor
 from src.core.timeseries_evaluation import TimeSeriesForecast, HorizonForecast, TabularDataFrame
 from src.data.transformer import DataTransformer
+from src.core.utils import set_global_seed
 from pathlib import Path
 import logging
 from typing import Any, Optional, Literal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
+set_global_seed()
 
 
 class PostprocessorQR(AbstractPostprocessor):
