@@ -17,6 +17,7 @@ import logging
 import os
 from tqdm import tqdm
 from numpy.typing import NDArray
+import statsmodels.api as sm
 
 DIR_BACKTESTS = "backtest"
 DIR_MODELS = "models"
@@ -519,8 +520,9 @@ class ForecastCollection(BaseModel):
 
         crps_scores = pd.concat(all_scores)
 
-        # drop rows with missing values
-        crps_scores = crps_scores.dropna()
+        # drop max lead times rows
+        if not mean_time:
+            crps_scores = crps_scores.groupby(ITEMID).head(-max(lead_times))
 
         if mean_lead_times:
             crps_scores = pd.DataFrame(crps_scores.mean(axis=1), columns=["Mean CRPS"])
@@ -1135,6 +1137,143 @@ def get_crps_by_period(
     if decimal_places:
         return results.round(decimal_places)
     return results
+
+def diebold_mariano_test(loss1: Union[pd.Series, np.ndarray], loss2: Union[pd.Series, np.ndarray], maxlags: int = 8) -> Tuple[float, float]:
+    """
+    Perform the Diebold-Mariano test for equal predictive accuracy.
+
+    The test evaluates whether the predictive performance of two forecasting models
+    is significantly different, using a loss differential series and Newey-West
+    adjusted standard errors.
+
+    Parameters
+    ----------
+    loss1 : Union[pd.Series, np.ndarray]
+        The loss series (e.g., CRPS) for the first model.
+    loss2 : Union[pd.Series, np.ndarray]
+        The loss series for the second model.
+    maxlags : int, default=8
+        The maximum lag to use in computing Newey-West HAC standard errors.
+
+    Returns
+    -------
+    Tuple[float, float]
+        A tuple containing:
+        - t-statistic of the mean loss differential
+        - p-value of the test statistic
+
+    Interpretation
+    --------------
+    Positive t-statistic:
+        The first forecast (`loss1`) is more accurate than the second forecast (`loss2`).
+    Negative t-statistic:
+        The second forecast (`loss2`) is more accurate than the first forecast (`loss1`).
+    """
+    # 1. Compute loss differential
+    d = np.array(loss2 - loss1)
+    d = d[~np.isnan(d)]
+
+    # Regress d on a constant
+    X = np.ones((len(d), 1))
+    ols = sm.OLS(d, X).fit()
+
+    # Compute Newey-West standard errors with lag K
+    nw_results = ols.get_robustcov_results(cov_type='HAC', maxlags=maxlags)
+
+    # Print summary to see the SE
+    # print(nw_results.summary())
+
+    # Extract the standard error of the intercept
+    # se_mean = nw_results.bse[0]
+    # tvalues = np.mean(d) / se_mean
+
+    return nw_results.tvalues.item(), nw_results.pvalues.item()
+
+def get_pairwise_diebold_mariano_test(
+    predictions: Dict[str, Union["ForecastCollection", Path]],
+    lead_times: Optional[List[int]] = None,
+    item_ids: Optional[List[int]] = None,
+    maxlags: int = 8,
+    decimal_places: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Compute pairwise Diebold-Mariano test statistics between multiple forecast models.
+
+    For each unique pair of models, this function:
+    1. Loads the CRPS values.
+    2. Computes the loss differentials.
+    3. Performs the Diebold-Mariano test.
+    4. Stores the resulting t-statistics and p-values in DataFrames.
+
+    Parameters
+    ----------
+    predictions : Dict[str, Union[ForecastCollection, Path]]
+        Dictionary mapping model names to either:
+        - Preloaded ForecastCollection objects, or
+        - Paths to joblib files containing ForecastCollection objects.
+    lead_times : Optional[List[int]], default=None
+        List of lead times to include in the CRPS computation. If None, all lead times are used.
+    item_ids : Optional[List[int]], default=None
+        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
+    maxlags : int, default=8
+        Maximum lag to use for Newey-West HAC standard errors in the Diebold-Mariano test.
+    decimal_places : Optional[int], default=None
+        Number of decimal places to round the results to. If None, no rounding is applied.
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.DataFrame]
+        Two DataFrames:
+        - t-statistics of the Diebold-Mariano tests (upper triangle only)
+        - p-values corresponding to the t-statistics
+        Rows and columns correspond to model names.
+    
+    Interpretation
+    --------------
+    In the returned tables:
+    - A **positive t-statistic** means that the row model's forecasts are **more accurate**
+      than the column model's forecasts.
+    - A **negative t-statistic** means that the column model's forecasts are **more accurate**
+      than the row model's forecasts.
+    - The p-value indicates the statistical significance of the difference in accuracy.
+    """
+    scores_dict = {}
+
+    for key, value in tqdm(predictions.items(), desc="Compute CRPS score"):
+        if isinstance(value, ForecastCollection):
+            pred = value
+        elif isinstance(value, (str, Path)):
+            pred = joblib.load(value)
+        else:
+            raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
+
+        crps_df = pred.get_crps(
+            lead_times=lead_times,
+            mean_lead_times=True,
+            mean_time=False,
+            mean_item_ids=True,
+            item_ids=item_ids,
+            decimal_places=None,
+        )
+
+        scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
+
+    keys = list(scores_dict.keys())
+
+    dm_tval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
+    dm_pval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
+
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):  # Upper triangle only, no diagonal
+            t_val, p_val = diebold_mariano_test(scores_dict[keys[i]], scores_dict[keys[j]], maxlags)
+            dm_tval.loc[keys[i], keys[j]] = t_val
+            dm_pval.loc[keys[i], keys[j]] = p_val
+
+    if decimal_places is not None:
+        dm_tval = dm_tval.round(decimal_places)
+        dm_pval = dm_pval.round(decimal_places)
+
+    return dm_tval, dm_pval
 
 
 def load_predictions(
