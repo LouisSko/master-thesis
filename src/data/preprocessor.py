@@ -16,6 +16,12 @@ def read_smard_data(
     """
     Reads and processes SMARD data from multiple CSV files into a unified long-format TimeSeriesDataFrame.
 
+    Note
+    ----
+    The timestamps column indicates the end of each hourly/quarterhourly interval.
+    For example, "23:00 01-01-2025" represents the hour from 22:00 to 23:00 on January 1st, 2025.
+    This means timestamps are backward-facing (the value belongs to the preceding hour)."
+
     Parameters
     ----------
     file_paths : List[Path]
@@ -47,7 +53,7 @@ def read_smard_data(
     logging.info(f"Total rows after concat: {len(df)}")
 
     # Step 2: Drop unnecessary columns
-    df.drop(columns=["End date"], inplace=True, errors="ignore")
+    df.drop(columns=["Start date"], inplace=True, errors="ignore")
 
     if cols_to_drop:
         df.drop(columns=cols_to_drop, inplace=True, errors="ignore")
@@ -55,12 +61,12 @@ def read_smard_data(
 
     if selected_time_series:
         logging.info(f"Filtering columns: {selected_time_series}")
-        columns_to_keep = ["Start date"] + selected_time_series
+        columns_to_keep = ["End date"] + selected_time_series
         df = df[columns_to_keep]
         logging.info(f"Columns retained: {df.columns.tolist()}")
 
     # Step 3: Format & reshape
-    df.rename(columns={"Start date": "timestamp"}, inplace=True)
+    df.rename(columns={"End date": "timestamp"}, inplace=True)
     df.sort_values("timestamp", inplace=True)
     df.drop_duplicates(subset="timestamp", keep="first", inplace=True)
 
@@ -145,6 +151,7 @@ def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_r
     mapping = {i: name for i, name in enumerate(mapping)}
 
     logging.info(f"Mapped {len(mapping)} unique exchange rate series.")
+
 
     ts_df = TimeSeriesDataFrame(df)
 
