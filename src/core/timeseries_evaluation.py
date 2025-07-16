@@ -1596,3 +1596,276 @@ def plot_crps_barh(
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_pairwise_diebold_mariano_test(
+    predictions: Dict[str, Union["ForecastCollection", Path]],
+    lead_times: Optional[Union[List[int], List[List[int]]]] = None,
+    item_ids: Optional[List[int]] = None,
+    maxlags: int = 8,
+    decimal_places: Optional[int] = None,
+    reduce_matrix: bool = False,
+    sort: bool = True,
+    figsize_per_panel: float = 5.0,
+):
+    """
+    Plot pairwise Diebold-Mariano t-values across models.
+
+    Parameters
+    ----------
+    predictions : dict[str, ForecastCollection|Path]
+    lead_times : list[int] or list[list[int]], optional
+        - list[int] -> single heatmap (original behavior)
+        - list[list[int]] -> multiple heatmaps, auto-gridded.
+    item_ids : list[int], optional
+    maxlags : int
+    decimal_places : int, optional
+    reduce_matrix : bool, default False
+        If True, plot reduced matrix (e.g., lower triangle) and suppress diag grey + shared colorbar.
+    sort : bool
+    figsize_per_panel : float
+        Size (inches) allocated per panel (square); figure size scales with grid.
+    """
+
+    # ------------------------------------------------------------------
+    # Detect single vs multi-panel input
+    # ------------------------------------------------------------------
+    is_multi = lead_times is not None and isinstance(lead_times, (list, tuple)) and len(lead_times) > 0 and isinstance(lead_times[0], (list, tuple, np.ndarray))
+
+    if not is_multi:
+        lead_groups = [lead_times]  # may still be None -> handled below
+    else:
+        lead_groups = list(lead_times)
+
+    n_panels = len(lead_groups)
+
+    # If no lead_times supplied, use all leads from first prediction
+    if lead_times is None:
+        full_leads = predictions[list(predictions.keys())[0]].get_lead_times()
+        lead_groups = [full_leads]
+        n_panels = 1
+        is_multi = False
+
+    # ------------------------------------------------------------------
+    # Auto grid size
+    # ------------------------------------------------------------------
+    def _auto_grid(n):
+        """Return nrows, ncols following rule: <=3 -> 1 row; else near-square."""
+        if n <= 3:
+            return 1, n
+        # near-square: choose cols = ceil(sqrt(n)), then rows accordingly
+        ncols = int(np.ceil(np.sqrt(n)))
+        nrows = int(np.ceil(n / ncols))
+        return nrows, ncols
+
+    nrows, ncols = _auto_grid(n_panels)
+
+    # ------------------------------------------------------------------
+    # Shared color scale
+    # ------------------------------------------------------------------
+    vmin, vmax = -3, 3
+
+    deep_colors = sns.color_palette("deep")
+    neg_color = deep_colors[1]
+    pos_color = deep_colors[0]
+    custom_cmap = LinearSegmentedColormap.from_list("CustomDeep", [neg_color, "white", pos_color], N=256)
+
+    # ------------------------------------------------------------------
+    # Figure + axes layout
+    # ------------------------------------------------------------------
+    if not reduce_matrix:
+        # add a narrow column for the shared colorbar
+        fig_w = figsize_per_panel * ncols + 0.8
+        fig_h = figsize_per_panel * nrows
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        from matplotlib import gridspec
+
+        gs = fig.add_gridspec(
+            nrows=nrows,
+            ncols=ncols + 1,  # extra column for cbar
+            width_ratios=[1] * ncols + [0.04],
+            height_ratios=[1] * nrows,
+            wspace=0.05,
+            hspace=0.05,
+        )
+        axes = []
+        for r in range(nrows):
+            row_axes = []
+            for c in range(ncols):
+                row_axes.append(fig.add_subplot(gs[r, c]))
+            axes.append(row_axes)
+        cbar_ax = fig.add_subplot(gs[:, -1])  # span all rows
+    else:
+        # no shared colorbar
+        fig_w = figsize_per_panel * ncols
+        fig_h = figsize_per_panel * nrows
+        fig, ax_grid = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(fig_w, fig_h),
+            squeeze=False,
+        )
+        axes = ax_grid.tolist()
+        cbar_ax = None
+
+    # ------------------------------------------------------------------
+    # Helper: draw one panel
+    # ------------------------------------------------------------------
+    def _panel(ax, leads, show_cbar=False, cbar_ax=None, show_y=True, show_x=True):
+        # Compute DM stats for this lead-time subset
+        tvalues, pvalues = get_pairwise_diebold_mariano_test(
+            predictions,
+            lead_times=leads,
+            item_ids=item_ids,
+            maxlags=maxlags,
+            decimal_places=decimal_places,
+            reduce_matrix=reduce_matrix,
+            sort=sort,
+        )
+
+        # Truncate long names
+        tvalues = tvalues.rename(columns={n: n[:20] for n in tvalues.columns})
+        pvalues = pvalues.rename(columns={n: n[:20] for n in pvalues.columns})
+        tvalues.index = [i[:20] for i in tvalues.index]
+        pvalues.index = [i[:20] for i in pvalues.index]
+
+        # Alignment checks
+        assert tvalues.shape == pvalues.shape
+        assert tvalues.index.equals(pvalues.index) and tvalues.columns.equals(pvalues.columns)
+
+        # Significance annotation (still stars; swap anytime)
+        def stars(p):
+            if pd.isna(p):
+                return ""
+            if p <= 0.01:
+                return "***"
+            if p <= 0.05:
+                return "**"
+            if p <= 0.10:
+                return "*"
+            return ""
+
+        t_str = tvalues.map(lambda x: f"{x}" if pd.notna(x) else "")
+        s_str = pvalues.map(stars)
+        annot = t_str + "\n" + s_str
+        annot = annot.where(~pvalues.isna(), "")
+
+        mask = pvalues.isna().to_numpy()
+
+        # Draw heatmap
+        hm = sns.heatmap(
+            tvalues,
+            mask=mask,
+            cmap=custom_cmap,
+            vmin=vmin,
+            vmax=vmax,
+            center=0,
+            annot=annot,
+            fmt="",
+            annot_kws={"size": 11},
+            cbar=show_cbar,
+            cbar_ax=cbar_ax,
+            cbar_kws=(
+                None
+                if not show_cbar
+                else dict(
+                    label="DM t-value",
+                    ticks=[vmin, -2, -1, 0, 1, 2, vmax],
+                )
+            ),
+            square=True,
+            linewidths=0.01,
+            linecolor="lightgrey",
+            ax=ax,
+        )
+
+        # Relabel cbar extremes
+        if show_cbar:
+            cbar = hm.collections[0].colorbar
+            cbar.set_ticklabels(["≤-3", "-2", "-1", "0", "1", "2", "≥3"])
+            cbar.ax.set_ylabel("DM t-value", fontsize=18)
+            cbar.ax.tick_params(labelsize=18)
+        # Panel title
+        ax.set_title(f"Lead Time {min(leads)}–{max(leads)}", pad=10, fontsize=18)
+
+        # Rotate x ticklabels to start at tick
+        labels = ax.get_xticklabels()
+        ax.set_xticklabels(
+            labels,
+            rotation=45,
+            ha="right",
+            va=("bottom"),
+            rotation_mode="anchor",
+        )
+
+        # Grey the diagonal only for full matrix
+        if not reduce_matrix:
+            n = tvalues.shape[0]
+            diag_face = "0.85"
+            for k in range(n):
+                ax.add_patch(
+                    plt.Rectangle(
+                        (k, k),
+                        1,
+                        1,
+                        facecolor=diag_face,
+                        edgecolor=diag_face,
+                        linewidth=0,
+                        zorder=3,
+                    )
+                )
+
+        # Hide y-axis if requested (panels not in first column)
+        if not show_y:
+            ax.set_ylabel("")
+            ax.tick_params(
+                axis="y",
+                which="both",
+                left=False,
+                right=False,
+                labelleft=False,
+                labelright=False,
+            )
+        if not show_x:
+            ax.set_xlabel("")
+            ax.tick_params(
+                axis="x",
+                which="both",
+                bottom=False,
+                top=False,
+                labelbottom=False,
+                labeltop=False,
+            )
+
+        return hm
+
+    # ------------------------------------------------------------------
+    # Draw panels into grid
+    # ------------------------------------------------------------------
+    heatmaps = []
+    panel_idx = 0
+    for r in range(nrows):
+        for c in range(ncols):
+            if panel_idx >= n_panels:
+                # unused slot: turn off axis
+                axes[r][c].axis("off")
+                continue
+            leads = lead_groups[panel_idx]
+            show_cbar = (panel_idx == n_panels - 1) and (cbar_ax is not None)
+            hm = _panel(
+                axes[r][c],
+                leads,
+                show_cbar=show_cbar,
+                cbar_ax=cbar_ax if show_cbar else None,
+                show_y=(c == 0),  # show y only in first column
+                show_x=(r == (nrows - 1)),  # show x only in last row
+            )
+            heatmaps.append(hm)
+            panel_idx += 1
+
+    # Super-title
+    if n_panels > 1:
+        fig.suptitle("Diebold-Mariano t-values by Lead Time Group", y=0.92, fontsize=25)
+    plt.show()
+
+    return fig, axes, heatmaps
