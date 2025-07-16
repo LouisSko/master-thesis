@@ -18,6 +18,9 @@ import os
 from tqdm import tqdm
 from numpy.typing import NDArray
 import statsmodels.api as sm
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+import seaborn as sns
 
 DIR_BACKTESTS = "backtest"
 DIR_MODELS = "models"
@@ -261,7 +264,7 @@ class TimeSeriesForecast(BaseModel):
             None: Displays the histogram plot.
         """
         pit_values = self.get_pit_values(forecast_horizon)
-        bins = len(self.quantiles)+1
+        bins = len(self.quantiles) + 1
 
         plt.hist(pit_values, bins=bins, range=(0, 1), density=False, alpha=0.7, edgecolor="black")
         plt.axhline(len(pit_values) / bins, color="red", linestyle="dashed", label="Uniform(0,1) reference")
@@ -388,7 +391,7 @@ class TimeSeriesForecast(BaseModel):
         start_idx_preds = forecasted_ts.get_indexer([start_date], method="backfill")[0]
         corrected_start_date = forecasted_ts[start_idx_preds]
         corrected_start_idx = timestamps.get_indexer([corrected_start_date])[0]
-        
+
         # Collect prediction tensor
         preds = torch.stack([hf.predictions for hf in self.lead_time_forecasts.values()], dim=1)  # shape: [num_samples, num_lead_times, num_quantiles]
 
@@ -613,7 +616,7 @@ class ForecastCollection(BaseModel):
                 result[lt] = np.concatenate(values)
         return result
 
-    def get_pit_histogram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
+    def plot_pit_histogram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
         if lead_times is None:
             lead_times = self.get_lead_times()
         pit_data = self.get_pit_values(lead_times=lead_times, item_ids=item_ids)
@@ -652,57 +655,122 @@ class ForecastCollection(BaseModel):
             plt.tight_layout()
             plt.show()
 
-    def get_reliability_diagram(self, lead_times: Optional[List[int]] = None, overlay: bool = False, item_ids: Optional[List[int]] = None) -> None:
-        lead_times = lead_times or self.get_lead_times()
+    def plot_reliability_diagram(
+        self,
+        lead_times: Optional[List[int]] = None,
+        overlay: bool = True,
+        item_ids: Optional[List[int]] = None,
+        show_individual_lead_times: bool = False,
+        mean_lead_times: bool = True,
+    ) -> None:
+        """
+        Plot reliability diagrams (empirical coverage vs nominal quantile)
+        for probabilistic forecasts across lead times.
 
+        Parameters
+        ----------
+        lead_times : list[int], optional
+            Lead times to include. Defaults to all available.
+        overlay : bool, default False
+            If True, plot all requested content in a single axis.
+            If False, produce small multiples (one panel per lead) plus an optional
+            average panel if show_avg=True & show_individual_lead_times=False OR append at end if both.
+        item_ids : list[int], optional
+            Restrict to these item IDs. Defaults to all items.
+        show_individual_lead_times : bool, default True
+            Plot individual lead-time curves/panels.
+        mean_lead_times : bool, default False
+            Plot pooled/average curve (overlay) or panel (facets).
+        """
+        lead_times = lead_times or self.get_lead_times()
+        if not lead_times:
+            raise ValueError("No lead times available to plot.")
+
+        # --- collect per-item coverages by lead ---
+        per_lead = {lt: [] for lt in lead_times}
+        for item_id in self.get_item_ids():
+            if item_ids and item_id not in item_ids:
+                continue
+            item = self.get_time_series_forecast(item_id)
+            for lt in lead_times:
+                if lt in item.lead_time_forecasts:
+                    val = item.get_empirical_coverage_rates(lt)  # dict {alpha: cov}
+                    per_lead[lt].append(pd.Series(val))
+
+        # Macro per-lead curves
+        emp_per_lead = {}
+        for lt, ser_list in per_lead.items():
+            if ser_list:
+                emp_per_lead[lt] = pd.concat(ser_list, axis=1).mean(axis=1)
+
+        # Average across leads
+        emp_avg = None
+        if mean_lead_times:
+            # need aligned series; drop missing leads
+            all_series = [s for s in emp_per_lead.values() if s is not None]
+            if all_series:
+                # stack as columns, simple mean
+                emp_avg = pd.concat(all_series, axis=1).mean(axis=1)
+
+        # ---- plotting ----
         if overlay:
             plt.figure(figsize=(8, 8))
-            for lt in lead_times:
-                values = []
-                for item_id in self.get_item_ids():
-                    if item_ids and item_id not in item_ids:
-                        continue
-                    item = self.get_time_series_forecast(item_id)
-                    if lt in item.lead_time_forecasts:
-                        val = item.get_empirical_coverage_rates(lt)
-                        values.append(pd.Series(val))
-                if values:
-                    emp = pd.concat(values, axis=1).mean(axis=1)
-                    plt.plot(emp.index, emp.values, "o-", label=f"Lead time {lt}")
-            plt.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
+            if show_individual_lead_times:
+                for lt, emp in emp_per_lead.items():
+                    if emp is not None:
+                        plt.plot(emp.index, emp.values, "o-", label=f"Lead {lt}")
+            if mean_lead_times and emp_avg is not None:
+                # Use a distinct style
+                plt.plot(emp_avg.index, emp_avg.values, "s--", linewidth=2, label="Average across Lead Times")
+            plt.plot([0, 1], [0, 1], "k--", label="Perfect")
             plt.xlabel("Nominal Quantile Level")
             plt.ylabel("Empirical Coverage")
-            plt.title("Reliability Diagram for Quantile Forecasts")
+            ttl_bits = []
+            if show_individual_lead_times:
+                ttl_bits.append("Leads")
+            if mean_lead_times:
+                ttl_bits.append("Avg")
+            plt.title("Reliability Diagram (" + "+".join(ttl_bits) + ")")
             plt.legend()
             plt.grid(True)
             plt.show()
+            return
 
-        else:
-            num_plots = len(lead_times)
-            cols = math.ceil(np.sqrt(num_plots))
-            rows = (num_plots + cols - 1) // cols
-            fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
-            axes = axes.flatten() if num_plots > 1 else [axes]
-            for ax, lt in zip(axes, lead_times):
-                values = []
-                for item_id in self.get_item_ids():
-                    if item_ids and item_id not in item_ids:
-                        continue
-                    item = self.get_time_series_forecast(item_id)
-                    if lt in item.lead_time_forecasts:
-                        val = item.get_empirical_coverage_rates(lt)
-                        values.append(pd.Series(val))
-                if values:
-                    emp = pd.concat(values, axis=1).mean(axis=1)
-                    ax.plot(emp.index, emp.values, "o-", label=f"Lead time {lt}")
-                    ax.plot([0, 1], [0, 1], "k--", label="Perfect Calibration")
-                    ax.set_xlabel("Nominal Quantile Level")
-                    ax.set_ylabel("Empirical Coverage")
-                    ax.set_xticks(emp.index)
-                    ax.set_title("Reliability Diagram")
-                    ax.legend()
-            plt.tight_layout()
-            plt.show()
+        # Faceted layout
+        # Decide how many panels: one per lead if show_individual_lead_times; plus one avg panel if show_avg
+        panel_leads = list(emp_per_lead.keys()) if show_individual_lead_times else []
+        if mean_lead_times:
+            panel_leads.append("__AVG__")
+        num_plots = len(panel_leads)
+        cols = math.ceil(np.sqrt(num_plots))
+        rows = (num_plots + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
+        axes = axes.flatten() if num_plots > 1 else [axes]
+
+        for ax, key in zip(axes, panel_leads):
+            if key == "__AVG__":
+                emp = emp_avg
+                label = "Average across Lead Times"
+            else:
+                emp = emp_per_lead.get(key)
+                label = f"Lead {key}"
+            if emp is None:
+                ax.set_visible(False)
+                continue
+            ax.plot(emp.index, emp.values, "o-", label=label)
+            ax.plot([0, 1], [0, 1], "k--", label="Perfect")
+            ax.set_xlabel("Nominal Quantile Level")
+            ax.set_ylabel("Empirical Coverage")
+            ax.set_xticks(emp.index)
+            ax.set_title(f"Reliability: {label}")
+            ax.legend()
+
+        # Hide any extra unused axes
+        for ax in axes[num_plots:]:
+            ax.set_visible(False)
+
+        plt.tight_layout()
+        plt.show()
 
     def save(self, file_path: Path) -> None:
         joblib.dump(self, file_path)
@@ -905,8 +973,13 @@ def get_crps_scores(
 
         scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
 
-    scores = pd.DataFrame(scores_dict)
-    scores.index.name = "lead times"
+    # TODO: What's the correct oder (mean crps -> normalization) or (normalization -> mean crps)
+    if mean_lead_times:
+        scores = pd.DataFrame(scores_dict, index=["Mean CRPS"])
+        add_mean = False
+    else:
+        scores = pd.DataFrame(scores_dict)
+        scores.index.name = "lead times"
 
     if reference_predictions:
         if reference_scores is None:
@@ -915,8 +988,9 @@ def get_crps_scores(
 
     if add_mean:
         scores.loc["Mean CRPS", :] = scores.mean(axis=0)
-        if sort:
-            scores = scores.T.sort_values(by="Mean CRPS", axis=0).T
+
+    if sort and "Mean CRPS" in scores.index:
+        scores = scores.T.sort_values(by="Mean CRPS", axis=0).T
 
     if decimal_places is not None:
         scores = scores.round(decimal_places)
@@ -1138,6 +1212,7 @@ def get_crps_by_period(
         return results.round(decimal_places)
     return results
 
+
 def diebold_mariano_test(loss1: Union[pd.Series, np.ndarray], loss2: Union[pd.Series, np.ndarray], maxlags: int = 8) -> Tuple[float, float]:
     """
     Perform the Diebold-Mariano test for equal predictive accuracy.
@@ -1178,7 +1253,7 @@ def diebold_mariano_test(loss1: Union[pd.Series, np.ndarray], loss2: Union[pd.Se
     ols = sm.OLS(d, X).fit()
 
     # Compute Newey-West standard errors with lag K
-    nw_results = ols.get_robustcov_results(cov_type='HAC', maxlags=maxlags)
+    nw_results = ols.get_robustcov_results(cov_type="HAC", maxlags=maxlags)
 
     # Print summary to see the SE
     # print(nw_results.summary())
@@ -1189,12 +1264,15 @@ def diebold_mariano_test(loss1: Union[pd.Series, np.ndarray], loss2: Union[pd.Se
 
     return nw_results.tvalues.item(), nw_results.pvalues.item()
 
+
 def get_pairwise_diebold_mariano_test(
     predictions: Dict[str, Union["ForecastCollection", Path]],
     lead_times: Optional[List[int]] = None,
     item_ids: Optional[List[int]] = None,
     maxlags: int = 8,
     decimal_places: Optional[int] = None,
+    reduce_matrix: bool = False,
+    sort: bool = True,
 ) -> pd.DataFrame:
     """
     Compute pairwise Diebold-Mariano test statistics between multiple forecast models.
@@ -1219,6 +1297,10 @@ def get_pairwise_diebold_mariano_test(
         Maximum lag to use for Newey-West HAC standard errors in the Diebold-Mariano test.
     decimal_places : Optional[int], default=None
         Number of decimal places to round the results to. If None, no rounding is applied.
+    reduce_matrix : bool, default=False,
+        Whether to only show non redundant information by only computing the upper diagonal of the matrix.
+    sort : bool, default=True,
+        Whether to sort the results
 
     Returns
     -------
@@ -1227,7 +1309,7 @@ def get_pairwise_diebold_mariano_test(
         - t-statistics of the Diebold-Mariano tests (upper triangle only)
         - p-values corresponding to the t-statistics
         Rows and columns correspond to model names.
-    
+
     Interpretation
     --------------
     In the returned tables:
@@ -1258,16 +1340,29 @@ def get_pairwise_diebold_mariano_test(
 
         scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
 
-    keys = list(scores_dict.keys())
+    if sort:
+        keys = sorted(scores_dict, key=lambda k: scores_dict[k].mean())
+    else:
+        keys = list(scores_dict.keys())
 
-    dm_tval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
-    dm_pval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
+    if reduce_matrix:
+        dm_tval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
+        dm_pval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
 
-    for i in range(len(keys)):
-        for j in range(i + 1, len(keys)):  # Upper triangle only, no diagonal
-            t_val, p_val = diebold_mariano_test(scores_dict[keys[i]], scores_dict[keys[j]], maxlags)
-            dm_tval.loc[keys[i], keys[j]] = t_val
-            dm_pval.loc[keys[i], keys[j]] = p_val
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):  # Upper triangle only, no diagonal
+                t_val, p_val = diebold_mariano_test(scores_dict[keys[i]], scores_dict[keys[j]], maxlags)
+                dm_tval.loc[keys[i], keys[j]] = t_val
+                dm_pval.loc[keys[i], keys[j]] = p_val
+    else:
+        dm_tval = pd.DataFrame(index=keys, columns=keys, dtype=float)
+        dm_pval = pd.DataFrame(index=keys, columns=keys, dtype=float)
+
+        for i in range(len(keys)):
+            for j in range(len(keys)):  # Upper triangle only, no diagonal
+                t_val, p_val = diebold_mariano_test(scores_dict[keys[i]], scores_dict[keys[j]], maxlags)
+                dm_tval.loc[keys[i], keys[j]] = t_val
+                dm_pval.loc[keys[i], keys[j]] = p_val
 
     if decimal_places is not None:
         dm_tval = dm_tval.round(decimal_places)
