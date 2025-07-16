@@ -1466,3 +1466,133 @@ def load_predictions(
         logging.warning("No prediction files were loaded.")
 
     return all_predictions
+
+
+def plot_crps_barh(
+    results: Dict[str, ForecastCollection],  # TODO add path
+    lead_times: Union[List[int], List[List[int]]] = [list(range(1, 4))],
+    reference_predictions: Optional[str] = None,
+    groups: Optional[Dict[str, List[str]]] = None,
+    group_colors: Optional[Dict[str, str]] = None,
+    default_color: str = "#7f7f7f",
+) -> None:
+    """
+    Plot one or more horizontal bar charts of Mean (or Relative) CRPS scores
+    for specified lead times, using a *common x-axis range* across subplots.
+    """
+
+    # Normalize lead_times arg: if a flat list of ints, wrap into list-of-lists
+    if isinstance(lead_times[0], int):
+        lead_times = [lead_times]
+    n_subplots = len(lead_times)
+
+    # --- First pass: compute all CRPS data & gather global min/max -------------
+    crps_frames = []  # list of (lead_time_set, df_sorted)
+    global_min = float("inf")
+    global_max = float("-inf")
+
+    for lead_time_set in lead_times:
+        crps_results_mean = get_crps_scores(
+            results,
+            lead_times=lead_time_set,
+            reference_predictions=reference_predictions,
+            mean_lead_times=True,
+            add_mean=True,
+            sort=True,
+        )
+
+        df = crps_results_mean.loc["Mean CRPS"].to_frame().reset_index()
+        df.columns = ["Model", "Mean CRPS"]
+        df = df.reset_index(drop=True)
+        crps_frames.append((lead_time_set, df))
+
+        # track global range
+        vmin = df["Mean CRPS"].min()
+        vmax = df["Mean CRPS"].max()
+        if vmin < global_min:
+            global_min = vmin
+        if vmax > global_max:
+            global_max = vmax
+
+    # margin
+    span = global_max - global_min
+    if span == 0:  # all equal; make a tiny span
+        span = abs(global_max) if global_max != 0 else 1.0
+    pad = span * 0.25
+    xlo = global_min - pad
+    xhi = global_max + pad
+
+    # If you *never* want negative on axis when all data >=0, clamp at 0
+    if global_min >= 0:
+        xlo = 0
+
+    # --- Figure & axes --------------------------------------------------------
+    fig_width = 8 * n_subplots
+    fig_height = 8
+    fig, axes = plt.subplots(
+        1,
+        n_subplots,
+        figsize=(fig_width, fig_height),
+        squeeze=False,
+        sharex=True,  # <-- share x-axis across panels
+    )
+    axes = axes.flatten()
+
+    # choose label text depending on relative vs absolute
+    x_label = "Relative CRPS" if reference_predictions else "Mean CRPS"
+
+    # --- Plot loop ------------------------------------------------------------
+    for ax, (lead_time_set, df) in zip(axes, crps_frames):
+
+        # Colors
+        if groups is not None and group_colors is not None:
+            colors: List[str] = []
+            for model in df["Model"]:
+                assigned = False
+                for group_name, substrings in groups.items():
+                    if any(s.lower() in model.lower() for s in substrings):
+                        colors.append(group_colors.get(group_name, "#1f77b4"))
+                        assigned = True
+                        break
+                if not assigned:
+                    colors.append(default_color)
+        else:
+            colors = sns.color_palette("deep", n_colors=len(df))
+
+        bars = ax.barh(
+            df["Model"],
+            df["Mean CRPS"],
+            height=0.6,
+            color=colors,
+        )
+
+        # Annotation offset: a small fraction of axis span
+        offset = (xhi - xlo) * 0.005  # 0.5% span; tune if needed
+
+        for bar in bars:
+            width = bar.get_width()
+            xpos = width + offset if width >= 0 else width - offset
+            ax.text(
+                xpos,
+                bar.get_y() + bar.get_height() / 2,
+                f"{width:.2f}",
+                va="center",
+                ha="left" if width >= 0 else "right",
+                fontsize=8,
+            )
+
+        # Apply global x limits to every subplot (sharex makes this redundant but explicit is fine)
+        ax.set_xlim(xlo, xhi)
+
+        # Axis labels & title
+        title = (
+            f"Relative Mean CRPS (Lead Times {min(lead_time_set)}–{max(lead_time_set)})"
+            if reference_predictions
+            else f"Mean CRPS (Lead Times {min(lead_time_set)}–{max(lead_time_set)})"
+        )
+        ax.set_xlabel(x_label)
+        ax.set_title(title, fontsize=12)
+        ax.invert_yaxis()
+
+    plt.tight_layout()
+    plt.show()
