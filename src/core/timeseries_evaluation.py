@@ -1869,3 +1869,381 @@ def plot_pairwise_diebold_mariano_test(
     plt.show()
 
     return fig, axes, heatmaps
+
+
+def plot_reliability_diagram(
+    collections: Dict[str, "ForecastCollection"],
+    lead_times: Optional[Union[List[int], List[List[int]]]] = None,
+    overlay: bool = True,
+    item_ids: Optional[List[int]] = None,
+    show_individual_lead_times: bool = False,
+    mean_lead_times: bool = True,
+) -> None:
+    """Plot reliability diagrams (empirical coverage vs nominal quantile) for *multiple* ForecastCollection objects.
+
+    Supports three display modes:
+
+    1. **Single-overlay (default)**: If ``overlay=True`` and ``lead_times`` is a *flat* list (or ``None``), all
+       collections are plotted together in one axis. Optionally show individual lead lines and/or an equal-weight
+       macro-mean across the selected lead times.
+    2. **Multi-panel overlay**: If ``overlay=True`` *and* ``lead_times`` is a *list of lead-time groups* (list of lists),
+       one subplot is created per group; *within* each subplot all collections are overlaid for the group's lead set.
+       A single shared legend is placed to the **right** of the grid (as you requested).
+    3. **Faceted by collection**: If ``overlay=False`` (regardless of lead-time grouping), create one subplot per
+       collection (original behavior). Lead-time grouping is ignored in this mode; pass a flat list of leads to control
+       the subset used in each panel.
+
+    Parameters
+    ----------
+    collections : dict[str, ForecastCollection]
+        Mapping from a short name/label to a ForecastCollection instance. Appears in legends / subplot titles.
+    lead_times : list[int] | list[list[int]], optional
+        Flat list → single group.
+        List of lists → multi-panel overlay with one subplot per group.
+        ``None`` → use the union of *all* available lead times across collections (single group).
+    overlay : bool, default True
+        Overlay across *collections* (single axis or multi-panel grouping). If False, facet by collection.
+    item_ids : list[int], optional
+        Restrict to these item IDs (applied independently per collection). Missing IDs are ignored.
+    show_individual_lead_times : bool, default False
+        Plot per-lead curves (within whichever axes the mode dictates).
+    mean_lead_times : bool, default True
+        Plot macro-mean curve across the selected lead_times (within panel) using equal-weight mean across leads.
+    """
+    if not collections:
+        raise ValueError("No ForecastCollection objects supplied.")
+
+    # ------------------------------------------------------------------
+    # Utilities (DRY helpers)
+    # ------------------------------------------------------------------
+    def _get_all_leads() -> List[int]:
+        leads = set()
+        for fc in collections.values():
+            leads.update(fc.get_lead_times())
+        return sorted(leads)
+
+    def _collect_coverages(fc: "ForecastCollection", leads: List[int]):
+        """Return dict: {lead_time: [Series per item]}.
+
+        Each Series indexed by nominal quantile (floats).
+        """
+        out = {lt: [] for lt in leads}
+        for item_id in fc.get_item_ids():
+            if item_ids and item_id not in item_ids:
+                continue
+            item = fc.get_time_series_forecast(item_id)
+            for lt in leads:
+                if lt in item.lead_time_forecasts:
+                    val = item.get_empirical_coverage_rates(lt)  # {alpha: cov}
+                    out[lt].append(pd.Series(val))
+        return out
+
+    def _macro_mean(series_list: List[pd.Series]):
+        if not series_list:
+            return None
+        return pd.concat(series_list, axis=1).mean(axis=1)
+
+    def _aggregate_fc(fc: "ForecastCollection", leads: List[int]):
+        """Gather per-item coverages, per-lead macro means, and optional mean across leads.
+
+        Returns (emp_per_lead: dict[int, Series], emp_avg: Series|None).
+        """
+        per_lead = _collect_coverages(fc, leads)
+        emp_per_lead = {}
+        for lt, ser_list in per_lead.items():
+            if ser_list:
+                emp_per_lead[lt] = _macro_mean(ser_list)
+        emp_avg = None
+        if mean_lead_times:
+            all_ser = [s for s in emp_per_lead.values() if s is not None]
+            if all_ser:
+                emp_avg = pd.concat(all_ser, axis=1).mean(axis=1)
+        return emp_per_lead, emp_avg
+
+    def _infer_quantile_levels(emp_per_lead, emp_avg):
+        if emp_avg is not None:
+            return emp_avg.index.to_list()
+        for s in emp_per_lead.values():
+            if s is not None:
+                return s.index.to_list()
+        return []
+
+    def _format_lead_title(leads: List[int]) -> str:
+        if not leads:
+            return ""
+        leads = sorted(leads)
+        contiguous = all(b - a == 1 for a, b in zip(leads[:-1], leads[1:]))
+        if contiguous:
+            return f"Lead Times {leads[0]}–{leads[-1]}"
+        if len(leads) <= 6:
+            return "Lead Times " + ", ".join(str(x) for x in leads)
+        return f"{len(leads)} Leads"
+
+    def _format_ax(ax, quant_levels, *, add_labels=True):
+        """Apply consistent axis formatting."""
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        if quant_levels:
+            ax.set_xticks(quant_levels)
+            ax.set_xticklabels([f"{q:.1f}" for q in quant_levels])
+            ax.set_yticks(quant_levels)
+            ax.set_yticklabels([f"{q:.1f}" for q in quant_levels])
+        if add_labels:
+            ax.set_xlabel("Nominal Quantile Level")
+            ax.set_ylabel("Empirical Coverage")
+        # 45° perfect line
+        ax.plot([0, 1], [0, 1], linestyle="--", color="grey", label="Perfect Calibration")
+        ax.grid(True, which="both", linestyle=":", linewidth=0.5)
+        ax.set_aspect("equal", adjustable="box")
+
+    # ------------------------------------------------------------------
+    # Determine lead_times / lead_time_groups
+    # ------------------------------------------------------------------
+    all_leads = _get_all_leads()
+    if lead_times is None:
+        lead_times = all_leads
+
+    # Normalize to groups.
+    # lead_time_groups: List[List[int]]
+    if lead_times and isinstance(lead_times[0], (list, tuple, np.ndarray)):
+        lead_time_groups = [sorted(set(map(int, grp))) for grp in lead_times]
+    else:
+        lead_time_groups = [sorted(set(map(int, lead_times)))]
+
+    # Validate groups
+    if not any(grp for grp in lead_time_groups):
+        raise ValueError("No lead times available across supplied collections.")
+
+    # ------------------------------------------------------------------
+    # Helper to precompute aggregations *for a given lead group*
+    # ------------------------------------------------------------------
+    def _precompute_for_group(leads_for_group: List[int]):
+        agg = {}
+        for name, fc in collections.items():
+            emp_per_lead, emp_avg = _aggregate_fc(fc, leads_for_group)
+            agg[name] = (emp_per_lead, emp_avg)
+        return agg
+
+    palette = sns.color_palette("deep", n_colors=len(collections))
+    color_by_collection = {name: palette[i] for i, name in enumerate(collections)}
+
+    # ------------------------------------------------------------------
+    # MULTI-PANEL OVERLAY MODE (list-of-lists)
+    # ------------------------------------------------------------------
+    if overlay and len(lead_time_groups) > 1:
+        n_panels = len(lead_time_groups)
+
+        # Grid heuristic: 1-row for <=3; 2x2 for 4; otherwise ~square
+        if n_panels <= 3:
+            rows, cols = 1, n_panels
+        elif n_panels == 4:
+            rows, cols = 2, 2
+        else:
+            cols = math.ceil(np.sqrt(n_panels))
+            rows = math.ceil(n_panels / cols)
+
+        # Reserve space on the right for a shared legend; adjust width accordingly.
+        fig_width = cols * 8
+        fig_height = rows * 8
+        fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
+        axes = axes.ravel()
+
+        # We'll collect legend handles/labels across all panels, deduping by label.
+        legend_handles = {}
+
+        for ax, leads_for_group in zip(axes, lead_time_groups):
+            agg = _precompute_for_group(leads_for_group)
+
+            # Quantile grid for this panel
+            global_quant_levels = []
+            for _, (emp_per_lead, emp_avg) in agg.items():
+                ql = _infer_quantile_levels(emp_per_lead, emp_avg)
+                if ql:
+                    global_quant_levels = ql
+                    break
+
+            for name, (emp_per_lead, emp_avg) in agg.items():
+                base_c = color_by_collection[name]
+                if show_individual_lead_times:
+                    for lt, emp in emp_per_lead.items():
+                        if emp is None:
+                            continue
+                        (ln,) = ax.plot(
+                            emp.index,
+                            emp.values,
+                            marker="o",
+                            linestyle="--",
+                            label=f"{name} LT {lt}",
+                            alpha=0.8,
+                        )
+                        legend_handles.setdefault(ln.get_label(), ln)
+                if mean_lead_times and emp_avg is not None:
+                    (ln,) = ax.plot(
+                        emp_avg.index,
+                        emp_avg.values,
+                        marker="s",
+                        linestyle="-",
+                        linewidth=2,
+                        label=f"{name}",
+                        color=base_c,
+                    )
+                    legend_handles.setdefault(ln.get_label(), ln)
+
+            _format_ax(ax, global_quant_levels, add_labels=False)
+            ax.set_title(_format_lead_title(leads_for_group))
+            # No per-axes legend (we'll do a shared legend outside)
+
+        # Hide unused axes if grid > n_panels
+        for ax in axes[n_panels:]:
+            ax.set_visible(False)
+
+        fig.supxlabel("Nominal Quantile Level")
+        fig.supylabel("Empirical Coverage")
+
+        ttl_bits = []
+        if show_individual_lead_times:
+            ttl_bits.append("Leads")
+        if mean_lead_times:
+            ttl_bits.append("Avg")
+        suffix = " + ".join(ttl_bits) if ttl_bits else ""
+        if suffix:
+            fig.suptitle(f"Grouped Lead Times ({suffix})")
+        else:
+            fig.suptitle("Grouped Lead Times")
+
+        # Shared legend to the RIGHT of all subplots.
+        handles = list(legend_handles.values())
+        labels = [h.get_label() for h in handles]
+        fig.legend(
+            handles,
+            labels,
+            loc="center left",
+            bbox_to_anchor=(1.0, 0.5),  # to the right
+            borderaxespad=0.0,
+            frameon=False,
+            fontsize=15,
+        )
+
+        # Make room on the right for the legend.
+        fig.tight_layout(rect=(0, 0, 1, 1))
+        plt.show()
+        return
+
+    # ------------------------------------------------------------------
+    # SINGLE-PANEL OVERLAY (flat list)
+    # ------------------------------------------------------------------
+    leads_for_overlay = lead_time_groups[0]
+
+    # Precompute once
+    agg = {}
+    for name, fc in collections.items():
+        emp_per_lead, emp_avg = _aggregate_fc(fc, leads_for_overlay)
+        agg[name] = (emp_per_lead, emp_avg)
+
+    # Global quantile grid (assume shared; fallback to first non-empty series found)
+    global_quant_levels = []
+    for _, (emp_per_lead, emp_avg) in agg.items():
+        ql = _infer_quantile_levels(emp_per_lead, emp_avg)
+        if ql:
+            global_quant_levels = ql
+            break
+
+    if overlay:  # single panel overlay
+        fig, ax = plt.subplots(figsize=(8, 8))
+        for name, (emp_per_lead, emp_avg) in agg.items():
+            base_c = color_by_collection[name]
+            if show_individual_lead_times:
+                for lt, emp in emp_per_lead.items():
+                    if emp is None:
+                        continue
+                    ax.plot(
+                        emp.index,
+                        emp.values,
+                        marker="o",
+                        linestyle="--",
+                        label=f"{name} Lead Time {lt}",
+                        alpha=0.8,
+                    )
+            if mean_lead_times and emp_avg is not None:
+                ax.plot(
+                    emp_avg.index,
+                    emp_avg.values,
+                    marker="s",
+                    linestyle="-",
+                    linewidth=2,
+                    label=f"{name}",
+                    color=base_c,
+                )
+
+        _format_ax(ax, global_quant_levels)
+        ttl_bits = []
+        if show_individual_lead_times:
+            ttl_bits.append("Leads")
+        if mean_lead_times:
+            ttl_bits.append("Avg")
+        lt_title = _format_lead_title(leads_for_overlay)
+        suffix = " + ".join(ttl_bits) if ttl_bits else ""
+        title = lt_title if not suffix else f"{lt_title} ({suffix})"
+        ax.set_title(title)
+        ax.legend()
+        plt.show()
+        return
+
+    # ------------------------------------------------------------------
+    # Faceted mode: one subplot per collection
+    # ------------------------------------------------------------------
+    n = len(collections)
+    cols = math.ceil(np.sqrt(n))
+    rows = (n + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
+    axes = axes.flatten() if n > 1 else [axes]
+
+    for ax, (name, (emp_per_lead, emp_avg)) in zip(axes, agg.items()):
+        base_c = color_by_collection[name]
+        if show_individual_lead_times:
+            for lt, emp in emp_per_lead.items():
+                if emp is not None:
+                    ax.plot(
+                        emp.index,
+                        emp.values,
+                        marker="o",
+                        linestyle="--",
+                        label=f"Lead Time {lt}",
+                        alpha=0.8,
+                    )
+        if mean_lead_times and emp_avg is not None:
+            ax.plot(
+                emp_avg.index,
+                emp_avg.values,
+                marker="s",
+                linestyle="-",
+                linewidth=2,
+                label="Avg",
+                color=base_c,
+            )
+
+        _format_ax(ax, global_quant_levels, add_labels=False)
+        ax.set_title(name)
+        ax.legend(fontsize="small")
+
+    # Hide any unused axes
+    for ax in axes[len(collections) :]:
+        ax.set_visible(False)
+
+    # Set common x/y labels on outer figure
+    fig.supxlabel("Nominal Quantile Level")
+    fig.supylabel("Empirical Coverage")
+
+    # Single suptitle reflecting lead selection & content flags
+    ttl_bits = []
+    if show_individual_lead_times:
+        ttl_bits.append("Leads")
+    if mean_lead_times:
+        ttl_bits.append("Avg")
+    lt_title = _format_lead_title(leads_for_overlay)
+    suffix = ' + ".join(ttl_bits) if ttl_bits else "'
+    suptitle = lt_title if not suffix else f"{lt_title} ({suffix})"
+    fig.suptitle(suptitle)
+
+    plt.tight_layout()
+    plt.show()
