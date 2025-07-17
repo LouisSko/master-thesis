@@ -509,7 +509,7 @@ class Chronos(AbstractPredictor):
         self.pipeline = self._pipeline_init(final_dir / "fine-tuned-ckpt")
         logging.info("Two-stage fine-tuning complete – model reloaded.")
 
-    def predict(
+    def _predict(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,

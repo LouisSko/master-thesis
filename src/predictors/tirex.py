@@ -70,7 +70,7 @@ class TiRex(AbstractPredictor):
         """
         logging.info("No fitting required. TiRex is a zero-shot forecaster and implementation does not support fine tuning currently.")
 
-    def predict(
+    def _predict(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,

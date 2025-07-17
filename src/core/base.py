@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Any
 import pandas as pd
-from src.core.timeseries_evaluation import TARGET, ForecastCollection, TimeSeriesForecast, TabularDataFrame
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
 from typing import Dict, List, Optional, Type, Union, Literal
 from pathlib import Path
@@ -14,6 +14,8 @@ from joblib import Parallel, delayed
 import time
 import importlib
 from multiprocessing.resource_tracker import ResourceTracker
+from pydantic import BaseModel, computed_field
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -52,23 +54,34 @@ class AbstractPredictor(ABC):
         self.output_dir = None
         if output_dir:
             self.output_dir = Path(output_dir)
-        self.fit_execution_time = None
+        self.train_time_seconds = None
 
     def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
         start_time = time.time()
         self._fit(data_train, dat_val)
         end_time = time.time()
 
-        self.fit_execution_time = np.round(end_time - start_time, 2)
+        self.train_time_seconds = np.round(end_time - start_time, 2)
 
-        logging.info("Time to fit %s in seconds: %s", self.__class__.__name__, self.fit_execution_time)
+        logging.info("Time to fit %s in seconds: %s", self.__class__.__name__, self.train_time_seconds)
 
     @abstractmethod
     def _fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
         pass
 
-    @abstractmethod
     def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
+        start_time = time.time()
+        forecasts = self._predict(data, previous_context_data, rolling, window_step)
+        end_time = time.time()
+
+        # add execution time
+        forecasts.inference_time_seconds = np.round(end_time - start_time, 2)
+
+        logging.info("%s: Time to generate forecasts in seconds: %s", self.__class__.__name__, forecasts.inference_time_seconds)
+        return forecasts
+
+    @abstractmethod
+    def _predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
         pass
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
@@ -188,18 +201,21 @@ class AbstractPostprocessor(ABC):
 
         end_time = time.time()
 
-        self.fit_execution_time = np.round(end_time - start_time, 2)
+        self.train_time_seconds = np.round(end_time - start_time, 2)
 
-        logging.info("Time to fit %s in seconds: %s", self.class_name, self.fit_execution_time)
+        logging.info("Time to fit %s in seconds: %s", self.class_name, self.train_time_seconds)
 
     def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """Apply postprocessor to each item using available or saved models."""
+        start_time = time.time()
         results = {}
         for item_id in tqdm(data.get_item_ids(), desc=f"Postprocessing with {self.class_name}"):
             forecast = data.get_time_series_forecast(item_id)
             params = self.get_params(item_id)
             results[item_id] = self._postprocess(forecast, params)
-        return ForecastCollection(item_ids=results)
+        end_time = time.time()
+        inference_time_seconds = np.round(end_time - start_time, 2)
+        return ForecastCollection(item_ids=results, inference_time_seconds=inference_time_seconds)
 
     def get_params(self, item_id: Union[int, str]) -> Any:
         """Returns model parameters from memory or loads them from disk if output_dir is set."""
@@ -288,7 +304,7 @@ class AbstractPipeline(ABC):
         model_kwargs : Dict
             Keyword arguments to pass to the model constructor
         freq : Union[str, pd.DateOffset]
-            Frequency of the data 
+            Frequency of the data
         postprocessors : Optional[List[Type[AbstractPostprocessor]]], default=None
             Optional list of postprocessors for refining predictions
         output_dir : Optional[Union[str, Path]], default=None
@@ -308,7 +324,6 @@ class AbstractPipeline(ABC):
             self.freq = freq
         else:
             raise ValueError("freq needs to be a str or pd.DateOffset")
-
 
     @abstractmethod
     def backtest(
@@ -519,3 +534,60 @@ def load_class_from_path(class_path: str) -> Type:
     module = importlib.import_module(module_name)
     logging.info("Load %s from %s", class_name, module)
     return getattr(module, class_name)
+
+
+class ExecutionTimePredictor(BaseModel):
+    predictor_name: str
+    predictor_train_time: Optional[float]
+    predictor_inference_time: float
+
+    def get_total_train_time(self):
+        return self.predictor_train_time
+
+    def get_total_inference_time(self):
+        return self.predictor_inference_time
+
+    @computed_field
+    def total_train_time(self) -> float:
+        return self.get_total_train_time()
+
+    @computed_field
+    def total_inference_time(self) -> float:
+        return self.get_total_inference_time()
+
+
+class ExecutionTimePostprocessor(BaseModel):
+    postprocessor_name: str
+    execution_time_predictor: ExecutionTimePredictor
+    calibration_inference_time: float
+    postprocessor_train_time: float
+    postprocessor_inference_time: float
+
+    @property
+    def predictor_name(self):
+        return self.execution_time_predictor.predictor_name
+
+    @property
+    def predictor_train_time(self):
+        return self.execution_time_predictor.predictor_train_time
+
+    @property
+    def predictor_inference_time(self):
+        return self.execution_time_predictor.predictor_inference_time
+
+    def get_total_train_time(self):
+        predictor_train_time = self.predictor_train_time or 0
+        t = predictor_train_time + self.calibration_inference_time + self.postprocessor_train_time
+        return round(t, 2)
+
+    def get_total_inference_time(self):
+        t = self.predictor_inference_time + self.postprocessor_inference_time
+        return round(t, 2)
+
+    @computed_field
+    def total_train_time(self) -> float:
+        return self.get_total_train_time()
+
+    @computed_field
+    def total_inference_time(self) -> float:
+        return self.get_total_inference_time()

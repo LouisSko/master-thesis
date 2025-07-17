@@ -1,7 +1,7 @@
 import torch
 from typing import Dict, List, Optional, Type, Union, Literal, Tuple
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TabularDataFrame, DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS, ITEMID, TARGET
-from src.core.base import AbstractPostprocessor, AbstractPredictor, load_class_from_path
+from src.core.base import AbstractPostprocessor, AbstractPredictor, ExecutionTimePostprocessor, ExecutionTimePredictor, load_class_from_path
 from src.core.utils import CustomJSONEncoder, set_global_seed
 from autogluon.timeseries import TimeSeriesDataFrame
 import pandas as pd
@@ -258,7 +258,7 @@ class ForecastingPipeline(AbstractPipeline):
                 "test_window_size": test_window_size,
                 "train": train,
                 "calibration_based_on": calibration_based_on,
-                "additional_info": info,
+                "execution_time": info,
             }
             self._store_backtest_outputs(results, backtest_params)
 
@@ -362,7 +362,7 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-    ) -> Dict:
+    ) -> None:
         """
         Train the predictor.
 
@@ -372,16 +372,7 @@ class ForecastingPipeline(AbstractPipeline):
             The training data.
         data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
             Optional validation data. Defaults to None.
-
-        Returns
-        -------
-        Dict
-            Training information
         """
-
-        info = {}
-
-        start_time = pd.Timestamp.now()
         logging.info("Starting training process from %s to %s", data_train.index.get_level_values("timestamp").min(), data_train.index.get_level_values("timestamp").max())
 
         data_train = self.validate_data(data_train)
@@ -400,12 +391,6 @@ class ForecastingPipeline(AbstractPipeline):
         # Fit the predictor with training (and optional validation) data
         logging.info("Fitting predictor to the training data...")
         self.predictor.fit(data_train, data_val)
-        info["predictor_execution_time"] = self.predictor.fit_execution_time
-
-        end_time = pd.Timestamp.now()
-        logging.info("Pipeline training completed in %s seconds.", (end_time - start_time).total_seconds())
-
-        return info
 
     def generate_forecasts(
         self,
@@ -441,7 +426,6 @@ class ForecastingPipeline(AbstractPipeline):
         Dict[str, ForecastCollection]
             Dictionary with predictions stored in a ForecastCollection object.
         """
-
         data_test = self.validate_data(data_test)
         if data_previous_context is not None:
             data_previous_context = self.validate_data(data_previous_context)
@@ -452,14 +436,11 @@ class ForecastingPipeline(AbstractPipeline):
             data_test.index.get_level_values("timestamp").min(),
             data_test.index.get_level_values("timestamp").max(),
         )
-        start_time = pd.Timestamp.now()
         predictions = self.predictor.predict(data_test, data_previous_context, rolling, window_step)
-        end_time = pd.Timestamp.now()
-        logging.info("Prediction completed in %s seconds.", (end_time - start_time).total_seconds())
 
         return {self.predictor.__class__.__name__: predictions}
 
-    def train_postprocessors(self, calibration_predictions: ForecastCollection) -> Dict:
+    def train_postprocessors(self, calibration_predictions: ForecastCollection) -> None:
         """
         Fit the postprocessors based on calibration data.
 
@@ -468,28 +449,13 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_predictions : ForecastCollection
             The generated forecasts of the predictor on the calibration data.
         """
-        info = {}
-
-        # initialize postprocessors
-        self._initialize_postprocessors()
-
-        info["postprocessors_execution_time"] = {}
-
-        start_time = pd.Timestamp.now()
-
         logging.info("Start training postprocessors...")
+        start_time = pd.Timestamp.now()
+        self._initialize_postprocessors()
         for name, postprocessor in self.postprocessor_dict.items():
-
-            # Fit postprocessor on calibration data
-            logging.info("Fitting postprocessor: %s", name)
             postprocessor.fit(data=calibration_predictions)
-            info["postprocessors_execution_time"][name] = postprocessor.fit_execution_time
-            logging.info("Successfully fitted postprocessor: %s", name)
-
         end_time = pd.Timestamp.now()
         logging.info("Postprocessors training completed in %s seconds.", (end_time - start_time).total_seconds())
-
-        return info
 
     def apply_postprocessors_to_forecasts(self, predictions: Dict[str, ForecastCollection]) -> Dict[str, ForecastCollection]:
         """
@@ -533,7 +499,7 @@ class ForecastingPipeline(AbstractPipeline):
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
 
-        info = {}
+        info = {"predictor": {}, "postprocessors": {}}
 
         data_train, data_val, data_test = self.split_time_series_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
 
@@ -544,7 +510,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # ---------- train the predictor ----------
         if train:
-            info["model"] = self.train_predictor_model(data_train, data_val)
+            self.train_predictor_model(data_train, data_val)
             # TODO: save model directly
         else:
             logging.info("Skipping model training because `train=False`.")
@@ -556,6 +522,14 @@ class ForecastingPipeline(AbstractPipeline):
             rolling=True,
             window_step=test_window_step,
         )  # TODO: save predictions directly
+
+        # store information on training and inference time
+        predictor_name = self.predictor.__class__.__name__  # for now only supports a single predictor
+        info["predictor"][predictor_name] = ExecutionTimePredictor(
+            predictor_name=predictor_name,
+            predictor_train_time=self.predictor.train_time_seconds,
+            predictor_inference_time=predictions_test_data[predictor_name].inference_time_seconds,
+        )
 
         # ---------- define calibration dataset ----------
         if self.postprocessors is not None:
@@ -587,10 +561,20 @@ class ForecastingPipeline(AbstractPipeline):
             )
 
             # ---------- train postprocessors ----------
-            info["postprocessors"] = self.train_postprocessors(predictions_calibration_data[self.predictor.__class__.__name__])
+            self.train_postprocessors(predictions_calibration_data[predictor_name])
 
             # ---------- create postprocessed forecasts ----------
             predictions_test_data = self.apply_postprocessors_to_forecasts(predictions_test_data)
+
+            # store information on training and inference time
+            for name, postprocessor in self.postprocessor_dict.items():
+                info["postprocessors"][name] = ExecutionTimePostprocessor(
+                    postprocessor_name=name,
+                    execution_time_predictor=info["predictor"][predictor_name],
+                    calibration_inference_time=predictions_calibration_data[predictor_name].inference_time_seconds,
+                    postprocessor_train_time=postprocessor.train_time_seconds,
+                    postprocessor_inference_time=predictions_test_data[name].inference_time_seconds,
+                )
 
         return predictions_test_data, info
 

@@ -151,7 +151,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         """
         logging.info("RollingSeasonalQuantilePredictor: No fit step; predict() will build or update history.")
 
-    def predict(
+    def _predict(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
@@ -363,7 +363,7 @@ class RollingQuantilePredictor(AbstractPredictor):
         """
         logging.info("RollingQuantilePredictor: no fit step; predict() will build or update history.")
 
-    def predict(
+    def _predict(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
@@ -531,7 +531,7 @@ class RandomWalkBenchmark(AbstractPredictor):
 
         logging.info("RandomWalkBenchmark estimated standard deviation for each time series from training data.")
 
-    def predict(
+    def _predict(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,

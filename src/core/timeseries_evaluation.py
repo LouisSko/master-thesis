@@ -473,6 +473,7 @@ class TimeSeriesForecast(BaseModel):
 
 class ForecastCollection(BaseModel):
     item_ids: Dict[int, TimeSeriesForecast]  # item_id -> TimeSeriesForecast
+    inference_time_seconds: Optional[float] = None # time to obtain the predictions in [s]
 
     class Config:
         arbitrary_types_allowed = True
