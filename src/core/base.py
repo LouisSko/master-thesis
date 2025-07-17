@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Any
+
 import pandas as pd
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
-from typing import Dict, List, Optional, Type, Union, Literal
+from typing import Dict, List, Optional, Type, Union, Literal, Iterable, Any
 from pathlib import Path
 import joblib
 import logging
@@ -15,7 +15,6 @@ import time
 import importlib
 from multiprocessing.resource_tracker import ResourceTracker
 from pydantic import BaseModel, computed_field
-
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -183,8 +182,7 @@ class AbstractPostprocessor(ABC):
         if self.n_jobs == 1:
             for item_id in tqdm(data.get_item_ids(), desc=f"Fitting {self.class_name} for each time series (item)"):
                 forecast = data.get_time_series_forecast(item_id)
-                params = self._fit(forecast)
-                self.params[item_id] = params
+                _, self.params[item_id] = _fit_one(item_id, forecast)
 
         # or parallelize
         else:
@@ -464,39 +462,6 @@ class AbstractPipeline(ABC):
             "postprocessors_kwargs": self.postprocessor_kwargs,
         }
 
-    def get_config(
-        self,
-        backtest_params: Dict,
-        additional_config_info: Optional[Dict] = None,
-    ) -> Dict:
-        """Save configuration information to a JSON file.
-
-        Parameters
-        ----------
-        backtest_params : Dict
-            Dictionary containing the backtest parameters
-        additional_config_info : Optional[Dict], default=None
-            Optional additional information to include in the config file
-
-        Returns
-        -------
-
-        Dict
-            A dictionary containing the configuration
-        """
-
-        # Create base config with model information
-        config = {"init_params": self.get_init_params()}
-
-        # Add backtest parameters
-        config.update({"backtest_params": backtest_params})
-
-        # Add any additional information
-        if additional_config_info:
-            config.update({"additional_info": additional_config_info})
-
-        return config
-
 
 def get_class_path(cls: Type) -> str:
     """
@@ -591,3 +556,71 @@ class ExecutionTimePostprocessor(BaseModel):
     @computed_field
     def total_inference_time(self) -> float:
         return self.get_total_inference_time()
+
+
+def aggregate_execution_time_objects(
+    objs: Iterable[Union["ExecutionTimePredictor", "ExecutionTimePostprocessor"]],
+    *,
+    skipna: bool = True,
+) -> Union["ExecutionTimePredictor", "ExecutionTimePostprocessor"]:
+    """
+    Aggregate ExecutionTimePredictor or ExecutionTimePostprocessor objects by summing their times.
+
+    Parameters
+    ----------
+    objs : iterable
+        List of either ExecutionTimePredictor or ExecutionTimePostprocessor.
+    skipna : bool
+        If True, ignore None values when summing train times.
+
+    Returns
+    -------
+    Aggregated ExecutionTimePredictor or ExecutionTimePostprocessor.
+    """
+    objs = list(objs)
+    if not objs:
+        raise ValueError("No execution time objects provided.")
+
+    first = objs[0]
+    is_post = isinstance(first, ExecutionTimePostprocessor)
+
+    if not all(isinstance(o, type(first)) for o in objs):
+        raise TypeError("All objects must be the same type (all predictors or all postprocessors).")
+
+    if is_post:
+        name = first.postprocessor_name
+        preds = [o.execution_time_predictor for o in objs]
+
+        # Aggregate postprocessor fields
+        calibration_sum = round(sum(o.calibration_inference_time for o in objs), 2)
+        post_train_sum = round(sum(o.postprocessor_train_time for o in objs), 2)
+        post_inf_sum = round(sum(o.postprocessor_inference_time for o in objs), 2)
+
+        # Reuse this function to aggregate predictors
+        agg_pred = aggregate_execution_time_objects(preds, skipna=skipna)
+
+        return ExecutionTimePostprocessor(
+            postprocessor_name=name,
+            execution_time_predictor=agg_pred,
+            calibration_inference_time=calibration_sum,
+            postprocessor_train_time=post_train_sum,
+            postprocessor_inference_time=post_inf_sum,
+        )
+
+    else:
+        # Predictor case
+        names = {p.predictor_name for p in objs if p.predictor_name is not None}
+        name = next(iter(names)) if len(names) == 1 else "+".join(sorted(names))
+
+        train_times = [p.predictor_train_time for p in objs]
+        if skipna:
+            train_times = [t for t in train_times if t is not None]
+        train_total = round(sum(train_times), 2) if train_times else None
+
+        inf_total = round(sum(p.predictor_inference_time for p in objs), 2)
+
+        return ExecutionTimePredictor(
+            predictor_name=name,
+            predictor_train_time=train_total,
+            predictor_inference_time=inf_total,
+        )
