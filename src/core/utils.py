@@ -9,6 +9,7 @@ import torch
 import random
 import os
 import logging
+from pydantic import BaseModel
 
 
 def get_logger(log_level: str, logger_name: str = "default") -> logging.Logger:
@@ -105,6 +106,9 @@ class CustomJSONEncoder(json.JSONEncoder):
 
         if isinstance(o, Path):
             return str(o)
+
+        if isinstance(o, BaseModel):
+            return o.model_dump()
 
         return super().default(o)
 

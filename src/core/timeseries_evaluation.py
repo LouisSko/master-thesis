@@ -1,5 +1,6 @@
 """This Module provides utilities for probabilistic time series forecasting, including data structures, evaluation, and visualization tools."""
 
+import os
 from typing import List, Optional, Dict, Tuple, Union
 import pandas as pd
 import torch
@@ -14,14 +15,17 @@ import matplotlib.dates as mdates
 from pathlib import Path
 import joblib
 import logging
-import os
 from tqdm import tqdm
 from numpy.typing import NDArray
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import seaborn as sns
+import json
 
+PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
+PREDICTIONS_FILENAME = "predictions.joblib"
+BACKTEST_CONFIG_FILENAME = "backtest_config.json"
 DIR_BACKTESTS = "backtest"
 DIR_MODELS = "models"
 DIR_POSTPROCESSORS = "postprocessors"
@@ -473,6 +477,7 @@ class TimeSeriesForecast(BaseModel):
 
 class ForecastCollection(BaseModel):
     item_ids: Dict[int, TimeSeriesForecast]  # item_id -> TimeSeriesForecast
+    inference_time_seconds: Optional[float] = None  # time to obtain the predictions in [s]
 
     class Config:
         arbitrary_types_allowed = True
@@ -1371,105 +1376,8 @@ def get_pairwise_diebold_mariano_test(
     return dm_tval, dm_pval
 
 
-def load_predictions(
-    prediction_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
-    prediction_files: Union[List[Union[Path, str]], Path, str, None] = None,
-    load: bool = True,
-) -> Dict[str, ForecastCollection]:
-    """
-    Load saved prediction files from specified files or recursively from directories.
-
-    You can either:
-    - Provide a list of prediction files to load, or
-    - Provide one or more directories. The function will recursively search for 'predictions.joblib' files inside them.
-
-    If directories are used, the key for each loaded prediction will be constructed as 'parentfolder_filename'
-    to make them distinguishable.
-
-    Parameters
-    ----------
-    prediction_dirs : str, Path, or list of str/Path, optional
-        One or multiple directories to search for prediction files.
-    prediction_files : str, Path, or list of str/Path, optional
-        Specific prediction files to load directly.
-
-    Returns
-    -------
-    Dict[str, ForecastCollection]
-        A dictionary mapping generated keys to loaded prediction objects.
-    """
-
-    all_predictions = {}
-    all_file_paths: List[Path] = []
-
-    # Collect the prediction files from either the provided list or directories
-    if prediction_files:
-        logging.info("Loading predictions from provided files...")
-
-        if isinstance(prediction_files, (str, Path)):
-            prediction_files = [prediction_files]
-
-        for file in prediction_files:
-            file = Path(file)
-            if file.is_file() and file.suffix == ".joblib":
-                all_file_paths.append(file)
-
-    elif prediction_dirs:
-        logging.info("Loading predictions by searching in provided directories...")
-
-        if isinstance(prediction_dirs, (str, Path)):
-            prediction_dirs = [prediction_dirs]
-
-        for prediction_dir in prediction_dirs:
-            prediction_dir = Path(prediction_dir)
-            if not prediction_dir.is_dir():
-                logging.warning(f"Skipping non-directory path: `{prediction_dir}`")
-                continue
-
-            for filepath in prediction_dir.rglob("predictions.joblib"):
-                all_file_paths.append(filepath)
-
-    else:
-        raise ValueError("Either prediction_files or prediction_dirs must be provided.")
-
-    # If we found any joblib files, process them
-    if all_file_paths:
-        # Find the common path prefix
-        common_path = Path(os.path.commonpath(all_file_paths))
-        logging.info(f"Common path identified: {common_path}")
-
-        for filepath in all_file_paths:
-            # Remove the common path from the filename and the generic prediction.joblib at the end
-            if len(all_file_paths) > 1:
-                relevant_dirs = list(filepath.relative_to(common_path).parent.parts)
-            else:
-                relevant_dirs = [filepath.parent.parts[-1]]
-            for d in relevant_dirs:
-                if d in [DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS]:
-                    relevant_dirs.remove(d)
-
-            key = "_".join(relevant_dirs)
-            if load:
-                all_predictions[key] = joblib.load(filepath)
-                logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
-            else:
-                all_predictions[key] = filepath
-                logging.info(f"Found prediction file: `{filepath}` as key: {key}")
-
-    else:
-        logging.warning("No prediction files were found.")
-
-    if all_predictions:
-        formatted_keys = "\n      - " + "\n      - ".join(all_predictions.keys())
-        logging.info("Finished loading predictions. \n \n  Loaded keys:%s", formatted_keys)
-    else:
-        logging.warning("No prediction files were loaded.")
-
-    return all_predictions
-
-
 def plot_crps_barh(
-    results: Dict[str, ForecastCollection],  # TODO add path
+    predictions: Dict[str, Union["ForecastCollection", Path]],
     lead_times: Union[List[int], List[List[int]]] = [list(range(1, 4))],
     reference_predictions: Optional[str] = None,
     groups: Optional[Dict[str, List[str]]] = None,
@@ -1492,8 +1400,9 @@ def plot_crps_barh(
     global_max = float("-inf")
 
     for lead_time_set in lead_times:
+
         crps_results_mean = get_crps_scores(
-            results,
+            predictions,
             lead_times=lead_time_set,
             reference_predictions=reference_predictions,
             mean_lead_times=True,
@@ -1641,7 +1550,14 @@ def plot_pairwise_diebold_mariano_test(
 
     # If no lead_times supplied, use all leads from first prediction
     if lead_times is None:
-        full_leads = predictions[list(predictions.keys())[0]].get_lead_times()
+        first_entry = list(predictions.keys())[0]
+        if isinstance(predictions[first_entry], ForecastCollection):
+            pred = first_entry
+        elif isinstance(first_entry, (str, Path)):
+            pred = joblib.load(first_entry)
+        else:
+            raise TypeError(f"Unsupported prediction type for key '{first_entry}': {type(predictions[first_entry])}")
+        full_leads = pred.get_lead_times()
         lead_groups = [full_leads]
         n_panels = 1
         is_multi = False
@@ -2247,3 +2163,310 @@ def plot_reliability_diagram(
 
     plt.tight_layout()
     plt.show()
+
+
+def _coerce_paths(x: Union[List[Union[Path, str]], Path, str, None]) -> Optional[List[Path]]:
+    """Normalize single path, iterable of paths, or None -> list[Path] | None."""
+    if x is None:
+        return None
+    if isinstance(x, (str, Path)):
+        return [Path(x)]
+    return [Path(p) for p in x]
+
+
+def _collect_files(
+    *,
+    files: Optional[List[Path]],
+    dirs: Optional[List[Path]],
+    required_name: Optional[str] = None,
+    required_suffix: Optional[str] = None,
+    recursive: bool = True,
+) -> List[Path]:
+    """
+    Collect candidate files from explicit list and/or directories.
+
+    Parameters
+    ----------
+    required_name : str, optional
+        Exact filename to match (e.g., 'predictions.joblib').
+    required_suffix : str, optional
+        File suffix (e.g., '.joblib'); ignored if required_name given.
+    recursive : bool
+        Recurse into directories if True.
+
+    Returns
+    -------
+    list[Path]
+    """
+    out: List[Path] = []
+
+    # Explicit files
+    if files:
+        for f in files:
+            if not f.is_file():
+                logging.warning(f"Skipping non-file path: `{f}`")
+                continue
+            if required_name and f.name != required_name:
+                logging.warning(f"Skipping `{f}` (name != {required_name})")
+                continue
+            if required_suffix and f.suffix != required_suffix:
+                logging.warning(f"Skipping `{f}` (suffix != {required_suffix})")
+                continue
+            out.append(f)
+
+    # Directories
+    if dirs:
+        for d in dirs:
+            if not d.is_dir():
+                logging.warning(f"Skipping non-directory path: `{d}`")
+                continue
+            if recursive:
+                if required_name:
+                    found = list(d.rglob(required_name))
+                elif required_suffix:
+                    found = [p for p in d.rglob(f"*{required_suffix}") if p.is_file()]
+                else:
+                    found = [p for p in d.rglob("*") if p.is_file()]
+            else:
+                if required_name:
+                    found = [d / required_name] if (d / required_name).is_file() else []
+                elif required_suffix:
+                    found = [p for p in d.glob(f"*{required_suffix}") if p.is_file()]
+                else:
+                    found = [p for p in d.glob("*") if p.is_file()]
+            out.extend(found)
+
+    return out
+
+
+def _strip_tokens(parts: List[str], tokens: set) -> List[str]:
+    """Return a new list with any token removed."""
+    return [p for p in parts if p not in tokens]
+
+
+def _build_key(filepath: Path, *, n_files: int, common_path: Path, strip_tokens: set) -> str:
+    """
+    Build a stable experiment/model key consistent across loaders.
+
+    Rules (mirrors + fixes your original load_predictions logic):
+    - If multiple files: key = underscore-joined parent path *relative to common root*.
+    - If single file: use deepest non-generic parent directory (skip strip_tokens).
+    - If nothing remains, fall back to file stem.
+
+    Examples
+    --------
+    results/.../chronos-zero-shot-prediction_length/backtest/backtest_config.json
+      -> 'chronos-zero-shot-prediction_length'
+    """
+    if n_files > 1:
+        parts = list(filepath.relative_to(common_path).parent.parts)
+    else:
+        # full absolute parent chain; pick deepest non-generic piece
+        parts = list(filepath.parent.parts)
+        parts = _strip_tokens(parts, strip_tokens)
+        parts = parts[-1:]  # keep last surviving part
+
+    parts = _strip_tokens(parts, strip_tokens)
+
+    if not parts:
+        return filepath.stem
+    return "_".join(parts)
+
+
+def load_predictions(
+    prediction_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
+    prediction_files: Union[List[Union[Path, str]], Path, str, None] = None,
+    load: bool = True,
+) -> Dict[str, Union[Path, "ForecastCollection"]]:
+    """
+    Load saved prediction files from specified files or recursively from directories.
+
+    You can either:
+    - Provide a list of prediction files to load, or
+    - Provide one or more directories. The function will recursively search for 'predictions.joblib' files inside them.
+
+    If directories are used, the key for each loaded prediction will be constructed as 'parentfolder_filename'
+    to make them distinguishable.
+
+    Parameters
+    ----------
+    prediction_dirs : str, Path, or list of str/Path, optional
+        One or multiple directories to search for prediction files.
+    prediction_files : str, Path, or list of str/Path, optional
+        Specific prediction files to load directly.
+    load : bool, default = True
+        Whether to load predictions into memory or only paths. Use lazy loading in case of large file sizes.
+    Returns
+    -------
+    Dict[str, Union[Path, Union[Path, "ForecastCollection"]]
+        A dictionary mapping generated keys to Paths or loaded prediction objects.
+    """
+    all_predictions: Dict[str, "ForecastCollection"] = {}
+    files_list = _coerce_paths(prediction_files)
+    dirs_list = _coerce_paths(prediction_dirs)
+
+    if not files_list and not dirs_list:
+        raise ValueError("Either prediction_files or prediction_dirs must be provided.")
+
+    all_file_paths = _collect_files(
+        files=files_list,
+        dirs=dirs_list,
+        required_name=PREDICTIONS_FILENAME,
+        required_suffix=".joblib",  # redundancy safe
+        recursive=True,
+    )
+
+    if not all_file_paths:
+        logging.warning("No prediction files were found.")
+        return all_predictions
+
+    common_path = Path(os.path.commonpath(all_file_paths))
+    n_files = len(all_file_paths)
+    logging.info(f"Common path identified: {common_path}")
+
+    for filepath in all_file_paths:
+        key = _build_key(
+            filepath,
+            n_files=n_files,
+            common_path=common_path,
+            strip_tokens={DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS},
+        )
+        if load:
+            all_predictions[key] = joblib.load(filepath)
+            logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
+        else:
+            all_predictions[key] = filepath  # type: ignore[assignment]
+            logging.info(f"Found prediction file: `{filepath}` as key: {key}")
+
+    if all_predictions:
+        formatted_keys = "\n      - " + "\n      - ".join(all_predictions.keys())
+        logging.info("Finished loading predictions. \n \n  Loaded keys:%s", formatted_keys)
+    else:
+        logging.warning("No prediction files were loaded.")
+
+    return all_predictions
+
+
+def _extract_execution_rows(exec_dict: dict) -> List[dict]:
+    """
+    Build rows (predictor + postprocessors) from execution_time dict.
+    Ignore nested execution_time_predictor under postprocessors.
+    """
+    rows = []
+
+    # Predictor(s)
+    for predictor_data in exec_dict.get("predictor", {}).values():
+        name = predictor_data.get("predictor_name", "unknown")
+        row = {"name": name, "type": "predictor"}
+        for k, v in predictor_data.items():
+            if k != "predictor_name":
+                row[k] = v
+        rows.append(row)
+
+    # Postprocessors
+    for post_data in exec_dict.get("postprocessors", {}).values():
+        name = post_data.get("postprocessor_name", "unknown")
+        row = {"name": name, "type": "postprocessor"}
+        for k, v in post_data.items():
+            if k not in ("postprocessor_name", "execution_time_predictor"):
+                row[k] = v
+        rows.append(row)
+
+    return rows
+
+
+def load_execution_times(
+    execution_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
+    execution_files: Union[List[Union[Path, str]], Path, str, None] = None,
+    round_ndigits: Optional[int] = 2,
+    fillna_value: Optional[float] = None,
+) -> pd.DataFrame:
+    """
+    Load execution_time metadata from one or more backtest_config.json files and return a DataFrame.
+
+    Parameters
+    ----------
+    execution_dirs : str | Path | list[str|Path], optional
+        One or more directories to search recursively for backtest_config.json files.
+    execution_files : str | Path | list[str|Path], optional
+        Specific backtest_config.json files to load directly.
+    round_ndigits : int, optional
+        If provided, round numeric columns to this many decimals.
+    fillna_value : float, optional
+        If provided, fill NaNs with this value (e.g., 0.0). Leave as None to keep NaNs.
+
+    Returns
+    -------
+    pd.DataFrame
+        MultiIndexed DataFrame (level 0 = key matching load_predictions, level 1 = predictor/postprocessor name).
+    """
+    files_list = _coerce_paths(execution_files)
+    dirs_list = _coerce_paths(execution_dirs)
+
+    if not files_list and not dirs_list:
+        raise ValueError("Either execution_files or execution_dirs must be provided.")
+
+    all_file_paths = _collect_files(
+        files=files_list,
+        dirs=dirs_list,
+        required_name=BACKTEST_CONFIG_FILENAME,
+        recursive=True,
+    )
+
+    if not all_file_paths:
+        logging.warning("No execution_time config files were found.")
+        return pd.DataFrame()
+
+    common_path = Path(os.path.commonpath(all_file_paths))
+    n_files = len(all_file_paths)
+
+    records = []
+    for filepath in all_file_paths:
+        key = _build_key(
+            filepath,
+            n_files=n_files,
+            common_path=common_path,
+            strip_tokens={DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS},
+        )
+
+        try:
+            with open(filepath, "r") as f:
+                cfg = json.load(f)
+        except Exception as err:
+            logging.error(f"Failed to read JSON `{filepath}`: {err}")
+            continue
+
+        exec_dict = cfg.get("execution_time")
+        if exec_dict is None:
+            logging.warning(f"`execution_time` missing in `{filepath}`; skipping.")
+            continue
+
+        exec_rows = _extract_execution_rows(exec_dict)
+        if not exec_rows:
+            logging.info(f"No execution_time rows extracted for `{filepath}`; skipping.")
+            continue
+
+        for r in exec_rows:
+            r["__key__"] = key
+        records.extend(exec_rows)
+
+        logging.info(f"Loaded execution_time from `{filepath}` as key: {key}")
+
+    if not records:
+        logging.warning("No execution_time data extracted from files.")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+
+    # Build MultiIndex: (model_key, component_name)
+    df = df.set_index(["__key__", "name"]).sort_index()
+    df.index = df.index.set_names(["model_key", "component_name"])
+
+    # Optional fill/round
+    if fillna_value is not None:
+        df = df.fillna(fillna_value)
+    if round_ndigits is not None:
+        num_cols = df.select_dtypes(include=[np.number]).columns
+        df[num_cols] = df[num_cols].round(round_ndigits)
+
+    return df

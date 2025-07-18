@@ -130,7 +130,7 @@ class AutogluonPredictor(AbstractPredictor):
             **self.fit_kwargs,
         )
 
-    def predict(
+    def _predict(
         self,
         data: TimeSeriesDataFrame,
         previous_context_data: Optional[TimeSeriesDataFrame] = None,

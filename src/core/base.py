@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional, Any
+
 import pandas as pd
-from src.core.timeseries_evaluation import TARGET, ForecastCollection, TimeSeriesForecast, TabularDataFrame
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
-from typing import Dict, List, Optional, Type, Union, Literal
+from typing import Dict, List, Optional, Type, Union, Literal, Iterable, Any
 from pathlib import Path
 import joblib
 import logging
@@ -14,6 +14,7 @@ from joblib import Parallel, delayed
 import time
 import importlib
 from multiprocessing.resource_tracker import ResourceTracker
+from pydantic import BaseModel, computed_field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -52,23 +53,34 @@ class AbstractPredictor(ABC):
         self.output_dir = None
         if output_dir:
             self.output_dir = Path(output_dir)
-        self.fit_execution_time = None
+        self.train_time_seconds = None
 
     def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
         start_time = time.time()
         self._fit(data_train, dat_val)
         end_time = time.time()
 
-        self.fit_execution_time = np.round(end_time - start_time, 2)
+        self.train_time_seconds = np.round(end_time - start_time, 2)
 
-        logging.info("Time to fit %s in seconds: %s", self.__class__.__name__, self.fit_execution_time)
+        logging.info("Time to fit %s in seconds: %s", self.__class__.__name__, self.train_time_seconds)
 
     @abstractmethod
     def _fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
         pass
 
-    @abstractmethod
     def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
+        start_time = time.time()
+        forecasts = self._predict(data, previous_context_data, rolling, window_step)
+        end_time = time.time()
+
+        # add execution time
+        forecasts.inference_time_seconds = np.round(end_time - start_time, 2)
+
+        logging.info("%s: Time to generate forecasts in seconds: %s", self.__class__.__name__, forecasts.inference_time_seconds)
+        return forecasts
+
+    @abstractmethod
+    def _predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
         pass
 
     def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
@@ -170,8 +182,7 @@ class AbstractPostprocessor(ABC):
         if self.n_jobs == 1:
             for item_id in tqdm(data.get_item_ids(), desc=f"Fitting {self.class_name} for each time series (item)"):
                 forecast = data.get_time_series_forecast(item_id)
-                params = self._fit(forecast)
-                self.params[item_id] = params
+                _, self.params[item_id] = _fit_one(item_id, forecast)
 
         # or parallelize
         else:
@@ -188,18 +199,21 @@ class AbstractPostprocessor(ABC):
 
         end_time = time.time()
 
-        self.fit_execution_time = np.round(end_time - start_time, 2)
+        self.train_time_seconds = np.round(end_time - start_time, 2)
 
-        logging.info("Time to fit %s in seconds: %s", self.class_name, self.fit_execution_time)
+        logging.info("Time to fit %s in seconds: %s", self.class_name, self.train_time_seconds)
 
     def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """Apply postprocessor to each item using available or saved models."""
+        start_time = time.time()
         results = {}
         for item_id in tqdm(data.get_item_ids(), desc=f"Postprocessing with {self.class_name}"):
             forecast = data.get_time_series_forecast(item_id)
             params = self.get_params(item_id)
             results[item_id] = self._postprocess(forecast, params)
-        return ForecastCollection(item_ids=results)
+        end_time = time.time()
+        inference_time_seconds = np.round(end_time - start_time, 2)
+        return ForecastCollection(item_ids=results, inference_time_seconds=inference_time_seconds)
 
     def get_params(self, item_id: Union[int, str]) -> Any:
         """Returns model parameters from memory or loads them from disk if output_dir is set."""
@@ -288,7 +302,7 @@ class AbstractPipeline(ABC):
         model_kwargs : Dict
             Keyword arguments to pass to the model constructor
         freq : Union[str, pd.DateOffset]
-            Frequency of the data 
+            Frequency of the data
         postprocessors : Optional[List[Type[AbstractPostprocessor]]], default=None
             Optional list of postprocessors for refining predictions
         output_dir : Optional[Union[str, Path]], default=None
@@ -308,7 +322,6 @@ class AbstractPipeline(ABC):
             self.freq = freq
         else:
             raise ValueError("freq needs to be a str or pd.DateOffset")
-
 
     @abstractmethod
     def backtest(
@@ -449,39 +462,6 @@ class AbstractPipeline(ABC):
             "postprocessors_kwargs": self.postprocessor_kwargs,
         }
 
-    def get_config(
-        self,
-        backtest_params: Dict,
-        additional_config_info: Optional[Dict] = None,
-    ) -> Dict:
-        """Save configuration information to a JSON file.
-
-        Parameters
-        ----------
-        backtest_params : Dict
-            Dictionary containing the backtest parameters
-        additional_config_info : Optional[Dict], default=None
-            Optional additional information to include in the config file
-
-        Returns
-        -------
-
-        Dict
-            A dictionary containing the configuration
-        """
-
-        # Create base config with model information
-        config = {"init_params": self.get_init_params()}
-
-        # Add backtest parameters
-        config.update({"backtest_params": backtest_params})
-
-        # Add any additional information
-        if additional_config_info:
-            config.update({"additional_info": additional_config_info})
-
-        return config
-
 
 def get_class_path(cls: Type) -> str:
     """
@@ -519,3 +499,128 @@ def load_class_from_path(class_path: str) -> Type:
     module = importlib.import_module(module_name)
     logging.info("Load %s from %s", class_name, module)
     return getattr(module, class_name)
+
+
+class ExecutionTimePredictor(BaseModel):
+    predictor_name: str
+    predictor_train_time: Optional[float]
+    predictor_inference_time: float
+
+    def get_total_train_time(self):
+        return self.predictor_train_time
+
+    def get_total_inference_time(self):
+        return self.predictor_inference_time
+
+    @computed_field
+    def total_train_time(self) -> float:
+        return self.get_total_train_time()
+
+    @computed_field
+    def total_inference_time(self) -> float:
+        return self.get_total_inference_time()
+
+
+class ExecutionTimePostprocessor(BaseModel):
+    postprocessor_name: str
+    execution_time_predictor: ExecutionTimePredictor
+    calibration_inference_time: float
+    postprocessor_train_time: float
+    postprocessor_inference_time: float
+
+    @property
+    def predictor_name(self):
+        return self.execution_time_predictor.predictor_name
+
+    @property
+    def predictor_train_time(self):
+        return self.execution_time_predictor.predictor_train_time
+
+    @property
+    def predictor_inference_time(self):
+        return self.execution_time_predictor.predictor_inference_time
+
+    def get_total_train_time(self):
+        predictor_train_time = self.predictor_train_time or 0
+        t = predictor_train_time + self.calibration_inference_time + self.postprocessor_train_time
+        return round(t, 2)
+
+    def get_total_inference_time(self):
+        t = self.predictor_inference_time + self.postprocessor_inference_time
+        return round(t, 2)
+
+    @computed_field
+    def total_train_time(self) -> float:
+        return self.get_total_train_time()
+
+    @computed_field
+    def total_inference_time(self) -> float:
+        return self.get_total_inference_time()
+
+
+def aggregate_execution_time_objects(
+    objs: Iterable[Union["ExecutionTimePredictor", "ExecutionTimePostprocessor"]],
+    *,
+    skipna: bool = True,
+) -> Union["ExecutionTimePredictor", "ExecutionTimePostprocessor"]:
+    """
+    Aggregate ExecutionTimePredictor or ExecutionTimePostprocessor objects by summing their times.
+
+    Parameters
+    ----------
+    objs : iterable
+        List of either ExecutionTimePredictor or ExecutionTimePostprocessor.
+    skipna : bool
+        If True, ignore None values when summing train times.
+
+    Returns
+    -------
+    Aggregated ExecutionTimePredictor or ExecutionTimePostprocessor.
+    """
+    objs = list(objs)
+    if not objs:
+        raise ValueError("No execution time objects provided.")
+
+    first = objs[0]
+    is_post = isinstance(first, ExecutionTimePostprocessor)
+
+    if not all(isinstance(o, type(first)) for o in objs):
+        raise TypeError("All objects must be the same type (all predictors or all postprocessors).")
+
+    if is_post:
+        name = first.postprocessor_name
+        preds = [o.execution_time_predictor for o in objs]
+
+        # Aggregate postprocessor fields
+        calibration_sum = round(sum(o.calibration_inference_time for o in objs), 2)
+        post_train_sum = round(sum(o.postprocessor_train_time for o in objs), 2)
+        post_inf_sum = round(sum(o.postprocessor_inference_time for o in objs), 2)
+
+        # Reuse this function to aggregate predictors
+        agg_pred = aggregate_execution_time_objects(preds, skipna=skipna)
+
+        return ExecutionTimePostprocessor(
+            postprocessor_name=name,
+            execution_time_predictor=agg_pred,
+            calibration_inference_time=calibration_sum,
+            postprocessor_train_time=post_train_sum,
+            postprocessor_inference_time=post_inf_sum,
+        )
+
+    else:
+        # Predictor case
+        names = {p.predictor_name for p in objs if p.predictor_name is not None}
+        name = next(iter(names)) if len(names) == 1 else "+".join(sorted(names))
+
+        train_times = [p.predictor_train_time for p in objs]
+        if skipna:
+            train_times = [t for t in train_times if t is not None]
+        train_total = round(sum(train_times), 2) if train_times else None
+
+        inf_total = round(sum(p.predictor_inference_time for p in objs), 2)
+
+        return ExecutionTimePredictor(
+            predictor_name=name,
+            predictor_train_time=train_total,
+            predictor_inference_time=inf_total,
+        )

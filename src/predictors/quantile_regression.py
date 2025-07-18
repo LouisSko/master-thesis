@@ -87,7 +87,7 @@ class QuantileRegression(AbstractPredictor):
                     model = sm.QuantReg(y_train, x_train)
                     self.models_qr[(item_id, lead_time, q)] = model.fit(q=q)
 
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> ForecastCollection:
+    def _predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, predict_only_last_timestep: bool = False) -> ForecastCollection:
 
         if self.models_qr is None:
             raise ValueError("Need to fit models first.")
