@@ -1,7 +1,7 @@
 from src.pipeline.pipeline import ForecastingPipeline
 from src.predictors.chronos import Chronos
 from src.predictors.tirex import TiRex
-from src.predictors.benchmarks import RandomWalkBenchmark, RollingSeasonalQuantilePredictor
+from src.predictors.benchmarks import RandomWalkBenchmark, SeasonalNaive
 import eval_constants
 import torch
 from src.predictors.autogluon_wrapper import SeasonalNaive_Ag, PatchTST_Ag, TiDE_Ag
@@ -365,7 +365,7 @@ def evaluate():
 
     # SeasonalNaive Benchmark - self implemented
     pipeline = ForecastingPipeline(
-        model=RollingSeasonalQuantilePredictor,
+        model=SeasonalNaive,
         model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq, "name": "SeasonalNaive"},
         postprocessors=None,
         postprocessor_kwargs=None,
