@@ -52,22 +52,22 @@ def evaluate():
     else:
         device_map = "cpu"
 
-    # torch.cuda.set_device(0)
 
     # ------------------------ Chronos-Bolt ------------------------
 
-    # chronos zero shot results
+    # chronos bolt zero shot results
     pipeline = ForecastingPipeline(
         model=Chronos,
         model_kwargs={
             "pretrained_model_name_or_path": f"amazon/chronos-bolt-{chronos_variant}",
             "device_map": device_map,
             "lead_times": lead_times,
+            "name": f"Chronos-Bolt-{chronos_variant}",
         },
         postprocessors=postprocessors,
         postprocessor_kwargs=postprocessor_kwargs,
         freq=freq,
-        output_dir=output_dir / f"chronos-bolt-{chronos_variant}-zero-shot",
+        output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}",
     )
 
     results = pipeline.backtest(
@@ -86,7 +86,7 @@ def evaluate():
     del pipeline
     del results
 
-    # chronos full fine tuning
+    # chronos bolt full fine tuning
     pipeline = ForecastingPipeline(
         model=Chronos,
         model_kwargs={
@@ -97,11 +97,12 @@ def evaluate():
             "finetuning_hp_search": False,
             "finetuning_warmup_new_neurons": True,
             "finetuning_adjust_pretrained_prediction_length": True,
+            "name": f"Chronos-Bolt-{chronos_variant}-FT_Full"m
         },
-        postprocessors=postprocessors,
-        postprocessor_kwargs=postprocessor_kwargs,
+        postprocessors=None,
+        postprocessor_kwargs=None,
         freq=freq,
-        output_dir=output_dir / f"chronos-bolt-{chronos_variant}-finetuned-warmup_full",
+        output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_Full",
     )
 
     results = pipeline.backtest(
@@ -112,13 +113,11 @@ def evaluate():
         val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
-        calibration_based_on="val",
+        calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
     )
 
-    del pipeline
-    del results
 
     # chronos-bolt last layer fine tuning
     pipeline = ForecastingPipeline(
@@ -131,11 +130,12 @@ def evaluate():
             "finetuning_hp_search": False,
             "finetuning_warmup_new_neurons": True,
             "finetuning_adjust_pretrained_prediction_length": True,
+            "name": f"Chronos-Bolt-{chronos_variant}-FT_Last",
         },
-        postprocessors=postprocessors,
-        postprocessor_kwargs=postprocessor_kwargs,
+        postprocessors=None,
+        postprocessor_kwargs=None,
         freq=freq,
-        output_dir=output_dir / f"chronos-bolt-{chronos_variant}-finetuned-warmup_lastlayer",
+        output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_Last",
     )
 
     results = pipeline.backtest(
@@ -146,7 +146,7 @@ def evaluate():
         val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
-        calibration_based_on="val",
+        calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
     )
@@ -154,37 +154,43 @@ def evaluate():
     del pipeline
     del results
 
-    # # ------------------------ Chronos-t5 ------------------------
-
-    # chronos-t5 zero-shot w/o postprocessing due to speed limitations
+    # chronos-bolt lora fine tuning
     pipeline = ForecastingPipeline(
         model=Chronos,
         model_kwargs={
-            "pretrained_model_name_or_path": f"amazon/chronos-t5-{chronos_variant}",
+            "pretrained_model_name_or_path": f"amazon/chronos-bolt-{chronos_variant}",
             "device_map": device_map,
             "lead_times": lead_times,
+            "finetuning_type": "LoRA",
+            "finetuning_hp_search": False,
+            "finetuning_warmup_new_neurons": True,
+            "finetuning_adjust_pretrained_prediction_length": True,
+            "name": f"Chronos-Bolt-{chronos_variant}-FT_LoRA",
         },
         postprocessors=None,
         postprocessor_kwargs=None,
         freq=freq,
-        output_dir=output_dir / f"chronos-t5-{chronos_variant}-zero-shot",
+        output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_LoRA",
     )
 
     results = pipeline.backtest(
         data=data,
         test_start_date=test_start_date,
         rolling_window_eval=False,
-        train=False,
+        train=True,
         val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
-        calibration_based_on="train",
+        calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
     )
 
     del pipeline
     del results
+
+
+    # ------------------------ Chronos-T5 ------------------------
 
     # chronos-t5 zero-shot
     pipeline = ForecastingPipeline(
@@ -193,11 +199,12 @@ def evaluate():
             "pretrained_model_name_or_path": f"amazon/chronos-t5-{chronos_variant}",
             "device_map": device_map,
             "lead_times": lead_times,
+            "name": f"Chronos-T5-{chronos_variant}",
         },
         postprocessors=postprocessors,
         postprocessor_kwargs=postprocessor_kwargs,
         freq=freq,
-        output_dir=output_dir / f"chronos-t5-{chronos_variant}-zero-shot",
+        output_dir=output_dir / f"Chronos-T5-{chronos_variant}",
     )
 
     results = pipeline.backtest(
@@ -227,11 +234,12 @@ def evaluate():
             "finetuning_hp_search": False,
             "finetuning_warmup_new_neurons": False,
             "finetuning_adjust_pretrained_prediction_length": True,
+            "name": f"Chronos-T5-{chronos_variant}-FT_Full",
         },
-        postprocessors=postprocessors,
-        postprocessor_kwargs=postprocessor_kwargs,
+        postprocessors=None,
+        postprocessor_kwargs=None,
         freq=freq,
-        output_dir=output_dir / f"chronos-t5-{chronos_variant}-finetuned-full",
+        output_dir=output_dir / f"Chronos-T5-{chronos_variant}-FT_Full",
     )
 
     results = pipeline.backtest(
@@ -242,7 +250,7 @@ def evaluate():
         val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
-        calibration_based_on="val",
+        calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
     )
@@ -261,11 +269,12 @@ def evaluate():
             "finetuning_hp_search": False,
             "finetuning_warmup_new_neurons": False,
             "finetuning_adjust_pretrained_prediction_length": True,
+            "name": f"Chronos-T5-{chronos_variant}-FT_Last",
         },
-        postprocessors=postprocessors,
-        postprocessor_kwargs=postprocessor_kwargs,
+        postprocessors=None,
+        postprocessor_kwargs=None,
         freq=freq,
-        output_dir=output_dir / f"chronos-t5-{chronos_variant}-finetuned-last_layer",
+        output_dir=output_dir / f"Chronos-T5-{chronos_variant}-FT_Last",
     )
 
     results = pipeline.backtest(
@@ -276,7 +285,7 @@ def evaluate():
         val_window_size=val_window_size,
         train_window_size=None,
         test_window_size=None,
-        calibration_based_on="val",
+        calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
     )
@@ -284,15 +293,50 @@ def evaluate():
     del pipeline
     del results
 
-    # ------------------------ BENCHMARKS ------------------------
+    # chronos-t5 LoRA fine tuning
+    pipeline = ForecastingPipeline(
+        model=Chronos,
+        model_kwargs={
+            "pretrained_model_name_or_path": f"amazon/chronos-t5-{chronos_variant}",
+            "device_map": device_map,
+            "lead_times": lead_times,
+            "finetuning_type": "last_layer",
+            "finetuning_hp_search": False,
+            "finetuning_warmup_new_neurons": False,
+            "finetuning_adjust_pretrained_prediction_length": True,
+            "name": f"Chronos-T5-{chronos_variant}-FT_LoRA",
+        },
+        postprocessors=None,
+        postprocessor_kwargs=None,
+        freq=freq,
+        output_dir=output_dir / f"Chronos-T5-{chronos_variant}-FT_LoRA",
+    )
+
+    results = pipeline.backtest(
+        data=data,
+        test_start_date=test_start_date,
+        rolling_window_eval=False,
+        train=True,
+        val_window_size=val_window_size,
+        train_window_size=None,
+        test_window_size=None,
+        calibration_based_on=None,
+        save_results=True,
+        test_window_step=test_window_step,
+    )
+
+    del pipeline
+    del results
+
+    # ------------------------ Benchmarks ------------------------
 
     # RandomWalkBenchmark - self implemented
     pipeline = ForecastingPipeline(
         model=RandomWalkBenchmark,
-        model_kwargs={"quantiles": quantiles, "lead_times": lead_times},
+        model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "name": "RandomWalk"},
         postprocessors=None,
         postprocessor_kwargs=None,
-        output_dir=output_dir / "random_walk",
+        output_dir=output_dir / "RandomWalk",
         freq=freq,
     )
 
@@ -315,10 +359,10 @@ def evaluate():
     # SeasonalNaive Benchmark - self implemented
     pipeline = ForecastingPipeline(
         model=RollingSeasonalQuantilePredictor,
-        model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq},
+        model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq, "name": "SeasonalNaive"},
         postprocessors=None,
         postprocessor_kwargs=None,
-        output_dir=output_dir / "seasonal_naive_self",
+        output_dir=output_dir / "SeasonalNaive",
         freq=freq,
     )
 
@@ -341,10 +385,10 @@ def evaluate():
     # seasonal naive model autogluon
     pipeline = ForecastingPipeline(
         model=SeasonalNaive_Ag,
-        model_kwargs={"lead_times": lead_times, "freq": freq, "seasonal_period": seasonal_period},
+        model_kwargs={"lead_times": lead_times, "freq": freq, "seasonal_period": seasonal_period, "name": "SeasonalNaiveAg"},
         postprocessors=None,
         freq=freq,
-        output_dir=output_dir / "seasonal_naive_autogluon",
+        output_dir=output_dir / "SeasonalNaiveAg",
     )
 
     results = pipeline.backtest(
@@ -366,10 +410,10 @@ def evaluate():
     # PatchTST autogluon
     pipeline = ForecastingPipeline(
         model=PatchTST_Ag,
-        model_kwargs={"lead_times": lead_times, "freq": freq},
+        model_kwargs={"lead_times": lead_times, "freq": freq, "name": "PatchTST"},
         postprocessors=None,
         freq=freq,
-        output_dir=output_dir / "patchtst_autogluon",
+        output_dir=output_dir / "PatchTST",
     )
 
     results = pipeline.backtest(
@@ -391,10 +435,10 @@ def evaluate():
     # TiDE autogluon
     pipeline = ForecastingPipeline(
         model=TiDE_Ag,
-        model_kwargs={"lead_times": lead_times, "freq": freq},
+        model_kwargs={"lead_times": lead_times, "freq": freq, "name": "TiDE"},
         postprocessors=None,
         freq=freq,
-        output_dir=output_dir / "tide_autogluon",
+        output_dir=output_dir / "TiDE",
     )
 
     results = pipeline.backtest(
@@ -413,19 +457,18 @@ def evaluate():
     del pipeline
     del results
 
-    # ------------------------ TiRex ------------------------
-
-    # chronos zero shot results
+    # tirex zero shot results
     pipeline = ForecastingPipeline(
         model=TiRex,
         model_kwargs={
             "lead_times": lead_times,
             "tirex_service_url": "http://localhost:8000",
+            "name": "TiRex",
         },
-        postprocessors=postprocessors,
-        postprocessor_kwargs=postprocessor_kwargs,
+        postprocessors=None,
+        postprocessor_kwargs=None,
         freq=freq,
-        output_dir=output_dir / "tirex_new",
+        output_dir=output_dir / "TiRex",
     )
 
     results = pipeline.backtest(

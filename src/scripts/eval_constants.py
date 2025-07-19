@@ -9,14 +9,19 @@ from src.data.preprocessor import read_smard_data, read_exchange_rates_data
 lead_times = np.arange(1, 192 + 1).tolist()
 quantiles = np.round(np.arange(0.1, 1, 0.1), 1).tolist()
 test_start_date = pd.Timestamp("2023-01-01")
-postprocessors = [PostprocessorMLE, PostprocessorQR, PostprocessorEQC]
-postprocessor_kwargs = [{"transformer": None, "n_jobs": 4}, {"transformer": None, "n_jobs": 4}, {"n_jobs": 4}]
+postprocessors = [PostprocessorEQC, PostprocessorQR, PostprocessorMLE]
+postprocessor_kwargs = [
+    {"n_jobs": 4, "name": "PP_OC"},
+    {"transformer": None, "n_jobs": 4, "name": "PP_QR"},
+    {"transformer": None, "n_jobs": 4, "name": "PP_GDR"},
+]
 
 # Path to this script
 script_dir = Path(__file__).resolve().parent
 
 # Project root (adjust depending on where scripts/ sits)
 project_root = script_dir.parent.parent
+
 
 def get_electricity_consumption_config():
     return {
