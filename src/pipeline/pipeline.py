@@ -13,6 +13,7 @@ from src.core.timeseries_evaluation import (
     PIPELINE_CONFIG_FILE_NAME,
     BACKTEST_CONFIG_FILENAME,
     PREDICTIONS_FILENAME,
+    EVAL_CONFIG_FILENAME,
 )
 from src.core.base import AbstractPostprocessor, AbstractPredictor, ExecutionTimePostprocessor, ExecutionTimePredictor, load_class_from_path, aggregate_execution_time_objects
 from src.core.utils import CustomJSONEncoder, set_global_seed
@@ -81,7 +82,7 @@ class ForecastingPipeline(AbstractPipeline):
         self.postprocessor_dict: Dict[str, AbstractPostprocessor] = {}
         for pp, kwargs in zip(self.postprocessors, self.postprocessor_kwargs):
             pp_instance = pp(**kwargs)
-            self.postprocessor_dict.update({pp_instance.class_name: pp_instance})
+            self.postprocessor_dict.update({pp_instance.name: pp_instance})
 
     def save_pipeline(self) -> None:
         """Save the pipeline configuration to a JSON file and store predictors and postprocessors as joblib."""
@@ -143,17 +144,18 @@ class ForecastingPipeline(AbstractPipeline):
             postprocessors=config["postprocessors"],
             postprocessor_kwargs=config["postprocessors_kwargs"],
             output_dir=pipeline_dir,
+            freq=config["freq"]["freqstr"],
         )
 
         # Load predictor
-        models = list((pipeline_dir / DIR_MODELS).glob("*.joblib"))
+        models = list((pipeline_dir / DIR_MODELS).rglob("*.joblib"))
         if not models:
             logging.info("No models found in %s. Skipping model loading.", pipeline_dir / DIR_MODELS)
         else:
             pipeline.predictor = joblib.load(models[0])
 
-        # Load postprocessors
-        postprocessor_files = list((pipeline_dir / DIR_POSTPROCESSORS).glob("*.joblib"))
+        # Load postprocessors TODO: this might be not correct, since we save individual models as joblib as well
+        postprocessor_files = list((pipeline_dir / DIR_POSTPROCESSORS).rglob("*.joblib"))
         if not postprocessor_files:
             logging.info("No postprocessors found in %s. Skipping postprocessor loading.", pipeline_dir / DIR_POSTPROCESSORS)
         else:
@@ -220,7 +222,7 @@ class ForecastingPipeline(AbstractPipeline):
         logging.info("Start E2E backtesting...")
 
         results = {}
-        info = {}
+        execution_times = {}
 
         if test_end_date is None:
             test_end_date = data.index.get_level_values("timestamp").max()
@@ -232,7 +234,7 @@ class ForecastingPipeline(AbstractPipeline):
 
             i = 0
             while test_start_date < test_end_date:
-                results[test_start_date], info[f"backtest_{i}"] = self._run_backtest_iteration(
+                results[test_start_date], execution_times[f"backtest_{i}"] = self._run_backtest_iteration(
                     data,
                     test_start_date,
                     train,
@@ -242,16 +244,16 @@ class ForecastingPipeline(AbstractPipeline):
                     test_window_step,
                     calibration_based_on,
                 )
-                info[f"backtest_{i}"]["start"] = test_start_date
+                execution_times[f"backtest_{i}"]["start"] = test_start_date
                 test_start_date += test_window_size
-                info[f"backtest_{i}"]["end"] = test_start_date
+                execution_times[f"backtest_{i}"]["end"] = test_start_date
                 i += 1
 
             results = self._combine_backtest_results(results)
-            info = self._combine_execution_time(info)
+            execution_times = self._combine_execution_time(execution_times)
 
         else:
-            results, info = self._run_backtest_iteration(
+            results, execution_times = self._run_backtest_iteration(
                 data,
                 test_start_date,
                 train,
@@ -272,24 +274,28 @@ class ForecastingPipeline(AbstractPipeline):
                 "test_window_size": test_window_size,
                 "train": train,
                 "calibration_based_on": calibration_based_on,
-                "execution_time": info,  # TODO: Report aggregated results if rolling_window_eval=True
             }
-            self._store_backtest_outputs(results, backtest_params)
+            self._store_backtest_outputs(results, backtest_params, execution_times)
 
-        return results, info
+        return results, execution_times
 
-    def _store_backtest_outputs(self, results: Dict[str, ForecastCollection], backtest_params: Dict) -> None:
+    def _store_backtest_outputs(self, results: Dict[str, ForecastCollection], backtest_params: Dict, execution_times: Dict) -> None:
         """Save backtest results and config."""
 
         logging.info("Storing backtest results...")
+
+        config = {
+            "pipeline_config": self.get_init_params(),
+            "backtest_params": backtest_params,
+        }
 
         # store general results
         save_path = self.pipeline_dir_backtests
         create_dir(save_path)
         config_path = save_path / BACKTEST_CONFIG_FILENAME
         with open(config_path, "w") as f:
-            json.dump(backtest_params, f, indent=4, cls=CustomJSONEncoder)
-        logging.info("Saved backtest configuration to: %s.", config_path)
+            json.dump(config, f, indent=4, cls=CustomJSONEncoder)
+        logging.info("Saved pipeline and backtest configuration to: %s.", config_path)
 
         for method, result in results.items():
             save_path = self.pipeline_dir_backtests / method
@@ -301,9 +307,11 @@ class ForecastingPipeline(AbstractPipeline):
             eval_config.update(result.get_crps(mean_time=True, mean_lead_times=True, mean_item_ids=True).to_dict())
             eval_config.update(result.get_empirical_coverage_rates(mean_lead_times=True).to_dict())
             eval_config.update(result.get_quantile_scores(mean_lead_times=True).to_dict())
+            # add execution time
+            eval_config["execution_time"] = execution_times[method]
 
             # Save config
-            config_path = save_path / "eval_config.json"
+            config_path = save_path / EVAL_CONFIG_FILENAME
             with open(config_path, "w") as f:
                 json.dump(eval_config, f, indent=4, cls=CustomJSONEncoder)
             logging.info("Saved backtest evaluation results for `%s` to: %s.", method, config_path)
@@ -453,13 +461,13 @@ class ForecastingPipeline(AbstractPipeline):
 
         logging.info(
             "Starting forecast generation of model %s for data_test from %s to %s",
-            self.predictor.__class__.__name__,
+            self.predictor.name,
             data_test.index.get_level_values("timestamp").min(),
             data_test.index.get_level_values("timestamp").max(),
         )
         predictions = self.predictor.predict(data_test, data_previous_context, rolling, window_step)
 
-        return {self.predictor.__class__.__name__: predictions}
+        return {self.predictor.name: predictions}
 
     def train_postprocessors(self, calibration_predictions: ForecastCollection) -> None:
         """
@@ -501,7 +509,7 @@ class ForecastingPipeline(AbstractPipeline):
             logging.info("Postprocessing predictions using postprocessor: %s", name)
 
             # Apply the postprocessing and store predictions as additional key value pair
-            predictions[name] = postprocessor.postprocess(data=predictions[self.predictor.__class__.__name__])
+            predictions[name] = postprocessor.postprocess(data=predictions[self.predictor.name])
             logging.info("Postprocessing complete for %s", name)
 
         logging.info("Postprocessing completed for all models.")
@@ -520,7 +528,7 @@ class ForecastingPipeline(AbstractPipeline):
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
 
-        execution_times = {"predictor": {}, "postprocessors": {}}
+        execution_times = {}
 
         data_train, data_val, data_test = self.split_time_series_data(data, test_start_date, train_window_size, val_window_size, test_window_size)
 
@@ -545,11 +553,10 @@ class ForecastingPipeline(AbstractPipeline):
         )  # TODO: save predictions directly
 
         # store information on training and inference time
-        predictor_name = self.predictor.__class__.__name__  # for now only supports a single predictor
-        execution_times["predictor"][predictor_name] = ExecutionTimePredictor(
-            predictor_name=predictor_name,
+        execution_times[self.predictor.name] = ExecutionTimePredictor(
+            predictor_name=self.predictor.name,
             predictor_train_time=self.predictor.train_time_seconds,
-            predictor_inference_time=predictions_test_data[predictor_name].inference_time_seconds,
+            predictor_inference_time=predictions_test_data[self.predictor.name].inference_time_seconds,
         )
 
         # ---------- define calibration dataset ----------
@@ -582,17 +589,17 @@ class ForecastingPipeline(AbstractPipeline):
             )
 
             # ---------- train postprocessors ----------
-            self.train_postprocessors(predictions_calibration_data[predictor_name])
+            self.train_postprocessors(predictions_calibration_data[self.predictor.name])
 
             # ---------- create postprocessed forecasts ----------
             predictions_test_data = self.apply_postprocessors_to_forecasts(predictions_test_data)
 
             # store information on training and inference time
             for name, postprocessor in self.postprocessor_dict.items():
-                execution_times["postprocessors"][name] = ExecutionTimePostprocessor(
+                execution_times[name] = ExecutionTimePostprocessor(
                     postprocessor_name=name,
-                    execution_time_predictor=execution_times["predictor"][predictor_name],
-                    calibration_inference_time=predictions_calibration_data[predictor_name].inference_time_seconds,
+                    execution_time_predictor=execution_times[self.predictor.name],
+                    calibration_inference_time=predictions_calibration_data[self.predictor.name].inference_time_seconds,
                     postprocessor_train_time=postprocessor.train_time_seconds,
                     postprocessor_inference_time=predictions_test_data[name].inference_time_seconds,
                 )
@@ -604,26 +611,18 @@ class ForecastingPipeline(AbstractPipeline):
         Aggregate a dict of execution_time objects (from multiple backtests) into one.
         """
         all_backtest_keys = list(execution_times.keys())
-        all_pred_keys = set()
-        all_pp_keys = set()
+        all_methods = set()
         # get all predictor and postprocessors
         for bt in all_backtest_keys:
-            all_pred_keys.update(execution_times[bt]["predictor"].keys())
-            all_pp_keys.update(execution_times[bt]["postprocessors"].keys())
+            all_methods.update(execution_times[bt].keys())
 
-        merged = {"predictor": {}, "postprocessors": {}}
-        # merge predictor
-        for predictor_name in all_pred_keys:
-            all_pred_obj = []
+        merged = {}
+        # merge values
+        for name in all_methods:
+            all_obj = []
             for bt in all_backtest_keys:
-                all_pred_obj.append(execution_times[bt]["predictor"][predictor_name])
-            merged["predictor"][predictor_name] = aggregate_execution_time_objects(all_pred_obj)
-
-        for pp_name in all_pp_keys:
-            all_pred_obj = []
-            for bt in all_backtest_keys:
-                all_pred_obj.append(execution_times[bt]["postprocessors"][pp_name])
-            merged["postprocessors"][pp_name] = aggregate_execution_time_objects(all_pred_obj)
+                all_obj.append(execution_times[bt][name])
+            merged[name] = aggregate_execution_time_objects(all_obj)
 
         return merged
 

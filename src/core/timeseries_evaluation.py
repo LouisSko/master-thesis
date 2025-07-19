@@ -26,6 +26,7 @@ import json
 PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
 PREDICTIONS_FILENAME = "predictions.joblib"
 BACKTEST_CONFIG_FILENAME = "backtest_config.json"
+EVAL_CONFIG_FILENAME = "eval_config.json"
 DIR_BACKTESTS = "backtest"
 DIR_MODELS = "models"
 DIR_POSTPROCESSORS = "postprocessors"
@@ -2243,6 +2244,9 @@ def _strip_tokens(parts: List[str], tokens: set) -> List[str]:
     """Return a new list with any token removed."""
     return [p for p in parts if p not in tokens]
 
+def _remove_duplicates(seq):
+    seen = set()
+    return [x for x in seq if not (x in seen or seen.add(x))]
 
 def _build_key(filepath: Path, *, n_files: int, common_path: Path, strip_tokens: set) -> str:
     """
@@ -2267,10 +2271,10 @@ def _build_key(filepath: Path, *, n_files: int, common_path: Path, strip_tokens:
         parts = parts[-1:]  # keep last surviving part
 
     parts = _strip_tokens(parts, strip_tokens)
-
+    parts = _remove_duplicates(parts)
     if not parts:
         return filepath.stem
-    return "_".join(parts)
+    return "-".join(parts)
 
 
 def load_predictions(
@@ -2347,34 +2351,6 @@ def load_predictions(
     return all_predictions
 
 
-def _extract_execution_rows(exec_dict: dict) -> List[dict]:
-    """
-    Build rows (predictor + postprocessors) from execution_time dict.
-    Ignore nested execution_time_predictor under postprocessors.
-    """
-    rows = []
-
-    # Predictor(s)
-    for predictor_data in exec_dict.get("predictor", {}).values():
-        name = predictor_data.get("predictor_name", "unknown")
-        row = {"name": name, "type": "predictor"}
-        for k, v in predictor_data.items():
-            if k != "predictor_name":
-                row[k] = v
-        rows.append(row)
-
-    # Postprocessors
-    for post_data in exec_dict.get("postprocessors", {}).values():
-        name = post_data.get("postprocessor_name", "unknown")
-        row = {"name": name, "type": "postprocessor"}
-        for k, v in post_data.items():
-            if k not in ("postprocessor_name", "execution_time_predictor"):
-                row[k] = v
-        rows.append(row)
-
-    return rows
-
-
 def load_execution_times(
     execution_dirs: Union[List[Union[Path, str]], Path, str, None] = None,
     execution_files: Union[List[Union[Path, str]], Path, str, None] = None,
@@ -2409,7 +2385,7 @@ def load_execution_times(
     all_file_paths = _collect_files(
         files=files_list,
         dirs=dirs_list,
-        required_name=BACKTEST_CONFIG_FILENAME,
+        required_name=EVAL_CONFIG_FILENAME,
         recursive=True,
     )
 
@@ -2431,25 +2407,27 @@ def load_execution_times(
 
         try:
             with open(filepath, "r") as f:
-                cfg = json.load(f)
+                cfg: dict = json.load(f)
         except Exception as err:
             logging.error(f"Failed to read JSON `{filepath}`: {err}")
             continue
 
-        exec_dict = cfg.get("execution_time")
+        exec_dict: dict = cfg.get("execution_time")
         if exec_dict is None:
             logging.warning(f"`execution_time` missing in `{filepath}`; skipping.")
             continue
-
-        exec_rows = _extract_execution_rows(exec_dict)
-        if not exec_rows:
+        
+        exec_dict.pop("execution_time_predictor", None)
+        exec_dict.pop("postprocessor_name", None)
+        exec_dict.pop("predictor_name", None)
+        # exec_dict = _prepare_execution_time(exec_dict)
+        if not exec_dict:
             logging.info(f"No execution_time rows extracted for `{filepath}`; skipping.")
             continue
 
-        for r in exec_rows:
-            r["__key__"] = key
-        records.extend(exec_rows)
-
+        exec_dict["__key__"] = key
+        records.append(exec_dict)
+        print(key)
         logging.info(f"Loaded execution_time from `{filepath}` as key: {key}")
 
     if not records:
@@ -2458,9 +2436,8 @@ def load_execution_times(
 
     df = pd.DataFrame(records)
 
-    # Build MultiIndex: (model_key, component_name)
-    df = df.set_index(["__key__", "name"]).sort_index()
-    df.index = df.index.set_names(["model_key", "component_name"])
+    df = df.set_index(["__key__"]).sort_index()
+    df.index = df.index.set_names(["name"])
 
     # Optional fill/round
     if fillna_value is not None:
