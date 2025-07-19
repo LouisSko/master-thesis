@@ -41,6 +41,7 @@ def evaluate():
     freq = dataset_config["freq"]
     val_window_size = dataset_config["val_window_size"]
     test_window_step = dataset_config["test_window_step"]
+    calibration_window_step = dataset_config["calibration_window_step"]
     output_dir = dataset_config["output_dir"]
     seasonal_period = dataset_config["seasonal_period"]
     data = dataset_config["data"]
@@ -51,7 +52,6 @@ def evaluate():
         device_map = "mps"
     else:
         device_map = "cpu"
-
 
     # ------------------------ Chronos-Bolt ------------------------
 
@@ -81,6 +81,7 @@ def evaluate():
         calibration_based_on="train",
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -97,7 +98,7 @@ def evaluate():
             "finetuning_hp_search": False,
             "finetuning_warmup_new_neurons": True,
             "finetuning_adjust_pretrained_prediction_length": True,
-            "name": f"Chronos-Bolt-{chronos_variant}-FT_Full"m
+            "name": f"Chronos-Bolt-{chronos_variant}-FT_Full",
         },
         postprocessors=None,
         postprocessor_kwargs=None,
@@ -116,8 +117,8 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
-
 
     # chronos-bolt last layer fine tuning
     pipeline = ForecastingPipeline(
@@ -149,6 +150,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -184,11 +186,11 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
     del results
-
 
     # ------------------------ Chronos-T5 ------------------------
 
@@ -218,6 +220,7 @@ def evaluate():
         calibration_based_on="train",
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -253,6 +256,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -288,6 +292,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -323,6 +328,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -351,6 +357,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -377,6 +384,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -402,6 +410,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -427,6 +436,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -452,6 +462,7 @@ def evaluate():
         calibration_based_on=None,
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
@@ -482,10 +493,12 @@ def evaluate():
         calibration_based_on="train",
         save_results=True,
         test_window_step=test_window_step,
+        calibration_window_step=calibration_window_step,
     )
 
     del pipeline
     del results
+
 
 if __name__ == "__main__":
     evaluate()

@@ -175,6 +175,7 @@ class ForecastingPipeline(AbstractPipeline):
         val_window_size: Optional[pd.DateOffset] = None,
         test_window_size: Optional[pd.DateOffset] = None,
         test_window_step: int = 1,
+        calibration_window_step: int = 1,
         train: bool = False,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = None,
         save_results: bool = False,
@@ -204,6 +205,9 @@ class ForecastingPipeline(AbstractPipeline):
             This controls how densely forecasts are generated across time. A smaller value creates more overlapping
             forecasts, while a larger value skips more observations between windows.
             The rolling procedure is applied independently to each time series in the dataset.
+        calibration_window_step : int, Defaults to 1.
+            The number of time steps to move the sliding prediction window forward between each prediction on the calibration dataset.
+            Smaller values creates more calibration datapoints, while a larger value speeds up calibration process.
         train : bool, optional
             Whether to train the model during backtesting. Defaults to False.
         calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], optional
@@ -242,6 +246,7 @@ class ForecastingPipeline(AbstractPipeline):
                     val_window_size,
                     test_window_size,
                     test_window_step,
+                    calibration_window_step,
                     calibration_based_on,
                 )
                 execution_times[f"backtest_{i}"]["start"] = test_start_date
@@ -261,6 +266,7 @@ class ForecastingPipeline(AbstractPipeline):
                 val_window_size,
                 test_window_size,
                 test_window_step,
+                calibration_window_step,
                 calibration_based_on,
             )
 
@@ -272,6 +278,8 @@ class ForecastingPipeline(AbstractPipeline):
                 "train_window_size": train_window_size,
                 "val_window_size": val_window_size,
                 "test_window_size": test_window_size,
+                "test_window_step": test_window_step,
+                "calibration_window_step": calibration_window_step,
                 "train": train,
                 "calibration_based_on": calibration_based_on,
             }
@@ -524,6 +532,7 @@ class ForecastingPipeline(AbstractPipeline):
         val_window_size: Optional[pd.DateOffset],
         test_window_size: Optional[pd.DateOffset],
         test_window_step: int,
+        calibration_window_step: int,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """Train, predict, and postprocess wrapper for internal backtesting."""
@@ -585,7 +594,7 @@ class ForecastingPipeline(AbstractPipeline):
                 data_test=calibration_data,
                 data_previous_context=context_data,
                 rolling=True,
-                window_step=1,
+                window_step=calibration_window_step,
             )
 
             # ---------- train postprocessors ----------

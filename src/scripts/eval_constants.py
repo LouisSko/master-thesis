@@ -28,6 +28,7 @@ def get_electricity_consumption_config():
         "freq": "15 min",
         "val_window_size": pd.DateOffset(years=1),  # potentially months=3 to be consistent
         "test_window_step": 96,  # 4 * 24 -> sliding window evaluation every 96 timesteps, corresponds to one day
+        "calibration_window_step": 96,
         "output_dir": project_root / "results/electricity_consumption/pipeline/",
         "seasonal_period": 672,  # 4 * 24 * 7 -> seasonal period same minute last week
         "data": read_smard_data(
@@ -46,6 +47,7 @@ def get_day_ahead_prices_config():
         "freq": "1 h",
         "val_window_size": pd.DateOffset(years=1),
         "test_window_step": 24,  # sliding window evaluation every 24 timesteps, corresponds to one day
+        "calibration_window_step": 24,
         "output_dir": project_root / "results/day_ahead_prices/pipeline/",
         "seasonal_period": 168,  # 24 * 7 -> same day of the previous week
         "data": read_smard_data(
@@ -75,7 +77,8 @@ def get_exchange_rate_config():
     return {
         "freq": "B",  # business day
         "val_window_size": pd.DateOffset(years=5),
-        "test_window_step": 1,  # 4 * 24 -> sliding window evaluation every timestep, corresponds to one day
+        "test_window_step": 1,  # -> sliding window evaluation every timestep, corresponds to one day
+        "calibration_window_step": 1,
         "output_dir": project_root / "results/exchange_rates/pipeline/",
         "seasonal_period": 1,  # no reasonable setting
         "data": read_exchange_rates_data(files_dir=project_root / "data/exchange_rates/")[0],
