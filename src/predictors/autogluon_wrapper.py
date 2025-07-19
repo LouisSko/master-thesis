@@ -121,7 +121,7 @@ class AutogluonPredictor(AbstractPredictor):
             **self.predictor_kwargs,
         )
 
-    def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None, **kwargs) -> None:
         self.predictor = self._init_model()
 
         self.predictor.fit(

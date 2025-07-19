@@ -364,14 +364,31 @@ class Chronos(AbstractPredictor):
 
         return pipeline
 
-    def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def _fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+        train_window_step: int = 1,
+        val_window_step: Optional[int] = None,
+        **kwargs,
+    ) -> None:
         """
         Finetuning chronos model
 
         Parameters
         ----------
-            data_train (TimeSeriesDataFrame): Training data (not used).
-            data_val (TimeSeriesDataFrame): Evaluation data (optional).
+        data_train : TimeSeriesDataFrame
+            Training data used to construct rolling windows for model training.
+        data_val : Optional[TimeSeriesDataFrame], default=None
+            Optional validation data used for early stopping and evaluation.
+        train_window_step : int, default=1
+            Number of time steps to shift the rolling window between training samples.
+            A higher value reduces overlap between windows and the number of training examples.
+            Recommended to use all available data (i.e., set to 1), since early stopping is used to prevent overfitting.
+        val_window_step : Optional[int], default=None
+            Number of time steps to shift the rolling window between validation samples.
+            A higher value reduces overlap between validation windows and the number of validation examples.
+            If not specified, defaults to `prediction_length`.
         """
 
         def _build_model(
@@ -480,6 +497,8 @@ class Chronos(AbstractPredictor):
                 hp_tuning=False,
                 context_length=self.context_length,
                 prediction_length=prediction_length,
+                train_window_step=train_window_step,
+                val_window_step=val_window_step,
                 tokenizer=getattr(self.pipeline, "tokenizer", None),
                 specific_train_kwargs={"learning_rate": 1e-4, "num_train_epochs": 1, "warmup_ratio": 0.1},
             )
@@ -504,6 +523,8 @@ class Chronos(AbstractPredictor):
             n_trials=self.finetuning_hp_search_trials,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
+            train_window_step=train_window_step,
+            val_window_step=val_window_step,
             tokenizer=getattr(self.pipeline, "tokenizer", None),
             specific_train_kwargs={"num_train_epochs": 3},
         )
@@ -649,6 +670,8 @@ def fine_tune(
     n_trials: Optional[int] = None,
     context_length: int = 2048,
     prediction_length: int = 64,
+    train_window_step: int = 1,
+    val_window_step: Optional[int] = None,
     tokenizer: Optional["ChronosTokenizer"] = None,
     specific_train_kwargs: Dict = {},
 ):
@@ -673,6 +696,10 @@ def fine_tune(
         Context length the model sees during training.
     prediction_length : Optional[int], default=None
         Number of timestamps the model is required to predict in the future.
+    train_window_step : int, default=1.
+        The stride on the train dataset. Recommended to use all data (=1) since early stopping is used.
+    val_window_step : int, default=None.
+        The stride on the validation dataset. Defaults to prediction length.
     specific_train_kwargs : Dict, default={},
         Additional training arguments to include. Override default values
     """
@@ -689,7 +716,7 @@ def fine_tune(
     train_dataset = BaseTimeSeriesDataset(
         data=data_train,
         context_length=context_length,
-        window_step=1,
+        window_step=train_window_step,
         target_column=TARGET,
         return_target=True,
         prediction_length=prediction_length,
@@ -703,7 +730,7 @@ def fine_tune(
         eval_dataset = BaseTimeSeriesDataset(
             data=data_val,
             context_length=context_length,
-            window_step=prediction_length,
+            window_step=val_window_step or prediction_length,
             target_column=TARGET,
             return_target=True,
             prediction_length=prediction_length,

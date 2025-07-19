@@ -64,9 +64,36 @@ class AbstractPredictor(ABC):
             logging.info("No output directory provided. Models will not be saved or loaded from disk.")
         self.train_time_seconds = None
 
-    def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+        train_window_step: int = 1,
+        val_window_step: Optional[int] = None,
+        **kwargs,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        data_train : TimeSeriesDataFrame
+            Training data used to construct rolling windows for model training.
+        data_val : Optional[TimeSeriesDataFrame], default=None
+            Optional validation data used for early stopping and evaluation.
+        train_window_step : int, default=1
+            Number of time steps to shift the rolling window between training samples.
+        val_window_step : Optional[int], default=None
+            Number of time steps to shift the rolling window between validation samples.
+
+        Note: Parameters are used only by certain predictors.
+        """
         start_time = time.time()
-        self._fit(data_train, dat_val)
+        self._fit(
+            data_train=data_train,
+            data_val=data_val,
+            train_window_step=train_window_step,
+            val_window_step=val_window_step,
+            **kwargs,
+        )
         end_time = time.time()
 
         self.train_time_seconds = np.round(end_time - start_time, 2)
@@ -74,10 +101,21 @@ class AbstractPredictor(ABC):
         logging.info("Time to fit %s in seconds: %s", self.__class__.__name__, self.train_time_seconds)
 
     @abstractmethod
-    def _fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def _fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        dat_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
+    ) -> None:
         pass
 
-    def predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
+    def predict(
+        self,
+        data: TimeSeriesDataFrame,
+        previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        rolling: bool = False,
+        window_step: int = 1,
+    ) -> ForecastCollection:
         start_time = time.time()
         forecasts = self._predict(data, previous_context_data, rolling, window_step)
         end_time = time.time()
@@ -89,10 +127,21 @@ class AbstractPredictor(ABC):
         return forecasts
 
     @abstractmethod
-    def _predict(self, data: TimeSeriesDataFrame, previous_context_data: Optional[TimeSeriesDataFrame] = None, rolling: bool = False, window_step: int = 1) -> ForecastCollection:
+    def _predict(
+        self,
+        data: TimeSeriesDataFrame,
+        previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        rolling: bool = False,
+        window_step: int = 1,
+    ) -> ForecastCollection:
         pass
 
-    def _merge_data(self, data: TimeSeriesDataFrame, previous_context_data: TimeSeriesDataFrame, context_length=int) -> TimeSeriesDataFrame:
+    def _merge_data(
+        self,
+        data: TimeSeriesDataFrame,
+        previous_context_data: TimeSeriesDataFrame,
+        context_length=int,
+    ) -> TimeSeriesDataFrame:
         """
         Merges previous context data with the new prediction data, ensuring time continuity and context length.
 

@@ -71,7 +71,12 @@ class QuantileRegression(AbstractPredictor):
         self.epsilon = 100_000
         self.target_scaler = TargetScaler(method="log", epsilon=100_000)
 
-    def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def _fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
+    ) -> None:
 
         if data_val is not None:
             logging.info("data_val is not used. No Hyperparameter tuning is applied.")

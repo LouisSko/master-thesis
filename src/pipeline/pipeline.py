@@ -399,6 +399,8 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         data_train: Union[TimeSeriesDataFrame, TabularDataFrame],
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        train_window_step: int = 1,
+        val_window_step: Optional[int] = None,
     ) -> None:
         """
         Train the predictor.
@@ -409,6 +411,12 @@ class ForecastingPipeline(AbstractPipeline):
             The training data.
         data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], optional
             Optional validation data. Defaults to None.
+        train_window_step : int, default=1
+            Number of time steps to advance the rolling/sliding window between each training sample.
+            Higher values reduce overlap between training windows and decrease the number of training examples.
+        val_window_step : Optional[int], default=None
+            Number of time steps to advance the rolling/sliding window between each validation sample.
+            Higher values reduce overlap between validation windows and decrease the number of validation examples. If None is selected it defaults to prediction_length.
         """
         logging.info("Starting training process from %s to %s", data_train.index.get_level_values("timestamp").min(), data_train.index.get_level_values("timestamp").max())
 
@@ -427,7 +435,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # Fit the predictor with training (and optional validation) data
         logging.info("Fitting predictor to the training data...")
-        self.predictor.fit(data_train, data_val)
+        self.predictor.fit(data_train, data_val, train_window_step, val_window_step)
 
     def generate_forecasts(
         self,
@@ -535,7 +543,12 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_window_step: int,
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]],
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
-        """Train, predict, and postprocess wrapper for internal backtesting."""
+        """
+        Train, predict, and postprocess wrapper for internal backtesting.
+        
+        - train window step is set to 1
+        - validation window step is hardcoded to be aligned with test_window_step
+        """
 
         execution_times = {}
 
@@ -548,7 +561,7 @@ class ForecastingPipeline(AbstractPipeline):
 
         # ---------- train the predictor ----------
         if train:
-            self.train_predictor_model(data_train, data_val)
+            self.train_predictor_model(data_train, data_val, 1, test_window_step)
             # TODO: save model directly
         else:
             logging.info("Skipping model training because `train=False`.")

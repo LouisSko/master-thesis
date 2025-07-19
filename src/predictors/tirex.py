@@ -66,7 +66,12 @@ class TiRex(AbstractPredictor):
             logging.error("TiRex microservice is not reachable. Make sure it is running.")
             raise RuntimeError("TiRex microservice unavailable.") from e
 
-    def _fit(self, data_train: TimeSeriesDataFrame, data_val: Optional[TimeSeriesDataFrame] = None) -> None:
+    def _fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
+    ) -> None:
         """
         TiRex is a zero-shot model and the current implementation does not support fine-tuning.
         """
