@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 set_global_seed()
 
 
-class RollingSeasonalQuantilePredictor(AbstractPredictor):
+class SeasonalNaive(AbstractPredictor):
     """
     Rolling Seasonal Quantile Predictor based on time-dependent bucketing.
 
@@ -64,42 +64,40 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         # Prepare bucket keys and key‐making function based on freq
         self._setup_buckets()
 
+    def _make_day_key(self, ts: pd.Timestamp) -> str:
+        return str(ts.weekday())
+
+    def _make_hour_key(self, ts: pd.Timestamp) -> str:
+        return f"{ts.weekday()}_{ts.hour}"
+
+    def _make_minute_key(self, ts: pd.Timestamp) -> str:
+        slot = ts.minute // self._minute_interval
+        return f"{ts.weekday()}_{ts.hour}_{slot}"
+
     def _setup_buckets(self) -> None:
         """
         Set up bucket keys and the function to map timestamps to bucket keys.
 
-        The bucketing scheme depends on the frequency of the time series:
-        - Daily or business-day: by weekday.
-        - Hourly: by weekday and hour.
-        - Minute-level: by weekday, hour, and time slot.
+        The bucketing scheme depends on the frequency of the time series.
         """
-        fstr = self.offset.rule_code  # e.g. "1H","B","15T","D"
+        fstr = self.offset.rule_code.upper()
 
-        if fstr.upper() in ("D", "B"):
-            # daily or business‐day: bucket by weekday only
-            self._make_key = lambda ts: str(ts.weekday())
+        if fstr in ("D", "B"):
+            self._make_key = self._make_day_key
             self.bucket_keys = [str(d) for d in range(7)]
 
-        elif fstr.upper() == "H":
-            # hourly: bucket by weekday_hour
-            self._make_key = lambda ts: f"{ts.weekday()}_{ts.hour}"
+        elif fstr == "H":
+            self._make_key = self._make_hour_key
             self.bucket_keys = [f"{d}_{h}" for d in range(7) for h in range(24)]
 
-        elif (fstr.upper() == "T") or (fstr.upper() == "MIN"):
-            # minute frequency, e.g. 15T, 5T, etc.
-            n = self.offset.n  # number of minutes
-
-            def make_minute_key(ts: pd.Timestamp) -> str:
-                slot = ts.minute // n
-                return f"{ts.weekday()}_{ts.hour}_{slot}"
-
-            self._make_key = make_minute_key
-
-            slots_per_hour = 60 // n
+        elif fstr in ("T", "MIN"):
+            self._minute_interval = self.offset.n
+            self._make_key = self._make_minute_key
+            slots_per_hour = 60 // self._minute_interval
             self.bucket_keys = [f"{d}_{h}_{slot}" for d in range(7) for h in range(24) for slot in range(slots_per_hour)]
 
         else:
-            raise ValueError(f"Unsupported frequency '{fstr}' for RollingSeasonalQuantilePredictor")
+            raise ValueError(f"Unsupported frequency '{fstr}' for SeasonalNaive")
 
     def _initialize_history(self, item_ids: List[Any]) -> Dict[int, Dict[int, Deque[float]]]:
         """
@@ -148,11 +146,12 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         self,
         data_train: TimeSeriesDataFrame,
         data_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
     ) -> None:
         """
         No fitting required. This predictor uses only historical patterns at predict time.
         """
-        logging.info("RollingSeasonalQuantilePredictor: No fit step; predict() will build or update history.")
+        logging.info("SeasonalNaive: No fit step; predict() will build or update history.")
 
     def _predict(
         self,
@@ -211,6 +210,58 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
             timestamps = item_df.index.get_level_values("timestamp")
             target_vals = item_df["target"].values
 
+            # --- Data sufficiency check for historical quantile estimation ---
+            num_buckets = len(item_hist)
+            required_samples = num_buckets * self.last_n_samples
+            available_samples = len(item_df)
+            context_samples = len(previous_context_data.loc[[item_id]]) if previous_context_data is not None else 0
+
+            logging.info(
+                "[%s] Required samples: %d buckets × %d last_n_samples = %d",
+                item_id,
+                num_buckets,
+                self.last_n_samples,
+                required_samples,
+            )
+
+            if rolling:
+                if previous_context_data is None:
+                    logging.warning(
+                        "[%s] Rolling mode is enabled but previous_context_data is missing. "
+                        "Forecasts will still be generated, but the first ~%d steps may suffer from poor uncertainty estimation.",
+                        item_id,
+                        required_samples,
+                    )
+                elif context_samples < required_samples:
+                    logging.warning(
+                        "[%s] Only %d context samples available (%.1f%% of required %d). " "Uncertainty estimation may be unreliable, especially for tail quantiles.",
+                        item_id,
+                        context_samples,
+                        100 * context_samples / required_samples,
+                        required_samples,
+                    )
+                else:
+                    logging.info(
+                        "[%s] Sufficient samples available for historical quantile estimation (%d available).",
+                        item_id,
+                        context_samples,
+                    )
+            else:
+                if available_samples < required_samples:
+                    logging.warning(
+                        "[%s] Only %d samples available (%.1f%% of required %d). " "Forecast quality may degrade due to insufficient history.",
+                        item_id,
+                        available_samples,
+                        100 * available_samples / required_samples,
+                        required_samples,
+                    )
+                else:
+                    logging.info(
+                        "[%s] Sufficient samples available for historical quantile estimation (%d available).",
+                        item_id,
+                        available_samples,
+                    )
+
             # --- cache: bucket_key -> q_hat vector ---------------------------------
             bucket_q_cache: dict[str, np.ndarray] = {
                 key: np.percentile(np.asarray(vals), percentiles) if vals else np.full(len(self.quantiles), np.nan) for key, vals in item_hist.items()
@@ -244,7 +295,7 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
                 # 3) refresh the cache only for buckets that changed
                 for key in dirty:
                     vals = np.asarray(item_hist[key])
-                    bucket_q_cache[key] = np.percentile(vals, percentiles) if vals.size else np.full(len(self.quantiles), np.nan)
+                    bucket_q_cache[key] = np.percentile(vals, percentiles, method="linear") if vals.size else np.full(len(self.quantiles), np.nan)
                 dirty.clear()
 
                 # 4) fetch forecasts for all lead-times
@@ -277,11 +328,12 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         self,
         data_train: TimeSeriesDataFrame,
         data_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
     ) -> None:
         """
         No fitting required. This predictor uses only historical patterns at predict time.
         """
-        logging.info("RollingSeasonalQuantilePredictor: No fit step; provide data in predict() function.")
+        logging.info("SeasonalNaive: No fit step; provide data in predict() function.")
 
 
 class RollingQuantilePredictor(AbstractPredictor):
@@ -363,6 +415,7 @@ class RollingQuantilePredictor(AbstractPredictor):
         self,
         data_train: TimeSeriesDataFrame,
         data_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
     ) -> None:
         """
         No fitting required. This predictor uses only historical patterns at predict time.
@@ -515,6 +568,7 @@ class RandomWalkBenchmark(AbstractPredictor):
         self,
         data_train: TimeSeriesDataFrame,
         data_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
     ) -> None:
         """
         Estimate the standard deviation of the log-differenced target series for each item.
