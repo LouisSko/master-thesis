@@ -268,6 +268,8 @@ class Chronos(AbstractPredictor):
         Number of trials for hyperparameter search. Defaults to 10.
     output_dir : Path, optional
         Directory to store results. Defaults to Path("./models/").
+    name : str, optional
+        Name of the model, defaults to the class name
     """
 
     def __init__(
@@ -283,8 +285,9 @@ class Chronos(AbstractPredictor):
         finetuning_hp_search_trials: Optional[int] = 10,
         finetuning_warmup_new_neurons: bool = True,
         output_dir: Optional[Path] = Path("./models/"),
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__(lead_times, output_dir)
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
         self.context_length = context_length
         self.prediction_length = max(self.lead_times)
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
@@ -560,7 +563,7 @@ class Chronos(AbstractPredictor):
             rolling=rolling,
         )
 
-        dl = DataLoader(ds, batch_size=64)
+        dl = DataLoader(ds, batch_size=128)
 
         forecasts = []
 
@@ -860,8 +863,9 @@ def build_train_args(
     defaults = dict(
         output_dir=base_path,
         overwrite_output_dir=False,
-        per_device_train_batch_size=32,
-        per_device_eval_batch_size=32,
+        per_device_train_batch_size=256,
+        per_device_eval_batch_size=256,
+        auto_find_batch_size=True,
         learning_rate=1e-5,
         lr_scheduler_type="linear",
         warmup_ratio=0.0,
@@ -875,7 +879,7 @@ def build_train_args(
         gradient_accumulation_steps=1,
         dataloader_num_workers=4,
         seed=42,
-        data_seed=42,
+        # data_seed=42,
         tf32=False,
         fp16=fp16,
         report_to="tensorboard",

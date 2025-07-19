@@ -45,14 +45,23 @@ class AbstractPredictor(ABC):
     def __init__(
         self,
         lead_times: List[int] = [1, 2, 3],
+        name: Optional[str] = None,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
 
         self.lead_times = lead_times
         self.prediction_length = max(lead_times)
         self.output_dir = None
+        self.name = name or self.__class__.__name__
+
         if output_dir:
             self.output_dir = Path(output_dir)
+            self.output_dir = output_dir / self.name
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            logging.info("Using the following output directory to store results: %s", self.output_dir)
+        else:
+            self.output_dir = None
+            logging.info("No output directory provided. Models will not be saved or loaded from disk.")
         self.train_time_seconds = None
 
     def fit(self, data_train: TimeSeriesDataFrame, dat_val: Optional[TimeSeriesDataFrame] = None) -> None:
@@ -135,26 +144,27 @@ class AbstractPredictor(ABC):
         if file_path is None and self.output_dir is None:
             raise ValueError("No file path provided and no default output_dir set.")
 
-        file_path = file_path or self.output_dir / f"{self.__class__.__name__}.joblib"
+        file_path = file_path or self.output_dir / f"{self.name}.joblib"
 
         if not file_path.parent.exists():
             file_path.parent.mkdir(parents=True)
             logging.info("Created new directory: %s", file_path.parent)
 
         joblib.dump(self, file_path)
-        logging.info("%s successfully saved to: %s", self.__class__.__name__, file_path)
+        logging.info("%s successfully saved to: %s", self.name, file_path)
 
 
 class AbstractPostprocessor(ABC):
     def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, n_jobs: int = 1) -> None:
         self.ignore_first_n_train_entries = 0
-        self.class_name = name or self.__class__.__name__
+        self.name = name or self.__class__.__name__
         self.params = {}
         self.additional_info = {}
         self.n_jobs = n_jobs
 
-        if output_dir is not None:
-            self.output_dir = output_dir / self.class_name / "models"
+        if output_dir:
+            self.output_dir = Path(output_dir)
+            self.output_dir = output_dir / self.name
             self.output_dir.mkdir(parents=True, exist_ok=True)
             logging.info("Using the following output directory to store results: %s", self.output_dir)
         else:
@@ -169,10 +179,6 @@ class AbstractPostprocessor(ABC):
         start_time = time.time()
         item_ids = data.get_item_ids()
 
-        # ensure output directory exists before forking
-        if self.output_dir is not None:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-
         def _fit_one(item_id: int, forecast: TimeSeriesForecast):
             params = self._fit(forecast)
             self.save_model(params, item_id)
@@ -180,14 +186,14 @@ class AbstractPostprocessor(ABC):
 
         # sequential processing
         if self.n_jobs == 1:
-            for item_id in tqdm(data.get_item_ids(), desc=f"Fitting {self.class_name} for each time series (item)"):
+            for item_id in tqdm(data.get_item_ids(), desc=f"Fitting {self.name} for each time series (item)"):
                 forecast = data.get_time_series_forecast(item_id)
                 _, self.params[item_id] = _fit_one(item_id, forecast)
 
         # or parallelize
         else:
             # wrap the Parallel call in the tqdm_joblib context manager
-            with tqdm_joblib(tqdm(desc=f"Fitting {self.class_name} for each time series (item)", total=len(item_ids))):
+            with tqdm_joblib(tqdm(desc=f"Fitting {self.name} for each time series (item)", total=len(item_ids))):
                 results = Parallel(n_jobs=self.n_jobs, backend="loky")(
                     delayed(_fit_one)(
                         iid,
@@ -201,13 +207,13 @@ class AbstractPostprocessor(ABC):
 
         self.train_time_seconds = np.round(end_time - start_time, 2)
 
-        logging.info("Time to fit %s in seconds: %s", self.class_name, self.train_time_seconds)
+        logging.info("Time to fit %s in seconds: %s", self.name, self.train_time_seconds)
 
     def postprocess(self, data: ForecastCollection) -> ForecastCollection:
         """Apply postprocessor to each item using available or saved models."""
         start_time = time.time()
         results = {}
-        for item_id in tqdm(data.get_item_ids(), desc=f"Postprocessing with {self.class_name}"):
+        for item_id in tqdm(data.get_item_ids(), desc=f"Postprocessing with {self.name}"):
             forecast = data.get_time_series_forecast(item_id)
             params = self.get_params(item_id)
             results[item_id] = self._postprocess(forecast, params)
@@ -236,29 +242,31 @@ class AbstractPostprocessor(ABC):
         pass
 
     def _get_model_path(self, item_id: Union[int, str]) -> Path:
-        return self.output_dir / f"models_item_id_{item_id}.joblib"
+        return self.output_dir / "models" / f"model_item_id_{item_id}.joblib"
 
     def save_model(self, model: Any, item_id: int) -> None:
         """Save model for a specific item ID to disk using joblib."""
-        joblib.dump(model, self._get_model_path(item_id))
+        save_dir = self._get_model_path(item_id)
+        save_dir.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, save_dir)
 
     def load_model(self, item_id: int) -> Any:
         """Load model for a specific item id"""
         return joblib.load(self._get_model_path(item_id))
 
     def save(self, file_path: Optional[Path] = None) -> None:
-
+        """Save entire Postprocessor"""
         if file_path is None and self.output_dir is None:
             raise ValueError("No file path provided and no default output_dir set.")
 
-        file_path = file_path or self.output_dir / f"{self.class_name}.joblib"
+        file_path = file_path or self.output_dir / f"{self.name}.joblib"
 
         if not file_path.parent.exists():
             file_path.parent.mkdir(parents=True)
             logging.info("Created new directory: %s", file_path.parent)
 
         joblib.dump(self, file_path)
-        logging.info("%s successfully saved to: %s", self.class_name, file_path)
+        logging.info("%s successfully saved to: %s", self.name, file_path)
 
 
 class AbstractDataTransformer(ABC):
@@ -460,6 +468,7 @@ class AbstractPipeline(ABC):
             "model_kwargs": self.model_kwargs,
             "postprocessors": [get_class_path(postprocessor) for postprocessor in (self.postprocessors or [])],
             "postprocessors_kwargs": self.postprocessor_kwargs,
+            "freq": self.freq,
         }
 
 

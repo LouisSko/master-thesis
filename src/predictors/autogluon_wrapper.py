@@ -88,7 +88,8 @@ class AutogluonPredictor(AbstractPredictor):
         Additional keyword arguments passed to TimeSeriesPredictor.fit.
     context_length : int or None, optional
         Max context length of the time series produced by the dataset/dataloader during predictions.
-
+    name : str, optional
+        Name of the model, defaults to the class name
     """
 
     def __init__(
@@ -101,9 +102,9 @@ class AutogluonPredictor(AbstractPredictor):
         predict_kwargs: Optional[dict] = None,
         fit_kwargs: Optional[dict] = None,
         context_length: Optional[int] = 512,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__(lead_times, output_dir)
-
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
         self.quantiles = quantiles
         self.predictor: TimeSeriesPredictor = None
         self.predictor_kwargs = predictor_kwargs or {}
@@ -241,12 +242,13 @@ class PatchTST_Ag(AutogluonPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
+        name: Optional[str] = None,
     ) -> None:
 
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"PatchTST": {}}}
         predict_kwargs = {"model": "PatchTST"}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 96)
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 96, name)
 
 
 class TiDE_Ag(AutogluonPredictor):
@@ -257,12 +259,13 @@ class TiDE_Ag(AutogluonPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
+        name: Optional[str] = None,
     ) -> None:
 
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"TiDE": {}}}
         predict_kwargs = {"model": "TiDE"}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 512)
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 512, name)
 
 
 class SeasonalNaive_Ag(AutogluonPredictor):
@@ -274,12 +277,13 @@ class SeasonalNaive_Ag(AutogluonPredictor):
         freq: Union[str, pd.DateOffset] = "1h",
         seasonal_period: int = 7,
         output_dir: Optional[Path] = None,
+        name: Optional[str] = None,
     ) -> None:
 
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"SeasonalNaive": {"seasonal_period": seasonal_period}}}
         predict_kwargs = {}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 2048)
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 2048, name)
 
 
 class Chronos_Ag(AutogluonPredictor):
@@ -290,9 +294,10 @@ class Chronos_Ag(AutogluonPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
+        name: Optional[str] = None,
     ) -> None:
 
         predictor_kwargs = {}
         fit_kwargs = {"hyperparameters": {"Chronos": {"model_path": "amazon/chronos-bolt-tiny"}}}
         predict_kwargs = {}
-        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 2048)
+        super().__init__(quantiles, lead_times, freq, output_dir, predictor_kwargs, predict_kwargs, fit_kwargs, 2048, name)

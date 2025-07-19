@@ -37,6 +37,8 @@ class TiRex(AbstractPredictor):
     tirex_service_url : str
         endpoint of the tirex microservice. e.g. "http://localhost:8000".
         Look at Readme for instructions for setting this up.
+    name : str, optional
+        Name of the model, defaults to the class name
     """
 
     def __init__(
@@ -45,9 +47,9 @@ class TiRex(AbstractPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         output_dir: Optional[Path] = None,
         tirex_service_url: str = "http://localhost:8000",
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__(lead_times, output_dir)
-
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
         self.quantiles = quantiles
         self.predictor = None
         self.context_length = 2048

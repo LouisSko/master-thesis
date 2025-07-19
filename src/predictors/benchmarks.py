@@ -42,6 +42,8 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         Number of most recent samples per bucket to use for quantile estimation.
     output_dir : Optional[Union[str, Path]], optional
         Directory to store model outputs or logs.
+    name : str, optional
+        Name of the model, defaults to the class name
     """
 
     def __init__(
@@ -51,10 +53,11 @@ class RollingSeasonalQuantilePredictor(AbstractPredictor):
         freq: Union[str, pd.DateOffset] = "1h",
         last_n_samples: Optional[int] = 10,
         output_dir: Optional[Union[str, Path]] = None,
+        name: Optional[str] = None,
     ) -> None:
         # Normalize freq into a pandas DateOffset
         self.offset = to_offset(freq)
-        super().__init__(lead_times=lead_times, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
@@ -300,6 +303,8 @@ class RollingQuantilePredictor(AbstractPredictor):
         Number of most recent samples to use for quantile estimation.
     output_dir : Optional[Union[str, Path]], optional
         Directory to store model outputs or logs.
+    name : str, optional
+        Name of the model, defaults to the class name
     """
 
     def __init__(
@@ -308,8 +313,9 @@ class RollingQuantilePredictor(AbstractPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         last_n_samples: Optional[int] = 100,
         output_dir: Optional[Union[str, Path]] = None,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__(lead_times=lead_times, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
         self.quantiles = quantiles
         self.last_n_samples = last_n_samples
 
@@ -490,6 +496,8 @@ class RandomWalkBenchmark(AbstractPredictor):
         List of lead times (in time steps) for which forecasts should be produced.
     output_dir : Optional[Union[str, Path]], optional
         Directory to store model outputs or logs.
+    name : str, optional
+        Name of the model, defaults to the class name
     """
 
     def __init__(
@@ -497,8 +505,9 @@ class RandomWalkBenchmark(AbstractPredictor):
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: List[int] = [1, 2, 3],
         output_dir: Optional[Union[str, Path]] = None,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__(lead_times=lead_times, output_dir=output_dir)
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
         self.quantiles = quantiles
         self.sd_yd = {}  # standard deviation for each item id
 

@@ -52,6 +52,8 @@ class QuantileRegression(AbstractPredictor):
         Frequency of the time series data. Defaults to 1 hour.
     output_dir : Optional[Path], optional
         Directory to save the fitted model. Defaults to None.
+    name : str, optional
+        Name of the model, defaults to the class name
     """
 
     def __init__(
@@ -60,8 +62,9 @@ class QuantileRegression(AbstractPredictor):
         lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
         freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Path] = None,
+        name: Optional[str] = None,
     ) -> None:
-        super().__init__(lead_times, freq, output_dir)
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
 
         self.quantiles = quantiles
         self.models_qr = {}
