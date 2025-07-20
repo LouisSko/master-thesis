@@ -533,13 +533,16 @@ class RollingQuantilePredictor(AbstractPredictor):
         return ForecastCollection(item_ids=ts_forecast)
 
 
-class RandomWalkBenchmark(AbstractPredictor):
+class RandomWalk(AbstractPredictor):
     """
-    A simple benchmark model based on a random walk with Gaussian innovations in log space.
+    A simple benchmark model based on a driftless random walk in log space with constant volatility.
 
-    This model estimates the standard deviation of log returns for each time series from
-    the training data, and generates future quantile forecasts by simulating a random walk
-    in log space, scaled by the square root of the lead time.
+    This model first estimates the standard deviation of log returns from the training data for each item.
+    It then generates future quantile forecasts by simulating a Gaussian random walk in log space, where
+    uncertainty increases with the square root of the lead time. The resulting forecasts are returned in
+    the original scale by exponentiating the simulated values.
+
+    This version assumes that volatility is stationary over time and does not change during prediction.
 
     Parameters
     ----------
@@ -550,7 +553,7 @@ class RandomWalkBenchmark(AbstractPredictor):
     output_dir : Optional[Union[str, Path]], optional
         Directory to store model outputs or logs.
     name : str, optional
-        Name of the model, defaults to the class name
+        Name of the model, defaults to the class name.
     """
 
     def __init__(
@@ -592,7 +595,7 @@ class RandomWalkBenchmark(AbstractPredictor):
             y_diff = y_diff[~np.isnan(y_diff)]
             self.sd_yd[id] = np.std(y_diff)
 
-        logging.info("RandomWalkBenchmark estimated standard deviation for each time series from training data.")
+        logging.info("RandomWalk estimated standard deviation for each time series from training data.")
 
     def _predict(
         self,
@@ -639,7 +642,10 @@ class RandomWalkBenchmark(AbstractPredictor):
             data_sub = data.loc[[item_id]]
 
             timestamps = data_sub.index.get_level_values("timestamp")
-            log_targets = np.log(data_sub["target"]).values
+            targets = data_sub["target"]
+            if (targets <= 0).any():
+                logging.warning(f"Item {item_id} in `data` contains non-positive values; log is undefined.")
+            log_targets = np.log(targets).values
 
             q_fc_matrix = np.sqrt(h_steps) @ z * self.sd_yd[item_id]
 
@@ -677,6 +683,146 @@ class RandomWalkBenchmark(AbstractPredictor):
             ts_forecast[item_id] = TimeSeriesForecast(
                 item_id=item_id,
                 lead_time_forecasts=lt_forcast,
+                data=data_sub.copy(),
+                freq=freq,
+                quantiles=self.quantiles,
+                forecast_mask=forecast_mask,
+            )
+
+        return ForecastCollection(item_ids=ts_forecast)
+
+
+class OnlineRandomWalk(AbstractPredictor):
+    """
+    A simple benchmark model based on a driftless random walk in log space with dynamic volatility estimation.
+
+    Unlike the standard RandomWalk model, this version computes the standard deviation of log returns dynamically
+    at each prediction time step using a rolling or expanding window. This allows the model to adapt to changes
+    in volatility over time. Forecasts are generated in log space and exponentiated to return to the original scale.
+
+    This model does not require a fitting step. Instead, it computes rolling statistics on-the-fly during prediction,
+    optionally using a context window (e.g., for rolling forecasting tasks).
+
+    Parameters
+    ----------
+    quantiles : List[float], optional
+        List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
+    lead_times : List[int], optional
+        List of lead times (in time steps) for which forecasts should be produced.
+    last_n_samples : int, optional
+        Number of most recent samples used for computing the standard deviation. If None, all available history
+        up to the forecast time is used (expanding window).
+    output_dir : Optional[Union[str, Path]], optional
+        Directory to store model outputs or logs.
+    name : str, optional
+        Name of the model, defaults to the class name.
+    """
+
+    def __init__(
+        self,
+        quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        lead_times: List[int] = [1, 2, 3],
+        last_n_samples: Optional[int] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
+        self.quantiles = quantiles
+        self.last_n_samples = last_n_samples
+        self.sd_yd = {}  # standard deviation for each item id
+
+    def _fit(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame] = None,
+        **kwargs,
+    ) -> None:
+        """
+        Estimate the standard deviation of the log-differenced target series for each item.
+
+        Parameters
+        ----------
+        data_train : TimeSeriesDataFrame
+            Training data containing time series with 'target' values.
+        data_val : Optional[TimeSeriesDataFrame], optional
+            Validation data (not used in this implementation).
+        """
+
+        logging.info("No fitting needed. Standard deviation will be estimated based on the data in the predict() function.")
+
+    def _predict(
+        self,
+        data: TimeSeriesDataFrame,
+        previous_context_data: Optional[TimeSeriesDataFrame] = None,
+        rolling: bool = False,
+        window_step: int = 1,
+    ) -> ForecastCollection:
+
+        freq = pd.tseries.frequencies.to_offset(data.freq)
+        ts_forecast: Dict[int, TimeSeriesForecast] = {}
+
+        h_steps = np.array(self.lead_times).reshape(-1, 1)
+        z = stats.norm.ppf(np.array(self.quantiles)).reshape(1, -1)
+
+        for item_id in tqdm(data.item_ids, desc="Predicting using Random Walk without drift"):
+            data_sub = data.loc[[item_id]].copy()
+            timestamps = data_sub.index.get_level_values("timestamp")
+
+            # Compute rolling std of log returns and utilize the context data
+            if previous_context_data is not None:
+                context_data_sub = previous_context_data.loc[[item_id]].copy()
+                data_merged, skip_first = self._merge_data(data_sub, context_data_sub, len(context_data_sub))
+                skip_first = skip_first[item_id]
+            else:
+                data_merged = data_sub
+                skip_first = 0
+            targets_merged = data_merged["target"]
+            min_target = targets_merged.min()
+            if min_target <= 0:
+                epsilon = -min_target + 1e-8
+                logging.info("Item %s contains non-positive values; log is undefined. Adding an epsilon of %s.", item_id, epsilon)
+            else:
+                epsilon = 0
+            log_targets_merged = np.log(targets_merged + epsilon)
+            log_returns = log_targets_merged.diff()
+            if self.last_n_samples is None:
+                rolling_std = log_returns.expanding(min_periods=2).std()[skip_first:]
+            else:
+                rolling_std = log_returns.rolling(window=self.last_n_samples, min_periods=2).std()[skip_first:]
+            log_targets = log_targets_merged[skip_first:]
+
+            # Decide forecast time steps
+            if rolling:
+                eval_indices = list(range(0, len(timestamps), window_step))
+            else:
+                eval_indices = [len(timestamps) - 1]
+            forecast_mask = np.zeros(len(timestamps), dtype=bool)
+            forecast_mask[eval_indices] = True
+
+            q_fc_y = []
+
+            for idx in eval_indices:
+                log_y = log_targets.iloc[idx]
+                std_dev = rolling_std.iloc[idx]
+
+                if pd.isna(log_y) or pd.isna(std_dev) or std_dev == 0:
+                    q_fc_y.append(np.full((len(self.lead_times), len(self.quantiles)), np.nan))
+                else:
+                    q_matrix = np.sqrt(h_steps) @ z * std_dev + log_y
+                    q_fc_y.append(q_matrix)
+
+            q_fc_y = np.exp(np.stack(q_fc_y, axis=0)) - epsilon
+
+            lt_forecast: Dict[int, HorizonForecast] = {}
+            for i, lead_time in enumerate(self.lead_times):
+                lt_forecast[lead_time] = HorizonForecast(
+                    lead_time=lead_time,
+                    predictions=torch.tensor(q_fc_y[:, i, :]),
+                )
+
+            ts_forecast[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=lt_forecast,
                 data=data_sub.copy(),
                 freq=freq,
                 quantiles=self.quantiles,
