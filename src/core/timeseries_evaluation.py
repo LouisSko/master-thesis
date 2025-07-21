@@ -187,6 +187,25 @@ class TimeSeriesForecast(BaseModel):
 
         return merged
 
+    def to_AutogluonFormat(self, idx: int = -1) -> TimeSeriesDataFrame:
+        """Converts a TimeSeriesForecast into a TimeSeriesDataFrame compatible with Autogluon"""
+        preds = []
+        for lt, horizon_fc in self.lead_time_forecasts.items():
+            preds.append(horizon_fc.predictions[idx].unsqueeze(0))
+
+        latest_ts = self.data.index.get_level_values(1)[idx]
+        freq = pd.tseries.frequencies.to_offset(self.freq)
+        timestamps = pd.date_range(start=latest_ts + freq, periods=lt, freq=freq)
+
+        df = pd.DataFrame(torch.cat(preds, dim=0), columns=[str(q) for q in self.quantiles])
+        df["timestamp"] = timestamps
+        df["item_id"] = self.item_id
+        df = df.set_index(["item_id", "timestamp"])
+        if "0.5" in df.columns:
+            df.insert(0, column="mean", value=df["0.5"])
+
+        return TimeSeriesDataFrame(df)
+
     def get_crps(self, forecast_horizon: int, mean_time: bool = True) -> np.ndarray:
         """
         Computes the Continuous Ranked Probability Score (CRPS) for a forecast horizon.
@@ -499,6 +518,15 @@ class ForecastCollection(BaseModel):
 
     def add_time_series_forecast(self, forecast: TimeSeriesForecast) -> None:
         self.item_ids[forecast.item_id] = forecast
+
+    def to_AutogluonFormat(self, idx: int = -1) -> TimeSeriesDataFrame:
+        """Converts a TimeSeriesForecast into a TimeSeriesDataFrame compatible with Autogluon"""
+        preds = []
+        for item_id in self.get_item_ids():
+            preds.append(self.get_time_series_forecast(item_id).to_AutogluonFormat(idx))
+        df = pd.concat(preds).sort_index()
+
+        return TimeSeriesDataFrame(df)
 
     def get_crps(
         self,
@@ -2244,9 +2272,11 @@ def _strip_tokens(parts: List[str], tokens: set) -> List[str]:
     """Return a new list with any token removed."""
     return [p for p in parts if p not in tokens]
 
+
 def _remove_duplicates(seq):
     seen = set()
     return [x for x in seq if not (x in seen or seen.add(x))]
+
 
 def _build_key(filepath: Path, *, n_files: int, common_path: Path, strip_tokens: set) -> str:
     """
@@ -2416,7 +2446,7 @@ def load_execution_times(
         if exec_dict is None:
             logging.warning(f"`execution_time` missing in `{filepath}`; skipping.")
             continue
-        
+
         exec_dict.pop("execution_time_predictor", None)
         exec_dict.pop("postprocessor_name", None)
         exec_dict.pop("predictor_name", None)
