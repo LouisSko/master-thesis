@@ -8,6 +8,8 @@ from src.core.utils import set_global_seed
 from pathlib import Path
 import logging
 from typing import Any, Optional, Literal
+import warnings
+from statsmodels.tools.sm_exceptions import IterationLimitWarning
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 set_global_seed()
@@ -42,6 +44,8 @@ class PostprocessorQR(AbstractPostprocessor):
 
     def _fit(self, data: TimeSeriesForecast) -> Any:
         """Fit the quantile regression models for each lead time and quantile."""
+        
+        warnings.simplefilter("ignore", IterationLimitWarning)
 
         qr_params = {}
         transformer = DataTransformer(self.transformer)
