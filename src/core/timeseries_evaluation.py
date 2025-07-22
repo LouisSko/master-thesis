@@ -10,6 +10,7 @@ import scoringrules as sr
 from scipy.interpolate import interp1d
 from pydantic import BaseModel, Field, field_validator
 from autogluon.timeseries import TimeSeriesDataFrame
+from gluonts.model.forecast import QuantileForecast
 import math
 import matplotlib.dates as mdates
 from pathlib import Path
@@ -192,12 +193,13 @@ class TimeSeriesForecast(BaseModel):
         preds = []
         for lt, horizon_fc in self.lead_time_forecasts.items():
             preds.append(horizon_fc.predictions[idx].unsqueeze(0))
+        preds = torch.cat(preds, dim=0)
 
         latest_ts = self.data.index.get_level_values(1)[idx]
         freq = pd.tseries.frequencies.to_offset(self.freq)
         timestamps = pd.date_range(start=latest_ts + freq, periods=lt, freq=freq)
 
-        df = pd.DataFrame(torch.cat(preds, dim=0), columns=[str(q) for q in self.quantiles])
+        df = pd.DataFrame(preds, columns=list(map(str, self.quantiles)))
         df["timestamp"] = timestamps
         df["item_id"] = self.item_id
         df = df.set_index(["item_id", "timestamp"])
@@ -205,6 +207,22 @@ class TimeSeriesForecast(BaseModel):
             df.insert(0, column="mean", value=df["0.5"])
 
         return TimeSeriesDataFrame(df)
+
+    def to_QuantileForecast(self, idx: int = -1) -> QuantileForecast:
+        """Converts a TimeSeriesForecast to a GluonTS QuantileForecast"""
+        preds = []
+        for lt, horizon_fc in self.lead_time_forecasts.items():
+            preds.append(horizon_fc.predictions[idx].unsqueeze(0))
+        preds = torch.cat(preds, dim=0).swapaxes(0,1)
+        freq = pd.tseries.frequencies.to_offset(self.freq)
+        latest_ts = self.data.index.get_level_values(1)[idx] + freq
+        
+        return QuantileForecast(
+            forecast_arrays=preds,
+            start_date=latest_ts.to_period(freq),
+            forecast_keys=list(map(str, self.quantiles)),
+            item_id=self.item_id,
+            )
 
     def get_crps(self, forecast_horizon: int, mean_time: bool = True) -> np.ndarray:
         """
@@ -528,6 +546,13 @@ class ForecastCollection(BaseModel):
 
         return TimeSeriesDataFrame(df)
 
+    def to_QuantileForecast(self, idx: int = -1) -> List[QuantileForecast]:
+        """Converts a TimeSeriesForecast into a TimeSeriesDataFrame compatible with Autogluon"""
+        preds = []
+        for item_id in self.get_item_ids():
+            preds.append(self.get_time_series_forecast(item_id).to_QuantileForecast(idx))
+        return preds
+    
     def get_crps(
         self,
         item_ids: Optional[List[int]] = None,
