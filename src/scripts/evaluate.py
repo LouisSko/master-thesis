@@ -1,7 +1,7 @@
 from src.pipeline.pipeline import ForecastingPipeline
 from src.predictors.chronos import Chronos
 from src.predictors.tirex import TiRex
-from src.predictors.benchmarks import RandomWalkBenchmark, SeasonalNaive
+from src.predictors.benchmarks import SeasonalNaive, RandomWalk
 import eval_constants
 import torch
 from src.predictors.autogluon_wrapper import SeasonalNaive_Ag, PatchTST_Ag, TiDE_Ag
@@ -336,9 +336,9 @@ def evaluate():
 
     # ------------------------ Benchmarks ------------------------
 
-    # RandomWalkBenchmark - self implemented
+    # RandomWalk - self implemented
     pipeline = ForecastingPipeline(
-        model=RandomWalkBenchmark,
+        model=RandomWalk,
         model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "name": "RandomWalk"},
         postprocessors=None,
         postprocessor_kwargs=None,
