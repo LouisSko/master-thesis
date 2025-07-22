@@ -72,7 +72,7 @@ class DataTransformer(AbstractDataTransformer):
             )
             self.requires_fit = False
 
-        logging.info("Set data transformation: %s", method)
+        logging.debug("Set data transformation: %s", method)
 
     def fit(self, X: Union[np.ndarray, pd.DataFrame]) -> None:
         """Fit the transformer if required (only for PowerTransformer)."""
