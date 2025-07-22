@@ -1,7 +1,7 @@
 from tqdm import tqdm
 import torch
 from autogluon.timeseries import TimeSeriesDataFrame
-from typing import List, Optional, Dict, Literal, Union
+from typing import List, Optional, Dict, Literal, Union, Iterable
 import pandas as pd
 import numpy as np
 from src.core.base import AbstractPredictor
@@ -46,8 +46,9 @@ class QuantileRegression(AbstractPredictor):
     ----------
     quantiles : List[float], optional
         List of quantiles to predict. Defaults to [0.1, 0.2, ..., 0.9].
-    lead_times : List[int], optional
-        List of lead times (forecast horizons) to predict. Defaults to [1, 2, 3].
+    lead_times : Optional[Iterable[int]], default=None
+        An iterable of integers specifying the forecast lead times.
+        If None, defaults to [1, 2, 3].
     freq : pd.Timedelta, optional
         Frequency of the time series data. Defaults to 1 hour.
     output_dir : Optional[Path], optional
@@ -59,7 +60,7 @@ class QuantileRegression(AbstractPredictor):
     def __init__(
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
-        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        lead_times: Optional[Iterable[int]] = None,
         freq: Union[pd.Timedelta, pd.DateOffset] = pd.Timedelta("1h"),
         output_dir: Optional[Path] = None,
         name: Optional[str] = None,

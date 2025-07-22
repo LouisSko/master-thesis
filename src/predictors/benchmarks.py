@@ -1,7 +1,7 @@
 from autogluon.timeseries import TimeSeriesDataFrame
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Optional, Union, Deque
+from typing import Dict, Any, List, Optional, Union, Deque, Iterable
 import torch
 from tqdm.auto import tqdm
 from src.core.base import AbstractPredictor
@@ -33,8 +33,9 @@ class SeasonalNaive(AbstractPredictor):
     ----------
     quantiles : List[float], optional
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
-    lead_times : List[int], optional
-        List of lead times (in time steps) for which forecasts should be produced.
+    lead_times : Optional[Iterable[int]], default=None
+        An iterable of integers specifying the forecast lead times.
+        If None, defaults to [1, 2, 3].
     freq : Union[str, pd.DateOffset], Optional
         Frequency of the time series data; can be a pandas-parsable string
         (e.g., "1h", "1D"), or a DateOffset.
@@ -49,7 +50,7 @@ class SeasonalNaive(AbstractPredictor):
     def __init__(
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
-        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        lead_times: Optional[Iterable[int]] = None,
         freq: Union[str, pd.DateOffset] = "1h",
         last_n_samples: Optional[int] = 10,
         output_dir: Optional[Union[str, Path]] = None,
@@ -349,8 +350,9 @@ class RollingQuantilePredictor(AbstractPredictor):
     ----------
     quantiles : List[float], optional
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
-    lead_times : List[int], optional
-        List of lead times (in time steps) for which forecasts should be produced.
+    lead_times : Optional[Iterable[int]], default=None
+        An iterable of integers specifying the forecast lead times.
+        If None, defaults to [1, 2, 3].
     last_n_samples : int, optional
         Number of most recent samples to use for quantile estimation.
     output_dir : Optional[Union[str, Path]], optional
@@ -362,7 +364,7 @@ class RollingQuantilePredictor(AbstractPredictor):
     def __init__(
         self,
         quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
-        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        lead_times: Optional[Iterable[int]] = None,
         last_n_samples: Optional[int] = 100,
         output_dir: Optional[Union[str, Path]] = None,
         name: Optional[str] = None,
@@ -545,8 +547,9 @@ class RandomWalkBenchmark(AbstractPredictor):
     ----------
     quantiles : List[float], optional
         List of quantiles to predict (e.g., [0.1, 0.5, 0.9]).
-    lead_times : List[int], optional
-        List of lead times (in time steps) for which forecasts should be produced.
+    lead_times : Optional[Iterable[int]], default=None
+        An iterable of integers specifying the forecast lead times.
+        If None, defaults to [1, 2, 3].
     output_dir : Optional[Union[str, Path]], optional
         Directory to store model outputs or logs.
     name : str, optional
@@ -556,7 +559,7 @@ class RandomWalkBenchmark(AbstractPredictor):
     def __init__(
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        lead_times: List[int] = [1, 2, 3],
+        lead_times: Optional[Iterable[int]] = None,
         output_dir: Optional[Union[str, Path]] = None,
         name: Optional[str] = None,
     ) -> None:

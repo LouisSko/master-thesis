@@ -44,12 +44,25 @@ ResourceTracker._stop = _safe_stop
 class AbstractPredictor(ABC):
     def __init__(
         self,
-        lead_times: List[int] = [1, 2, 3],
+        lead_times: Optional[Iterable[int]] = None,
         name: Optional[str] = None,
         output_dir: Optional[Union[str, Path]] = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        lead_times : Optional[Iterable[int]], default=None
+            An iterable of integers specifying the forecast lead times.
+            If None, defaults to [1, 2, 3].
 
-        self.lead_times = lead_times
+        name : Optional[str], default=None
+            Optional human-readable name for the predictor.
+
+        output_dir : Optional[Union[str, Path]], default=None
+            Directory where model artifacts (e.g., checkpoints, logs) will be stored.
+        """
+        self.lead_times = self._parse_lead_times(lead_times)
+
         self.prediction_length = max(lead_times)
         self.output_dir = None
         self.name = name or self.__class__.__name__
@@ -63,6 +76,36 @@ class AbstractPredictor(ABC):
             self.output_dir = None
             logging.info("No output directory provided. Models will not be saved or loaded from disk.")
         self.train_time_seconds = None
+
+    @staticmethod
+    def _parse_lead_times(lead_times: Optional[Iterable[int]]) -> List[int]:
+        # default
+        if lead_times is None:
+            lead_list = [1, 2, 3]
+        else:
+            # single integer → list
+            if isinstance(lead_times, int):
+                lead_list = [lead_times]
+            else:
+                # objects like numpy.ndarray, torch.Tensor, pandas.Series have .tolist()
+                if hasattr(lead_times, "tolist") and not isinstance(lead_times, (str, bytes)):
+                    lead_list = lead_times.tolist()
+                else:
+                    # try to cast any other iterable to list
+                    try:
+                        lead_list = list(lead_times)
+                    except TypeError:
+                        raise TypeError(f"lead_times must be an int or an iterable of ints, " f"got {type(lead_times).__name__}")
+
+        # validate each element
+        for i, lt in enumerate(lead_list):
+            if not isinstance(lt, int):
+                raise ValueError(f"lead_times[{i}] is not an integer: {lt!r}")
+            if lt < 1:
+                raise ValueError(f"lead_times[{i}] must be ≥ 1, got {lt}")
+
+        # dedupe & sort
+        return sorted(set(lead_list))
 
     def fit(
         self,

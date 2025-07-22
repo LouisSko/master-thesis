@@ -5,7 +5,7 @@ from chronos.chronos_bolt import ChronosBoltPipeline
 from chronos.chronos import ChronosPipeline, ChronosTokenizer
 from autogluon.timeseries import TimeSeriesDataFrame
 from torch.utils.data import DataLoader
-from typing import Callable, List, Optional, Dict, Any, Literal, Union
+from typing import Callable, List, Optional, Dict, Any, Literal, Union, Iterable
 import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
@@ -250,8 +250,9 @@ class Chronos(AbstractPredictor):
         Device to run inference on, e.g., "cpu", "cuda", or "mps". Defaults to "mps".
     context_length : int, optional
         Number of timesteps used as context for prediction. Defaults to 2048.
-    lead_times : List[int], optional
-        List of prediction steps ahead (lead times). Defaults to [1, 2, 3].
+    lead_times : Optional[Iterable[int]], default=None
+        An iterable of integers specifying the forecast lead times.
+        If None, defaults to [1, 2, 3].
     sampling: bool, optional
         Whether to sample multiple trajectories. Defaults to False.
     finetuning_type : {"full", "last_layer", "LoRA"}, optional
@@ -277,7 +278,7 @@ class Chronos(AbstractPredictor):
         pretrained_model_name_or_path: Union[str, Path] = "amazon/chronos-bolt-tiny",
         device_map: str = "mps",
         context_length: int = 2048,
-        lead_times: List[int] = [1, 2, 3],
+        lead_times: Optional[Iterable[int]] = None,
         sampling: bool = False,
         finetuning_type: Literal["full", "last_layer", "LoRA"] = "full",
         finetuning_adjust_pretrained_prediction_length: bool = True,
@@ -472,15 +473,23 @@ class Chronos(AbstractPredictor):
 
         model_inits = {"full": init_full, "last_layer": init_last, "LoRA": init_lora}
 
+        # here a warmup is not necessary, since output neurons are already trained
+        if self.pipeline.inner_model.config.chronos_config["prediction_length"] >= self.prediction_length:
+            self.finetuning_warmup_new_neurons = False
+            logging.info(
+                "Warmup training of new output neurons gets disabled since prediction length fo %s is not greater than the configured prediction length of %s",
+                self.prediction_length,
+                self.pipeline.inner_model.config.chronos_config["prediction_length"],
+            )
         # Ensure config.prediction_length is up-to-date for T5 (no head resize)
         if self.finetuning_adjust_pretrained_prediction_length:
             prediction_length = self.prediction_length
-            self.pipeline.model.config.prediction_length = prediction_length
+            self.pipeline.model.config.prediction_length = prediction_length  # TODO: check if I need this
             self.pipeline.inner_model.config.chronos_config["prediction_length"] = prediction_length
         else:
             prediction_length = self.pipeline.inner_model.config.chronos_config["prediction_length"]  # standard
 
-        logging.info("Prediction length will be set to %s during training.", self.prediction_length)
+        logging.info("Prediction length will be set to %s during training.", prediction_length)
 
         # 1) optional warm-up
         warm_ckpt: Optional[Path] = None

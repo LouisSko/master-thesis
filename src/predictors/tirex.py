@@ -1,5 +1,5 @@
 from autogluon.timeseries import TimeSeriesDataFrame
-from typing import List, Optional
+from typing import List, Optional, Iterable
 from src.core.base import AbstractPredictor
 import logging
 from src.core.timeseries_evaluation import ForecastCollection
@@ -30,8 +30,9 @@ class TiRex(AbstractPredictor):
     ----------
     quantiles : list of float, optional
         List of quantiles to predict. Defaults to [0.1, 0.2, ..., 0.9].
-    lead_times : list of int, optional
-        List of lead times (forecast horizons) to predict. Defaults to [1, 2, 3].
+    lead_times : Optional[Iterable[int]], default=None
+            An iterable of integers specifying the forecast lead times.
+            If None, defaults to [1, 2, 3].
     output_dir : Path or None, optional
         Directory to save the fitted model. Defaults to None.
     tirex_service_url : str
@@ -44,7 +45,7 @@ class TiRex(AbstractPredictor):
     def __init__(
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        lead_times: Optional[Iterable[int]] = None,
         output_dir: Optional[Path] = None,
         tirex_service_url: str = "http://localhost:8000",
         name: Optional[str] = None,

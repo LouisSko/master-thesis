@@ -1,5 +1,5 @@
 from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Iterable
 import pandas as pd
 from src.core.base import AbstractPredictor
 from src.core.utils import set_global_seed
@@ -74,8 +74,9 @@ class AutogluonPredictor(AbstractPredictor):
     ----------
     quantiles : list of float, optional
         List of quantiles to predict. Defaults to [0.1, 0.2, ..., 0.9].
-    lead_times : list of int, optional
-        List of lead times (forecast horizons) to predict. Defaults to [1, 2, 3].
+    lead_times : Optional[Iterable[int]], default=None
+        An iterable of integers specifying the forecast lead times.
+        If None, defaults to [1, 2, 3].
     freq : str or pd.DateOffset, optional
         Frequency of the time series data. Defaults to '1h'.
     output_dir : Path or None, optional
@@ -95,7 +96,7 @@ class AutogluonPredictor(AbstractPredictor):
     def __init__(
         self,
         quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-        lead_times: List[int] = Field(default_factory=lambda: [1, 2, 3]),
+        lead_times: Optional[Iterable[int]] = None,
         freq: Union[str, pd.DateOffset] = "1h",
         output_dir: Optional[Path] = None,
         predictor_kwargs: Optional[dict] = None,
