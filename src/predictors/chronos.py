@@ -124,7 +124,7 @@ class BaseTimeSeriesDataset(Dataset):
             self.ranges[item_id] = (pointer, pointer + len(idxs))
             pointer += len(idxs)
 
-        self.valid_idx = np.array(self.valid_idx)
+        self.valid_idx = np.array(self.valid_idx, dtype=int)
 
     def __len__(self):
         """Returns the total number of time steps in the dataset."""
@@ -733,7 +733,7 @@ def fine_tune(
         window_step=train_window_step,
         target_column=TARGET,
         return_target=True,
-        skip_first_n_samples=None,# {item_id: 512 for item_id in data_train.item_ids},
+        skip_first_n_samples=None,  # {item_id: 512 for item_id in data_train.item_ids},
         prediction_length=prediction_length,
         tokenizer=tokenizer,
         rolling=True,
