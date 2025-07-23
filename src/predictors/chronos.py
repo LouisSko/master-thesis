@@ -509,7 +509,7 @@ class Chronos(AbstractPredictor):
                 train_window_step=train_window_step,
                 val_window_step=val_window_step,
                 tokenizer=getattr(self.pipeline, "tokenizer", None),
-                specific_train_kwargs={"learning_rate": 1e-4, "num_train_epochs": 1, "warmup_ratio": 0.1},
+                specific_train_kwargs={"learning_rate": 1e-3, "num_train_epochs": 10, "warmup_ratio": 0.0, "lr_scheduler_type": "constant"},
             )
             warm_ckpt = warm_dir / "fine-tuned-ckpt"
             logging.info("Warm-up finished, best checkpoint at %s", warm_ckpt)
@@ -721,6 +721,8 @@ def fine_tune(
             logging.info("Validation data is available, setting early_stopping_patience=%s", patience)
         return callbacks
 
+    val_window_step = val_window_step or prediction_length
+    logging.info("Setting train stride: %s, validation stride: %s", train_window_step, val_window_step)
     logging.info("Preparing training dataset...")
     train_dataset = BaseTimeSeriesDataset(
         data=data_train,
@@ -728,6 +730,7 @@ def fine_tune(
         window_step=train_window_step,
         target_column=TARGET,
         return_target=True,
+        skip_first_n_samples=None,# {item_id: 512 for item_id in data_train.item_ids},
         prediction_length=prediction_length,
         tokenizer=tokenizer,
         rolling=True,
@@ -736,16 +739,21 @@ def fine_tune(
     eval_dataset = None
     if data_val is not None:
         logging.info("Preparing validation dataset...")
+        data_val = pd.concat([data_train, data_val]).sort_index()
+        skip_first_n_samples = (data_train.num_timesteps_per_item() - 1).to_dict()
         eval_dataset = BaseTimeSeriesDataset(
             data=data_val,
             context_length=context_length,
-            window_step=val_window_step or prediction_length,
+            window_step=val_window_step,
             target_column=TARGET,
+            skip_first_n_samples=skip_first_n_samples,
             return_target=True,
             prediction_length=prediction_length,
             tokenizer=tokenizer,
             rolling=True,
         )
+        if len(eval_dataset) == 0:
+            raise ValueError("No samples in evaluation dataset.")
 
     # Create separate directory for final training
     final_training_path = output_dir / "training"
@@ -889,9 +897,9 @@ def build_train_args(
     if pipeline_kwargs is None:
         pipeline_kwargs = {}
 
-    epochs = 3
-    eval_ratio = 0.1 / epochs
-    logging_steps = 0.05 / epochs
+    num_train_epochs = pipeline_kwargs.get("num_train_epochs", 3)
+    eval_ratio = 0.1 / num_train_epochs
+    logging_steps = 0.05 / num_train_epochs
     log_dir = base_path / "logs"
 
     fp16 = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (7, 0)
@@ -902,7 +910,7 @@ def build_train_args(
         per_device_train_batch_size=256,
         per_device_eval_batch_size=256,
         auto_find_batch_size=True,
-        learning_rate=1e-5,
+        learning_rate=1e-4,
         lr_scheduler_type="linear",
         warmup_ratio=0.0,
         weight_decay=0.0,
@@ -911,7 +919,7 @@ def build_train_args(
         logging_strategy="steps",
         logging_steps=logging_steps,
         disable_tqdm=True,
-        num_train_epochs=epochs,
+        num_train_epochs=num_train_epochs,
         gradient_accumulation_steps=1,
         dataloader_num_workers=4,
         seed=42,
