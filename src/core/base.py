@@ -226,10 +226,9 @@ class AbstractPredictor(ABC):
         # add the context length to data
         previous_context_data = previous_context_data.loc[data.item_ids]
         previous_context_data = previous_context_data.groupby("item_id").tail(context_length)
-        len_prepended_context = previous_context_data.groupby("item_id").size().to_dict()
+        prepended_timesteps_per_item = previous_context_data.groupby("item_id").size().to_dict()
         data_merged = pd.concat([previous_context_data, data]).sort_index()
-
-        return TimeSeriesDataFrame(data_merged), len_prepended_context
+        return TimeSeriesDataFrame(data_merged), prepended_timesteps_per_item
 
     def save(self, file_path: Optional[Path] = None) -> None:
 
@@ -305,6 +304,9 @@ class AbstractPostprocessor(ABC):
         """Apply postprocessor to each item using available or saved models."""
         start_time = time.time()
         results = {}
+        # TODO: load all parameters at once.
+        # TODO: parallelize postprocessing
+        # TODO: If No params available execution takes really a long time
         for item_id in tqdm(data.get_item_ids(), desc=f"Postprocessing with {self.name}"):
             forecast = data.get_time_series_forecast(item_id)
             params = self.get_params(item_id)
