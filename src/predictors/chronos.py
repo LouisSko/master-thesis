@@ -115,6 +115,9 @@ class BaseTimeSeriesDataset(Dataset):
             start = skip_first_n_samples.get(item_id, 0) if skip_first_n_samples else 0
             end = series_len - 1
 
+            if self.return_target:
+                end -= self.prediction_length
+
             idxs = offset + np.arange(start, end + 1, self.window_step)
             self.valid_idx.extend(idxs)
 
