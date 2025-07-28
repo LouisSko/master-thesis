@@ -579,34 +579,87 @@ class ForecastingPipeline(AbstractPipeline):
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
         rolling: bool = False,
         window_step: int = 1,
+        max_calibration_samples: Optional[int] = None,
     ) -> Dict[str, ForecastCollection]:
         """
-        Generates forecasts for each time series using the predictor.
-
-        This method can perform either:
-        - *single-shot prediction* (predicting from the most recent context window), or
-        - *rolling backtesting* (sliding a window across the time series to predict at each time point).
+        Generates forecasts using the predictor, supporting both single-shot and rolling modes.
 
         Parameters
         ----------
         data_test : Union[TimeSeriesDataFrame, TabularDataFrame]
-            The test dataset.
-        data_previous_context : Union[TimeSeriesDataFrame, TabularDataFrame]
-            The previous context data. This is used by some predictors.
+            The dataset to generate forecasts on. Must include the target values.
+        data_previous_context : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], default=None
+            Optional historical context preceding `data_test`. Required by some models.
         rolling : bool, default=False
-            If True, performs rolling evaluation across all available time steps.
-            If False, predicts only from the latest observation.
+            Whether to perform rolling forecasts across all time steps, or just a single-shot forecast
+            using the latest available context window.
         window_step : int, default=1
-            The number of time steps to move the sliding (rolling) prediction window forward between each prediction.
-            This controls how densely forecasts are generated across time. A smaller value creates more overlapping
-            forecasts, while a larger value skips more observations between windows.
-            The rolling procedure is applied independently to each time series in the dataset.
+            Step size for rolling forecast windows. Smaller values create denser forecasts.
+            **Note**: This parameter is ignored if `max_calibration_samples` is set.
+        max_calibration_samples : Optional[int], default=None
+            If provided, automatically creates a adjusts `data_test` and `window_step` so that at most this many
+            rolling window predictions are generated. This is typically used when forecasts are needed for
+            downstream calibration postprocessors. In this case, the `window_step` argument is ignored. If not set, the full `data_test` is used
+            as-is with the specified `window_step`.
 
         Returns
         -------
         Dict[str, ForecastCollection]
-            Dictionary with predictions stored in a ForecastCollection object.
+            Dictionary mapping the predictor name to its generated ForecastCollection.
         """
+
+        def _get_divisors(n: int) -> List[int]:
+            """Returns all positive divisors of `n`, sorted ascending."""
+            return [i for i in range(1, n + 1) if n % i == 0]
+
+        def _compute_window_step(samples: int, prediction_length: int, max_samples: int) -> int:
+            """
+            Computes the largest possible window step size such that the number of rolling
+            forecast windows does not exceed a specified maximum.
+
+            The function tries all divisors of `prediction_length` (to ensure alignment of windows)
+            and selects the smallest one that results in at most `max_samples` windows.
+
+            Parameters
+            ----------
+            samples : int
+                Total number of timesteps available in the time series.
+            prediction_length : int
+                The forecast horizon of the model.
+            max_samples : int
+                The maximum number of calibration forecast windows allowed.
+
+            Returns
+            -------
+            int
+                The step size for rolling forecasting that respects the calibration constraint.
+            """
+            for step in _get_divisors(prediction_length):
+                if samples // step <= max_samples:
+                    return step
+            return prediction_length
+
+        if max_calibration_samples is not None:
+            logging.info("`max_calibration_samples` is set to true, ignoring `window_step` and setting `rolling`=True")
+            rolling = True
+            samples = data_test.num_timesteps_per_item().max()
+            window_step = _compute_window_step(
+                samples,
+                self.predictor.prediction_length,
+                max_calibration_samples,
+            )
+            idx_split = max_calibration_samples * window_step
+            logging.info("Automatically determined window_step: %s", window_step)
+
+            # Prepare truncated calibration set from the tail of data_test
+            other_data = data_test.slice_by_timestep(end_index=-idx_split)
+            data_test = data_test.slice_by_timestep(start_index=-idx_split)
+
+            if data_previous_context is not None:
+                data_previous_context = pd.concat([data_previous_context, other_data]).sort_index()
+            else:
+                data_previous_context = other_data
+
         data_test = self.validate_data(data_test)
         if data_previous_context is not None:
             data_previous_context = self.validate_data(data_previous_context)
