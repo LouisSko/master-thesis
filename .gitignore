@@ -139,3 +139,5 @@ data/predictions/
 data/gift-eval/
 results/
 lightning_logs/
+gift-eval/
+tirex-service/
