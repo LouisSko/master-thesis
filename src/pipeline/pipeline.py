@@ -573,34 +573,31 @@ class ForecastingPipeline(AbstractPipeline):
         logging.info("Fitting predictor to the training data...")
         self.predictor.fit(data_train, data_val, train_window_step, val_window_step)
 
-    def generate_forecasts(
+    def auto_generate_calibration_forecasts(
         self,
-        data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
-        data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
-        rolling: bool = False,
-        window_step: int = 1,
-        max_calibration_samples: Optional[int] = None,
+        data_test: TimeSeriesDataFrame,
+        data_previous_context: Optional[TimeSeriesDataFrame] = None,
+        max_calibration_samples: int = 1000,
     ) -> Dict[str, ForecastCollection]:
         """
-        Generates forecasts using the predictor, supporting both single-shot and rolling modes.
+        Convenience function to quickly generate a fixed-size calibration dataset via rolling forecasts.
+
+        This method is intended for easily preparing forecast predictions used to train postprocessing components
+        such as calibration models. It truncates `data_test` to the last portion required to produce
+        up to `max_calibration_samples` rolling forecasts, automatically computing an appropriate
+        `window_step` to meet this constraint. It also sets up the correct `data_previous_context` to
+        preserve sequence continuity. Internally, it delegates to `generate_forecasts` using rolling mode.
 
         Parameters
         ----------
-        data_test : Union[TimeSeriesDataFrame, TabularDataFrame]
-            The dataset to generate forecasts on. Must include the target values.
-        data_previous_context : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], default=None
-            Optional historical context preceding `data_test`. Required by some models.
-        rolling : bool, default=False
-            Whether to perform rolling forecasts across all time steps, or just a single-shot forecast
-            using the latest available context window.
-        window_step : int, default=1
-            Step size for rolling forecast windows. Smaller values create denser forecasts.
-            **Note**: This parameter is ignored if `max_calibration_samples` is set.
-        max_calibration_samples : Optional[int], default=None
-            If provided, automatically creates a adjusts `data_test` and `window_step` so that at most this many
-            rolling window predictions are generated. This is typically used when forecasts are needed for
-            downstream calibration postprocessors. In this case, the `window_step` argument is ignored. If not set, the full `data_test` is used
-            as-is with the specified `window_step`.
+        data_test : TimeSeriesDataFrame
+            The time series data to generate calibration forecasts on. Must include the target values.
+        data_previous_context : Optional[TimeSeriesDataFrame], default=None
+            Optional context data preceding `data_test`. If provided, the truncated portion of the original
+            `data_test` will be prepended to this context to ensure continuity.
+        max_calibration_samples : int, default=1000
+            The maximum number of calibration samples to generate. The function will truncate
+            `data_test` and compute a window step size such that this limit is not exceeded.
 
         Returns
         -------
@@ -639,27 +636,59 @@ class ForecastingPipeline(AbstractPipeline):
                     return step
             return prediction_length
 
-        if max_calibration_samples is not None:
-            logging.info("`max_calibration_samples` is set to true, ignoring `window_step` and setting `rolling`=True")
-            rolling = True
-            samples = data_test.num_timesteps_per_item().max()
-            window_step = _compute_window_step(
-                samples,
-                self.predictor.prediction_length,
-                max_calibration_samples,
-            )
-            idx_split = max_calibration_samples * window_step
-            logging.info("Automatically determined window_step: %s", window_step)
+        samples = data_test.num_timesteps_per_item().max()
+        window_step = _compute_window_step(
+            samples,
+            self.predictor.prediction_length,
+            max_calibration_samples,
+        )
+        idx_split = max_calibration_samples * window_step
+        logging.info("Automatically determined window_step: %s", window_step)
 
-            # Prepare truncated calibration set from the tail of data_test
-            other_data = data_test.slice_by_timestep(end_index=-idx_split)
-            data_test = data_test.slice_by_timestep(start_index=-idx_split)
+        # Prepare truncated calibration set from the tail of data_test
+        other_data = data_test.slice_by_timestep(end_index=-idx_split)
+        data_test = data_test.slice_by_timestep(start_index=-idx_split)
 
-            if data_previous_context is not None:
-                data_previous_context = pd.concat([data_previous_context, other_data]).sort_index()
-            else:
-                data_previous_context = other_data
+        if data_previous_context is not None:
+            data_previous_context = pd.concat([data_previous_context, other_data]).sort_index()
+        else:
+            data_previous_context = other_data
 
+        return self.generate_forecasts(
+            data_test=data_test,
+            data_previous_context=data_previous_context,
+            rolling=True,
+            window_step=window_step,
+        )
+
+    def generate_forecasts(
+        self,
+        data_test: Union[TimeSeriesDataFrame, TabularDataFrame],
+        data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
+        rolling: bool = False,
+        window_step: int = 1,
+    ) -> Dict[str, ForecastCollection]:
+        """
+        Generates forecasts using the predictor, supporting both single-shot and rolling modes.
+
+        Parameters
+        ----------
+        data_test : Union[TimeSeriesDataFrame, TabularDataFrame]
+            The dataset to generate forecasts on. Must include the target values.
+        data_previous_context : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], default=None
+            Optional historical context preceding `data_test`. Required by some models.
+        rolling : bool, default=False
+            Whether to perform rolling forecasts across all time steps, or just a single-shot forecast
+            using the latest available context window.
+        window_step : int, default=1
+            Step size for rolling forecast windows. Smaller values create denser forecasts.
+            **Note**: This parameter is ignored if `max_calibration_samples` is set.
+
+        Returns
+        -------
+        Dict[str, ForecastCollection]
+            Dictionary mapping the predictor name to its generated ForecastCollection.
+        """
         data_test = self.validate_data(data_test)
         if data_previous_context is not None:
             data_previous_context = self.validate_data(data_previous_context)
