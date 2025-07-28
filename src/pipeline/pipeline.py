@@ -395,87 +395,91 @@ class ForecastingPipeline(AbstractPipeline):
             logging.info("Data resampled to %s", data.freq)
         return data
 
-    def split_train_val(
+    def auto_split_train_val(
         self,
         data: TimeSeriesDataFrame,
         prediction_length: int,
         min_val_windows: int = 1,
         max_val_windows: int = 10,
-        min_train_windows: int = 3,
-        min_train_fraction: float = 0.5,
-    ) -> Tuple[TimeSeriesDataFrame, Optional[TimeSeriesDataFrame]]:
+        min_train_windows: int = 1,
+        min_train_fraction: float = 0.7,
+    ) -> Tuple[TimeSeriesDataFrame, Optional[TimeSeriesDataFrame], int]:
         """
         Split time series data into training and validation sets using a sliding window approach.
 
-        This function extracts the last `w * prediction_length` timesteps as validation data,
-        where `w` is the largest number of validation windows (up to `max_val_windows`)
-        that still ensures a sufficiently large training set.
+        Enforces at least `min_val_windows` in the validation set. Attempts to increase the number
+        of validation windows (up to `max_val_windows`) as long as the training set satisfies:
+        - At least `min_train_windows`
+        - Preferably also `min_train_fraction` of the total series length
 
-        If no valid split is found that satisfies both minimum training requirements
-        and validation constraints, the full dataset is returned as training data, and
-        validation data is set to None.
+        The `min_train_fraction` constraint is relaxed if necessary to allow `min_val_windows`.
 
         Parameters
         ----------
-        data : Union[TimeSeriesDataFrame, TabularDataFrame]
-            The full time series dataset to be split.
+        data : TimeSeriesDataFrame
+            Full dataset to be split.
         prediction_length : int
-            Length of the prediction window.
-        min_val_windows : int, default=1
-            Minimum number of prediction windows required for the validation set.
-        max_val_windows : int, default=10
-            Maximum number of prediction windows allowed for the validation set.
-        min_train_windows : int, default=3
-            Minimum number of prediction windows required for the training set.
-        min_train_fraction : float, default=0.5
-            Minimum fraction of the full time series that must remain for training.
-            This acts as a safeguard against overly large validation splits.
+            Size of each prediction window.
+        min_val_windows : int
+            Minimum number of validation windows (mandatory).
+        max_val_windows : int
+            Maximum number of validation windows to consider.
+        min_train_windows : int
+            Minimum number of prediction windows in training set.
+        min_train_fraction : float
+            Preferred minimum fraction of series reserved for training.
 
         Returns
         -------
         data_train : TimeSeriesDataFrame
-            The portion of the dataset used for training.
+            Training portion of the data.
         data_val : Optional[TimeSeriesDataFrame]
-            The portion of the dataset used for validation.
-            Returns None if a valid split is not possible.
-
-        Notes
-        -----
-        - If individual time series have different lengths, the split is based on the longest one.
-        - A warning will be logged if the series lengths differ.
+            Validation portion of the data, or None if no valid split is possible.
+        val_windows : int
+            Number of validation windows
         """
+
+        logging.info("Automatically splitting data into training and validation data...")
         timesteps_per_item = data.num_timesteps_per_item()
         min_timesteps = timesteps_per_item.min()
         max_timesteps = timesteps_per_item.max()
         if min_timesteps != max_timesteps:
-            logging.warning("Time series have varying lengths: min=%d, max=%d. " "Splitting is based on the longest series only.", min_timesteps, max_timesteps)
+            logging.warning(
+                "Time series have varying lengths: min=%d, max=%d. " "Splitting is based on the longest series only.",
+                min_timesteps,
+                max_timesteps,
+            )
 
-        max_val_fraction = 1 - min_train_fraction
-        max_val_split_idx = int(max_timesteps * max_val_fraction)
-        min_train_len = max(prediction_length * min_train_windows, int(max_timesteps * min_train_fraction))
-
-        # Calculate maximum number of validation windows based on available history and constraints
-        max_possible_val_windows = max_val_split_idx // prediction_length
+        min_train_len = prediction_length * min_train_windows
+        preferred_train_len = max(min_train_len, int(max_timesteps * min_train_fraction))
+        max_possible_val_windows = (max_timesteps - min_train_len) // prediction_length
         effective_max_val_windows = min(max_val_windows, max_possible_val_windows)
 
-        if max_timesteps < min_train_len + prediction_length * min_val_windows:
+        if max_timesteps < prediction_length * (min_val_windows + min_train_windows):
             logging.warning(
-                "Not enough timesteps to create train/val split. " "Required at least %d, but got %d.", min_train_len + prediction_length * min_val_windows, max_timesteps
+                "Not enough timesteps to create train/val split. " "Required at least %d, but got %d.",
+                prediction_length * (min_val_windows + min_train_windows),
+                max_timesteps,
             )
-            return data, None
+            return data, None, 1
 
-        # Try largest valid number of validation windows first, then decrease
+        best_w = None
         for w in reversed(range(min_val_windows, effective_max_val_windows + 1)):
             val_len = prediction_length * w
             train_len = max_timesteps - val_len
+
             if train_len >= min_train_len:
-                split_idx = val_len
-                break
+                # Acceptable: we always meet min_train_windows
+                # Prefer: also meets min_train_fraction
+                if train_len >= preferred_train_len or w == min_val_windows:
+                    best_w = w
+                    break
 
-        else:
+        if best_w is None:
             logging.warning("Could not find a suitable validation split. Keeping all data for training.")
-            return data, None
+            return data, None, 1
 
+        split_idx = int(prediction_length * best_w)
         data_val = data.slice_by_timestep(start_index=-split_idx)
         data_train = data.slice_by_timestep(end_index=-split_idx)
 
@@ -483,10 +487,25 @@ class ForecastingPipeline(AbstractPipeline):
         train_pct = 100 - val_pct
         num_val_windows = split_idx // prediction_length
         num_train_windows = (max_timesteps - split_idx) // prediction_length
-        logging.info("Split result: %d timesteps for training (%.1f%%), %d timesteps for validation (%.1f%%)", len(data_train), train_pct, len(data_val), val_pct)
-        logging.info("Split sizes per series: %d raw values for training, %d for validation", max_timesteps - split_idx, split_idx)
-        logging.info("Sliding windows: %d training windows, %d validation windows (window size = %d)", num_train_windows, num_val_windows, prediction_length)
-        return data_train, data_val
+        logging.info(
+            "Split result: %d timesteps for training (%.1f%%), %d timesteps for validation (%.1f%%)",
+            len(data_train),
+            train_pct,
+            len(data_val),
+            val_pct,
+        )
+        logging.info(
+            "Split sizes per series: %d raw values for training, %d for validation",
+            max_timesteps - split_idx,
+            split_idx,
+        )
+        logging.info(
+            "Sliding windows: %d training windows, %d validation windows (window size = %d)",
+            num_train_windows,
+            num_val_windows,
+            prediction_length,
+        )
+        return data_train, data_val, best_w
 
     def train_predictor_model(
         self,
@@ -494,24 +513,42 @@ class ForecastingPipeline(AbstractPipeline):
         data_val: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
         train_window_step: int = 1,
         val_window_step: Optional[int] = None,
-        determine_val_set: bool = True,
+        auto_determine_val_set: bool = True,
+        max_val_windows: int = 1,
     ) -> None:
         """
-        Train the predictor, optionally using a sliding window split to create a validation set.
+        Trains the predictor using the provided training data, optionally with validation data.
+
+        Supports both manual and automatic validation data generation. If no validation data is
+        provided and `auto_determine_val_set=True`, a validation set will be split off from the
+        tail end of the training data. Sliding window sampling is used for both training and
+        validation sets, with configurable step sizes.
 
         Parameters
         ----------
         data_train : Union[TimeSeriesDataFrame, TabularDataFrame]
-            The training data.
+            The dataset used for training the predictor. Must include the target variable(s).
         data_val : Optional[Union[TimeSeriesDataFrame, TabularDataFrame]], default=None
-            Optional validation data. If None and determine_val_set=True, a validation set will be automatically split from the training data.
+            Optional dataset used for validation during training. If None and
+            `auto_determine_val_set=True`, a validation set will be split automatically from `data_train`.
         train_window_step : int, default=1
-            Number of time steps to shift the training window forward for each training sample.
-            A higher value reduces overlap and the total number of training samples.
+            The number of time steps to move the sliding window forward between each training sample.
+            Smaller values create more overlapping windows (more training samples); larger values
+            create sparser training data.
         val_window_step : Optional[int], default=None
-            Same as train_window_step but for the validation set. Defaults to the model's prediction_length.
-        determine_val_set : bool, default=True
-            Whether to infer a validation set from the end of the training data when data_val is not provided.
+            The step size for generating rolling windows on the validation set. If None, defaults to
+            the model's `prediction_length`. Ignored if `auto_determine_val_set=True`.
+        auto_determine_val_set : bool, default=True
+            Whether to automatically create a validation set from the training data if `data_val`
+            is not provided based on `max_val_windows`.
+        max_val_windows : int, default=1
+            The maximum number of forecast windows to include in the automatically generated validation set.
+            Only used when `auto_determine_val_set=True`.
+            A smaller number might be chosen, if not enough data is available.
+
+        Returns
+        -------
+        None
         """
         logging.info("Initializing predictor with model: %s", self.model.__name__)
         self._initialize_predictor()
@@ -522,10 +559,10 @@ class ForecastingPipeline(AbstractPipeline):
             logging.info("Validation data is provided.")
             data_val = self.validate_data(data_val)
 
-        elif determine_val_set:
+        elif auto_determine_val_set:
             logging.info("Inferring validation set from training data...")
-            data_train, data_val = self.split_train_val(data_train, self.predictor.prediction_length)
-
+            data_train, data_val, val_windows = self.auto_split_train_val(data_train, self.predictor.prediction_length, max_val_windows=max_val_windows)
+            val_window_step = self.predictor.prediction_length  # TODO: potentially not hardcode this but change it based on number of validation windows
         logging.info("Training data from %s to %s", data_train.index.get_level_values("timestamp").min(), data_train.index.get_level_values("timestamp").max())
 
         if data_val is not None:
@@ -644,7 +681,7 @@ class ForecastingPipeline(AbstractPipeline):
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """
         Train, predict, and postprocess wrapper for internal backtesting.
-        
+
         - train window step is set to 1
         - validation window step is hardcoded to be aligned with test_window_step
         """
