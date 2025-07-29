@@ -224,7 +224,7 @@ class AbstractPredictor(ABC):
                 logging.warning(f"Data for item_id '{item_id}' is not consecutive. " f"Expected {expected_next_time}, got {first_curr_time}.")
 
         # add the context length to data
-        previous_context_data = previous_context_data.loc[data.item_ids]
+        previous_context_data = previous_context_data.loc[shared_ids]
         previous_context_data = previous_context_data.groupby("item_id").tail(context_length)
         prepended_timesteps_per_item = previous_context_data.groupby("item_id").size().to_dict()
         data_merged = pd.concat([previous_context_data, data]).sort_index()
