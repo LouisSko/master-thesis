@@ -643,8 +643,7 @@ class ForecastingPipeline(AbstractPipeline):
             max_calibration_samples,
         )
         idx_split = max_calibration_samples * window_step
-        logging.info("Automatically determined window_step: %s", window_step)
-
+        logging.info("Automatically determined window_step: %s", window_step) 
         # Prepare truncated calibration set from the tail of data_test
         other_data = data_test.slice_by_timestep(end_index=-idx_split)
         data_test = data_test.slice_by_timestep(start_index=-idx_split)
@@ -653,6 +652,9 @@ class ForecastingPipeline(AbstractPipeline):
             data_previous_context = pd.concat([data_previous_context, other_data]).sort_index()
         else:
             data_previous_context = other_data
+
+        if len(data_previous_context) is 0:
+            data_previous_context = None
 
         return self.generate_forecasts(
             data_test=data_test,
