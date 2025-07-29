@@ -5,7 +5,7 @@ from chronos.chronos_bolt import ChronosBoltPipeline
 from chronos.chronos import ChronosPipeline, ChronosTokenizer
 from autogluon.timeseries import TimeSeriesDataFrame
 from torch.utils.data import DataLoader
-from typing import Callable, List, Optional, Dict, Any, Literal, Union, Iterable
+from typing import Callable, List, Optional, Dict, Any, Literal, Union, Iterable, Tuple
 import pandas as pd
 from torch.utils.data import Dataset
 import numpy as np
@@ -24,6 +24,9 @@ from transformers import PreTrainedModel
 from peft import get_peft_model, LoraConfig, TaskType
 from transformers import TrainerCallback, EarlyStoppingCallback, TrainerState, TrainerControl
 import torch.nn as nn
+import math
+import os
+import gc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 set_global_seed()
@@ -56,6 +59,7 @@ class BaseTimeSeriesDataset(Dataset):
         context_length: int,
         window_step: int = 1,
         skip_first_n_samples: Optional[Dict[int, int]] = None,
+        skip_last_n_samples: Optional[Dict[int, int]] = None,
         target_column: str = "target",
         return_target: bool = False,
         prediction_length: Optional[int] = None,
@@ -71,6 +75,7 @@ class BaseTimeSeriesDataset(Dataset):
         self.prediction_length = prediction_length
         self.tokenizer = tokenizer
         self.skip_first_n_samples = skip_first_n_samples
+        self.skip_last_n_samples = skip_last_n_samples
         self.rolling = rolling
 
         if self.return_target and self.prediction_length is None:
@@ -115,8 +120,12 @@ class BaseTimeSeriesDataset(Dataset):
             start = skip_first_n_samples.get(item_id, 0) if skip_first_n_samples else 0
             end = series_len - 1
 
-            if self.return_target:
-                end -= self.prediction_length
+            # TODO: keep this or not
+            # if self.return_target:
+            #     end -= self.prediction_length
+
+            if self.skip_last_n_samples:
+                end -= self.skip_last_n_samples.get(item_id, 0)
 
             idxs = offset + np.arange(start, end + 1, self.window_step)
             self.valid_idx.extend(idxs)
@@ -494,6 +503,17 @@ class Chronos(AbstractPredictor):
 
         logging.info("Prediction length will be set to %s during training.", prediction_length)
 
+        # 1) create datasets
+        ds_train, ds_val = self._create_datasets(
+            data_train=data_train,
+            data_val=data_val,
+            context_length=self.context_length,
+            prediction_length=prediction_length,
+            train_window_step=train_window_step,
+            val_window_step=val_window_step,
+            tokenizer=getattr(self.pipeline, "tokenizer", None),
+        )
+
         # 1) optional warm-up
         warm_ckpt: Optional[Path] = None
 
@@ -503,16 +523,12 @@ class Chronos(AbstractPredictor):
 
             fine_tune(
                 model_init=init_new_rows,
-                data_train=data_train,
-                data_val=data_val,
+                ds_train=ds_train,
+                ds_val=ds_val,
                 output_dir=warm_dir,
-                hp_tuning=False,
-                context_length=self.context_length,
-                prediction_length=prediction_length,
-                train_window_step=train_window_step,
-                val_window_step=val_window_step,
-                tokenizer=getattr(self.pipeline, "tokenizer", None),
-                specific_train_kwargs={"learning_rate": 1e-3, "num_train_epochs": 10, "warmup_ratio": 0.0, "lr_scheduler_type": "constant"},
+                hp_tuning=self.finetuning_hp_search,
+                n_trials=self.finetuning_hp_search_trials,
+                specific_train_kwargs={"learning_rate": 1e-4, "num_train_epochs": 20, "warmup_ratio": 0.0, "lr_scheduler_type": "constant"},
             )
             warm_ckpt = warm_dir / "fine-tuned-ckpt"
             logging.info("Warm-up finished, best checkpoint at %s", warm_ckpt)
@@ -528,22 +544,98 @@ class Chronos(AbstractPredictor):
 
         fine_tune(
             model_init=model_init_main,
-            data_train=data_train,
-            data_val=data_val,
+            ds_train=ds_train,
+            ds_val=ds_val,
             output_dir=final_dir,
             hp_tuning=self.finetuning_hp_search,
             n_trials=self.finetuning_hp_search_trials,
-            context_length=self.context_length,
-            prediction_length=self.prediction_length,
-            train_window_step=train_window_step,
-            val_window_step=val_window_step,
-            tokenizer=getattr(self.pipeline, "tokenizer", None),
-            specific_train_kwargs={"num_train_epochs": 3},
+            specific_train_kwargs={"num_train_epochs": 10},
         )
 
         # reload final model
         self.pipeline = self._pipeline_init(final_dir / "fine-tuned-ckpt")
         logging.info("Two-stage fine-tuning complete – model reloaded.")
+
+    def _create_datasets(
+        self,
+        data_train: TimeSeriesDataFrame,
+        data_val: Optional[TimeSeriesDataFrame],
+        context_length: int,
+        prediction_length: int,
+        train_window_step: int,
+        val_window_step: Optional[int],
+        tokenizer: Optional["ChronosTokenizer"] = None,
+    ) -> Tuple[BaseTimeSeriesDataset, Optional[BaseTimeSeriesDataset]]:
+        """
+        Creates training and optional validation datasets for Chronos fine-tuning.
+
+        Parameters
+        ----------
+        data_train : TimeSeriesDataFrame
+            Training data used to construct rolling windows for model training.
+        data_val : Optional[TimeSeriesDataFrame]
+            Optional validation data used for early stopping and evaluation.
+        context_length : int
+            Number of timesteps used as context for prediction.
+        prediction_length : int
+            Number of timesteps to predict.
+        train_window_step : int
+            Stride for training windows. A higher value reduces overlap and memory use.
+        val_window_step : Optional[int]
+            Stride for validation windows. If None, defaults to prediction_length.
+        tokenizer : Optional[ChronosTokenizer]
+            Optional tokenizer used to tokenize time series input.
+
+        Returns
+        -------
+        Tuple[BaseTimeSeriesDataset, Optional[BaseTimeSeriesDataset]]
+            The constructed training and validation datasets.
+        """
+        val_window_step = val_window_step or prediction_length
+        logging.info("Setting train stride: %s, validation stride: %s", train_window_step, val_window_step)
+        logging.info("Preparing training dataset...")
+
+        ts_per_item = data_train.num_timesteps_per_item().to_dict()
+        skip_first_n_samples = {item_id: min(prediction_length // 2, ts_len // 2) for item_id, ts_len in ts_per_item.items()}
+
+        train_dataset = BaseTimeSeriesDataset(
+            data=data_train,
+            context_length=context_length,
+            window_step=train_window_step,
+            target_column=TARGET,
+            return_target=True,
+            skip_first_n_samples=skip_first_n_samples,
+            prediction_length=prediction_length,
+            tokenizer=tokenizer,
+            rolling=True,
+        )
+        logging.info("train dataset samples: %s", len(train_dataset))
+
+        eval_dataset = None
+        if data_val is not None:
+            logging.info("Preparing validation dataset...")
+            train_tail = data_train.slice_by_timestep(start_index=-context_length)
+            data_val = pd.concat([train_tail, data_val], copy=False)
+            skip_first_n_samples = (train_tail.num_timesteps_per_item() - 1).to_dict()
+            skip_last_n_samples = {item_id: prediction_length for item_id in data_val.item_ids}
+
+            eval_dataset = BaseTimeSeriesDataset(
+                data=data_val,
+                context_length=context_length,
+                window_step=val_window_step,
+                target_column=TARGET,
+                skip_first_n_samples=skip_first_n_samples,
+                skip_last_n_samples=skip_last_n_samples,
+                return_target=True,
+                prediction_length=prediction_length,
+                tokenizer=tokenizer,
+                rolling=True,
+            )
+            if len(eval_dataset) == 0:
+                raise ValueError("No samples in evaluation dataset.")
+            logging.info("Validation dataset samples: %s", len(eval_dataset))
+
+        return train_dataset, eval_dataset
 
     def _predict(
         self,
@@ -642,28 +734,66 @@ class Chronos(AbstractPredictor):
 
 
 class BestCheckpointCallback(TrainerCallback):
-    """Callback to save best model checkpoint during hyperparameter search."""
+    """
+    1) On train begin: save step‑0, mark it as best for both Trainer.state and callback attrs.
+    2) On each evaluation: if metric improves, update both Trainer.state and callback attrs.
+    """
 
-    def __init__(self, metric_name="eval_loss", greater_is_better=False):
+    def __init__(self, metric_name: str = "eval_loss", greater_is_better: bool = False):
         self.metric_name = metric_name
         self.greater_is_better = greater_is_better
+        # tracked internally for hyperparameter_search
+        self.best_metric = None
+        self.best_checkpoint = None
+
+    def on_train_begin(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        # STEP 0 checkpoint
+        step = state.global_step
+        ckpt_name = f"checkpoint-{step}"
+        ckpt_dir = os.path.join(args.output_dir, ckpt_name)
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        # save model + tokenizer
+        kwargs["model"].save_pretrained(ckpt_dir)
+        trainer = kwargs.get("trainer")
+        if trainer and getattr(trainer, "tokenizer", None):
+            trainer.tokenizer.save_pretrained(ckpt_dir)
+        print(f"[Unified] saved initial model to {ckpt_dir}")
+
+        # initialize both callback and Trainer.state
+        init_best = np.inf if not self.greater_is_better else -np.inf
+        self.best_metric = init_best
+        self.best_checkpoint = step
+
+        state.best_metric = init_best
+        state.best_global_step = step
+        state.best_model_checkpoint = ckpt_dir
 
     def on_evaluate(self, args, state: TrainerState, control: TrainerControl, metrics, **kwargs):
+        # ensure our metric is present
         if self.metric_name not in metrics:
             return
 
-        metric_value = metrics[self.metric_name]
+        current = metrics[self.metric_name]
+        prev_best = self.best_metric
 
-        # Check if current checkpoint is better than previous best
-        is_better = (self.greater_is_better and metric_value > self.best_metric) or (not self.greater_is_better and metric_value < self.best_metric)
+        # determine if we improved
+        improved = (self.greater_is_better and current > prev_best) or (not self.greater_is_better and current < prev_best)
 
-        if is_better:
-            self.best_metric = metric_value
+        if improved:
+            # update callback internals
+            self.best_metric = current
             self.best_checkpoint = state.global_step
 
-    def on_train_begin(self, args, state, control, **kwargs):
-        self.best_checkpoint = None
-        self.best_metric = np.inf if not self.greater_is_better else -np.inf
+            # update Trainer.state so trainer_state.json is correct
+            state.best_metric = current
+            state.best_global_step = state.global_step
+
+            ckpt_name = f"checkpoint-{state.global_step}"
+            ckpt_dir = os.path.join(args.output_dir, ckpt_name)
+            state.best_model_checkpoint = ckpt_dir
+
+            print(f"New best @ step {state.global_step}: " f"{self.metric_name}={current:.4f}, marking {ckpt_dir}")
 
     def get_best_metric(self):
         return self.best_metric
@@ -675,15 +805,11 @@ class BestCheckpointCallback(TrainerCallback):
 # TODO: implement a trainer class for that
 def fine_tune(
     model_init: Callable[[], PreTrainedModel],
-    data_train: TimeSeriesDataFrame,
-    data_val: Optional[TimeSeriesDataFrame] = None,
+    ds_train: Dataset,
+    ds_val: Optional[Dataset] = None,
     output_dir: Union[str, Path] = Path("./models/test-finetuning/"),
     hp_tuning: bool = False,
     n_trials: Optional[int] = None,
-    context_length: int = 2048,
-    prediction_length: int = 64,
-    train_window_step: int = 1,
-    val_window_step: Optional[int] = None,
     tokenizer: Optional["ChronosTokenizer"] = None,
     specific_train_kwargs: Dict = {},
 ):
@@ -694,10 +820,10 @@ def fine_tune(
     ----------
     model_init : Callable[[], PreTrainedModel]
         A function that returns a fresh instance of the model to fine-tune.
-    data_train : TimeSeriesDataFrame
-        Training data in Chronos-compatible format.
-    data_val : Optional[TimeSeriesDataFrame], default=None
-        Validation data. Required if `hp_tuning` is True or if evaluation during training is desired.
+    ds_train : Dataset
+        Training dataset in Chronos-compatible format.
+    ds_val : Optional[Dataset], default=None
+        Validation dataset. Required if `hp_tuning` is True or if evaluation during training is desired.
     output_dir : Union[str, Path], default=Path("./models/test-full-finetuning/")
         Path to save the model and optionally intermediate checkpoints.
     hp_tuning : bool, default=False
@@ -717,46 +843,13 @@ def fine_tune(
     """
 
     def create_callbacks():
-        callbacks = [BestCheckpointCallback()]
-        if data_val is not None:
-            patience = 3
-            callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience))
+        callbacks = []
+        if ds_val is not None:
+            patience = 5
+            callbacks.append(EarlyStoppingCallback(early_stopping_patience=patience, early_stopping_threshold=0.01))
             logging.info("Validation data is available, setting early_stopping_patience=%s", patience)
+        callbacks.append(BestCheckpointCallback())
         return callbacks
-
-    val_window_step = val_window_step or prediction_length
-    logging.info("Setting train stride: %s, validation stride: %s", train_window_step, val_window_step)
-    logging.info("Preparing training dataset...")
-    train_dataset = BaseTimeSeriesDataset(
-        data=data_train,
-        context_length=context_length,
-        window_step=train_window_step,
-        target_column=TARGET,
-        return_target=True,
-        skip_first_n_samples=None,  # {item_id: 512 for item_id in data_train.item_ids},
-        prediction_length=prediction_length,
-        tokenizer=tokenizer,
-        rolling=True,
-    )
-
-    eval_dataset = None
-    if data_val is not None:
-        logging.info("Preparing validation dataset...")
-        data_val = pd.concat([data_train, data_val]).sort_index()
-        skip_first_n_samples = (data_train.num_timesteps_per_item() - 1).to_dict()
-        eval_dataset = BaseTimeSeriesDataset(
-            data=data_val,
-            context_length=context_length,
-            window_step=val_window_step,
-            target_column=TARGET,
-            skip_first_n_samples=skip_first_n_samples,
-            return_target=True,
-            prediction_length=prediction_length,
-            tokenizer=tokenizer,
-            rolling=True,
-        )
-        if len(eval_dataset) == 0:
-            raise ValueError("No samples in evaluation dataset.")
 
     # Create separate directory for final training
     final_training_path = output_dir / "training"
@@ -769,16 +862,17 @@ def fine_tune(
     # Create args for final training with best hyperparameters
     fine_tune_trainer_kwargs = build_train_args(
         base_path=final_training_path,
-        eval_during_ft=data_val is not None,
+        eval_during_ft=ds_val is not None,
         save_checkpoints=True,
         pipeline_kwargs=specific_train_kwargs,
+        len_train_ds=len(ds_train),
     )
 
     logging.info("Training results are going to be logged in tensorboard.")
     logging.info(f"Run `tensorboard --logdir {output_dir}` in the terminal to start.")
 
     if hp_tuning:
-        if data_val is None:
+        if ds_val is None:
             logging.error("Validation data is required for hyperparameter tuning.")
             raise ValueError("Validation data is required for hyperparameter tuning.")
         if n_trials is None:
@@ -792,9 +886,10 @@ def fine_tune(
         # Args for hyperparameter tuning phase
         hp_tuning_args = build_train_args(
             base_path=hp_tuning_path,
-            eval_during_ft=data_val is not None,
+            eval_during_ft=ds_val is not None,
             save_checkpoints=True,
             pipeline_kwargs=specific_train_kwargs,
+            len_train_ds=len(ds_train),
         )
 
         logging.info("Starting hyperparameter tuning with optuna (%s trials)...", n_trials)
@@ -803,8 +898,8 @@ def fine_tune(
         hp_trainer = Trainer(
             model_init=model_init,
             args=hp_tuning_args,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
+            train_dataset=ds_train,
+            eval_dataset=ds_val,
             callbacks=create_callbacks(),
         )
 
@@ -824,8 +919,8 @@ def fine_tune(
     trainer = Trainer(
         model_init=model_init,
         args=fine_tune_trainer_kwargs,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        train_dataset=ds_train,
+        eval_dataset=ds_val,
         callbacks=create_callbacks(),
     )
 
@@ -834,12 +929,21 @@ def fine_tune(
         f.write(fine_tune_trainer_kwargs.to_json_string())
 
     logging.info("Starting final training process...")
+    trainer.state.best_model_checkpoint = 0
     trainer.train()
 
     # Save the fine-tuned model to the specified output directory
     final_model_path = output_dir / "fine-tuned-ckpt"
     trainer.model.save_pretrained(final_model_path)
     logging.info("Saved fine-tuned model to %s.", final_model_path)
+
+    del trainer, ds_train, ds_val
+    gc.collect()
+    # release device allocator caches for the next stage
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 def tune_hp_optuna(trainer: Trainer, hp_space_optuna: Dict[str, Any], n_trials: int = 10):
@@ -879,8 +983,8 @@ def tune_hp_optuna(trainer: Trainer, hp_space_optuna: Dict[str, Any], n_trials: 
 def hp_space_optuna(trial: Trial):
     """Define search space for hyperparameter search"""
     return {
-        "learning_rate": trial.suggest_float("learning_rate", 1e-7, 1e-2, log=True),
-        "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32, 64, 128]),
+        "learning_rate": trial.suggest_float("learning_rate", 1e-6, 1e-2, log=True),
+        "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32, 64, 128, 256, 512]),
         # "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.3),
         # "weight_decay": trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True),
     }
@@ -892,6 +996,7 @@ def build_train_args(
     save_checkpoints: bool = True,
     eval_during_ft: bool = True,
     pipeline_kwargs: Optional[Dict[str, Any]] = None,
+    len_train_ds: Optional[int] = None,
 ) -> TrainingArguments:
     """
     Construct `transformers.TrainingArguments` from defaults + pipeline_kwargs
@@ -900,20 +1005,31 @@ def build_train_args(
     if pipeline_kwargs is None:
         pipeline_kwargs = {}
 
+    # if eval_during_ft is False:
+    #     pipeline_kwargs["num_train_epochs"] = 1
+
     num_train_epochs = pipeline_kwargs.get("num_train_epochs", 3)
-    eval_ratio = 0.1 / num_train_epochs
-    logging_steps = 0.05 / num_train_epochs
+
     log_dir = base_path / "logs"
+    bs = 256
+
+    if len_train_ds:
+        steps_per_epoch = len_train_ds / bs
+        eval_steps = min(math.ceil(steps_per_epoch / 2), 100)  # log every 50% of each epoch or every 200 steps
+        logging_steps = math.ceil(eval_steps / 2)
+    else:
+        eval_steps = 100
+        logging_steps = 50
 
     fp16 = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (7, 0)
 
     defaults = dict(
         output_dir=base_path,
         overwrite_output_dir=False,
-        per_device_train_batch_size=256,
-        per_device_eval_batch_size=256,
+        per_device_train_batch_size=bs,
+        per_device_eval_batch_size=bs,
         auto_find_batch_size=True,
-        learning_rate=1e-4,
+        learning_rate=1e-5,
         lr_scheduler_type="linear",
         warmup_ratio=0.0,
         weight_decay=0.0,
@@ -932,11 +1048,11 @@ def build_train_args(
         report_to="tensorboard",
         prediction_loss_only=True,
         save_strategy="steps" if save_checkpoints else "no",
-        save_steps=eval_ratio if save_checkpoints else None,
+        save_steps=eval_steps if save_checkpoints else None,
         save_only_model=True,
         save_total_limit=5,
         eval_strategy="steps" if eval_during_ft else "no",
-        eval_steps=eval_ratio if eval_during_ft else None,
+        eval_steps=eval_steps if eval_during_ft else None,
         eval_on_start=eval_during_ft,
         load_best_model_at_end=eval_during_ft,
         metric_for_best_model="eval_loss",
