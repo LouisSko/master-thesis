@@ -103,6 +103,9 @@ class PostprocessorEQC(AbstractPostprocessor):
         for i, q in enumerate(data.quantiles):
             offset_matrix[:, i] = np.nanquantile(residuals[:, :, i], q=q, axis=0)
 
+        # fallback. replace nans with 0 -> no change
+        offset_matrix = np.nan_to_num(offset_matrix, nan=0)
+
         return offset_matrix
 
     def _postprocess(
