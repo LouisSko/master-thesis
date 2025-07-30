@@ -94,6 +94,7 @@ class PostprocessorEQC(AbstractPostprocessor):
         y_true = np.lib.stride_tricks.sliding_window_view(y_true_padded, window_shape=H)
 
         y_true = y_true[data.forecast_mask][-self.ignore_first_n_train_entries :]
+        y_pred = y_pred[-self.ignore_first_n_train_entries :]
 
         residuals = y_true[:, :, None] - y_pred  # T, H, Q
 
