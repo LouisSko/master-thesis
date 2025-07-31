@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import pandas as pd
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame
@@ -15,6 +16,11 @@ import time
 import importlib
 from multiprocessing.resource_tracker import ResourceTracker
 from pydantic import BaseModel, computed_field
+import torch
+from typing import Optional
+from torch import nn
+from transformers.utils import ModelOutput
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -727,3 +733,104 @@ def aggregate_execution_time_objects(
             predictor_train_time=train_total,
             predictor_inference_time=inf_total,
         )
+
+
+@dataclass
+class ModelOutput(ModelOutput):
+    quantile_preds: torch.FloatTensor
+    loss: Optional[torch.FloatTensor] = None
+
+
+class AbstractPytorchCalibrator(nn.Module):
+    def forward(
+        self,
+        x: torch.Tensor,
+        quantiles: torch.Tensor,
+        target: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+    ) -> "ModelOutput":
+        raise NotImplementedError
+
+
+class AbstractPytorchCalibrator(nn.Module):
+    def forward(
+        self,
+        x: torch.Tensor,
+        quantiles: torch.Tensor,
+        target: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+    ) -> "ModelOutput":
+        raise NotImplementedError
+
+    def fit(
+        self,
+        x: torch.Tensor,  # (T, H, Q)
+        y_true: torch.Tensor,  # (T, H)
+        quantiles: torch.Tensor,  # (Q,)
+        num_steps: int = 1000,
+        lr: float = 0.05,
+        weight_decay: float = 0.0,
+        lambda_noncross: float = 0.0,
+        device: Optional[torch.device] = None,
+        verbose: bool = False,
+    ) -> torch.Tensor:  # returns invalid_h
+        """
+        Trains the calibrator in-place. Returns invalid_horizons_mask (H,)
+        """
+        assert x.dim() == 3 and y_true.dim() == 2
+        T, H, Q = x.shape
+        assert y_true.shape == (T, H)
+        assert quantiles.shape == (Q,)
+
+        if device is None:
+            device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+
+        self.to(device)
+        x = x.to(device)
+        y_true = y_true.to(device, dtype=torch.float32)
+        quantiles = quantiles.to(device, dtype=torch.float32)
+        mask = ~torch.isnan(y_true)
+        y_true = torch.where(mask, y_true, torch.zeros_like(y_true))
+
+        opt = torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
+
+        best_loss = float("inf")
+        patience, bad = 10, 0
+        best_state = {k: v.detach().clone() for k, v in self.state_dict().items()}
+
+        for step in range(num_steps):
+            opt.zero_grad()
+            out = self(x, quantiles, target=y_true, mask=mask)
+            loss = out.loss
+
+            # Optional non-crossing penalty for quantile models
+            if lambda_noncross > 0 and hasattr(out, "quantile_preds"):
+                diff = out.quantile_preds[..., 1:] - out.quantile_preds[..., :-1]
+                viol = torch.relu(-diff)
+                loss = loss + lambda_noncross * viol.pow(2).mean()
+
+            loss.backward()
+            opt.step()
+
+            if verbose and (step % 50 == 0 or step == num_steps - 1):
+                print(f"step {step:4d}  loss {loss.item():.6f}")
+
+            if loss.item() < best_loss - 1e-3:
+                best_loss = loss.item()
+                best_state = {k: v.detach().clone() for k, v in self.state_dict().items()}
+                bad = 0
+            else:
+                bad += 1
+                if bad >= patience:
+                    break
+
+        self.load_state_dict(best_state)
+        invalid_h = _horizons_with_no_data(mask)
+        return invalid_h
+
+
+@torch.no_grad()
+def _horizons_with_no_data(mask: torch.Tensor) -> torch.Tensor:
+    """Return boolean mask (H,) True where a horizon has no valid targets."""
+    # mask: (T, H)
+    return mask.sum(dim=0) == 0

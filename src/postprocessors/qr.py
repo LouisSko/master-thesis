@@ -1,15 +1,17 @@
 import numpy as np
 import statsmodels.api as sm
 import torch
-from src.core.base import AbstractPostprocessor
+from src.core.base import AbstractPostprocessor, AbstractPytorchCalibrator, ModelOutput
 from src.core.timeseries_evaluation import TimeSeriesForecast
 from src.data.transformer import DataTransformer
 from src.core.utils import set_global_seed
 from pathlib import Path
 import logging
-from typing import Any, Optional, Literal, Tuple
+from typing import Any, Optional, Literal
 import warnings
 from statsmodels.tools.sm_exceptions import IterationLimitWarning, ConvergenceWarning
+import torch
+from typing import Optional
 from torch import nn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
@@ -140,7 +142,7 @@ class PostprocessorQR(AbstractPostprocessor):
         return ts_fc
 
 
-class BatchedQuantileCalibrator(nn.Module):
+class LinearQRCalibrator(AbstractPytorchCalibrator):
     """
     Linear calibrator: ŷ = a[h,q] + b[h,q] * x[t,h,q]
     - a: (H, Q)
@@ -152,14 +154,94 @@ class BatchedQuantileCalibrator(nn.Module):
         super().__init__()
         self.a = nn.Parameter(torch.full((H, Q), init_a, dtype=dtype))
         self.b = nn.Parameter(torch.full((H, Q), init_b, dtype=dtype))
-        # self.lambda_ = nn.Parameter(torch.full((1,), 1.0, dtype=dtype))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x_transformed = torch.arcsinh(x * self.lambda_)  # safe for all real values
-        # y = self.a.unsqueeze(0) + self.b.unsqueeze(0) * x_transformed
-        # return torch.sinh(y) / self.lambda_
+    def forward(
+        self,
+        x: torch.Tensor,
+        quantiles: Optional[torch.Tensor] = None,
+        target: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+    ) -> ModelOutput:
+        x_transformed = torch.arcsinh(x)  # safe for all real values
+        y = self.a.unsqueeze(0) + self.b.unsqueeze(0) * x_transformed
+        x_adj = torch.sinh(y)
 
-        return self.a.unsqueeze(0) + self.b.unsqueeze(0) * x
+        # x_adj = self.a.unsqueeze(0) + self.b.unsqueeze(0) * x
+        loss = smoothed_pinball_loss(target, x_adj, quantiles, mask) if target is not None else None
+
+        return ModelOutput(loss=loss, quantile_preds=x_adj)
+
+
+def smoothed_pinball_loss(
+    y_true: torch.Tensor,  # (T, H)
+    y_pred: torch.Tensor,  # (T, H, Q)
+    quantiles: torch.Tensor,  # (Q,)
+    mask: torch.Tensor = None,  # (T, H) boolean, True where valid
+    kappa: float = 1e-2,  # smoothing radius; smaller -> closer to pinball
+) -> torch.Tensor:
+    """
+    Quantile Huber (smoothed pinball) loss.
+
+    References:
+      - Dabney et al., "Implicit Quantile Networks for Distributional Reinforcement Learning", ICML 2018.
+        (Quantile Huber loss; pinball recovered as kappa -> 0)
+
+    Shapes:
+      y_true: (T, H)
+      y_pred: (T, H, Q)
+      quantiles: (Q,)
+      mask: (T, H) boolean (optional)
+
+    Returns:
+      scalar loss averaged over valid (T, H) and all Q.
+    """
+    # ---- shape checks to catch silent broadcasting bugs ----
+    if y_pred.dim() != 3:
+        raise ValueError(f"y_pred must be (T,H,Q), got {y_pred.shape}")
+    if y_true.dim() != 2:
+        raise ValueError(f"y_true must be (T,H), got {y_true.shape}")
+    if quantiles.dim() != 1:
+        raise ValueError(f"quantiles must be (Q,), got {quantiles.shape}")
+    T, H, Q = y_pred.shape
+    if y_true.shape != (T, H):
+        raise ValueError(f"y_true shape {y_true.shape} must match (T,H)=({T},{H}) from y_pred")
+    if quantiles.shape[0] != Q:
+        raise ValueError(f"quantiles length {quantiles.shape[0]} must match Q={Q}")
+
+    # default mask: all valid
+    if mask is None:
+        mask = torch.ones((T, H), dtype=torch.bool, device=y_true.device)
+    else:
+        if mask.shape != (T, H):
+            raise ValueError(f"mask shape {mask.shape} must be (T,H)=({T},{H})")
+
+    # residuals and broadcast
+    # e = y_true - y_pred
+    e = y_true.unsqueeze(-1) - y_pred  # (T, H, Q)
+    q = quantiles.view(1, 1, -1)  # (1, 1, Q)
+
+    # Asymmetry weights |tau - 1(e < 0)|
+    # = tau when e >= 0, and (1 - tau) when e < 0
+    w = torch.where(e < 0, 1.0 - q, q)  # (T, H, Q)
+
+    # Huber on residual (symmetric), smooths the kink near 0
+    abs_e = e.abs()
+    if kappa <= 0:
+        # fall back to unsmoothed pinball: w * |e|
+        huber = abs_e
+    else:
+        huber = torch.where(abs_e <= kappa, 0.5 * (e**2) / kappa, abs_e - 0.5 * kappa)  # quadratic region  # linear tails
+
+    loss = w * huber  # (T, H, Q)
+
+    # Apply mask across all quantiles
+    loss = loss * mask.unsqueeze(-1)  # (T, H, Q)
+
+    # Normalize by number of valid (T,H) positions * Q
+    denom = mask.sum() * Q
+    # Avoid divide-by-zero if everything is masked
+    denom = torch.clamp(denom, min=1.0)
+    return loss.sum() / denom
 
 
 def pinball_loss(y_true: torch.Tensor, y_pred: torch.Tensor, quantiles: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -176,143 +258,6 @@ def pinball_loss(y_true: torch.Tensor, y_pred: torch.Tensor, quantiles: torch.Te
     e = y_true_3d - y_pred  # residuals
     loss_per = torch.maximum(q * e, (q - 1.0) * e)  # pinball
     return loss_per[mask].mean()
-
-
-@torch.no_grad()
-def horizons_with_no_data(mask: torch.Tensor) -> torch.Tensor:
-    """Return boolean mask (H,) True where a horizon has no valid targets."""
-    # mask: (T, H)
-    return mask.sum(dim=0) == 0
-
-
-def train_calibrator(
-    y_true: torch.Tensor,  # (T,H), may contain NaNs
-    x: torch.Tensor,  # (T,H,Q) predictors (typically transformed y_pred)
-    quantiles: torch.Tensor,  # (Q,)
-    num_steps: int = 1000,
-    lr: float = 0.05,
-    weight_decay: float = 0.0,  # L2 on parameters (optional)
-    lambda_noncross: float = 0.0,  # penalty to discourage quantile crossings
-    device: Optional[torch.device] = None,
-    verbose: bool = False,
-) -> Tuple[BatchedQuantileCalibrator, torch.Tensor]:
-    """
-    Trains a batched linear calibrator on all horizons/quantiles at once.
-    Returns:
-      model, invalid_horizons_mask (H,)
-    """
-    assert x.dim() == 3 and y_true.dim() == 2
-    T, H, Q = x.shape
-    assert y_true.shape == (T, H)
-    assert quantiles.shape == (Q,)
-
-    if device is None:
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
-
-    dtype = torch.float32
-    # Use float32 for stability (matches statsmodels); convert and move to device
-    y_true = y_true.to(device=device, dtype=dtype)
-    x = x.to(device=device, dtype=dtype)
-    quantiles = quantiles.to(device=device, dtype=dtype)
-
-    # Build mask from NaNs in y_true (True=valid)
-    mask = ~torch.isnan(y_true)
-    # Replace NaNs in y_true with zeros to avoid propagating NaNs; they are masked out anyway
-    y_true = torch.where(mask, y_true, torch.zeros_like(y_true))
-
-    model = BatchedQuantileCalibrator(H, Q, 0, 1, dtype=dtype).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    best_loss = float("inf")
-    patience, bad = 10, 0  # simple early stopping
-    best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-
-    for step in range(num_steps):
-        opt.zero_grad()
-        y_hat = model(x)
-
-        loss = pinball_loss(y_true, y_hat, quantiles, mask)
-
-        # Optional non-crossing penalty: enforce ŷ[..., q] <= ŷ[..., q+1]
-        if lambda_noncross > 0:
-            diff = y_hat[..., 1:] - y_hat[..., :-1]  # (T,H,Q-1)
-            viol = torch.relu(-diff)  # only negative diffs
-            loss = loss + lambda_noncross * (viol.pow(2).mean())
-
-        loss.backward()
-        opt.step()
-
-        if verbose and (step % 50 == 0 or step == num_steps - 1):
-            print(f"step {step:4d}  loss {loss.item():.6f}")
-
-        # early stopping
-        if loss.item() < best_loss - 1e-3:
-            best_loss = loss.item()
-            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-            bad = 0
-        else:
-            bad += 1
-            if bad >= patience:
-                break
-    # load best model
-    model.load_state_dict(best_state)
-
-    invalid_h = horizons_with_no_data(mask)  # (H,)
-    return model, invalid_h
-
-
-@torch.no_grad()
-def apply_calibrator(
-    model: BatchedQuantileCalibrator,
-    x: torch.Tensor,  # (T,H,Q) same transform as during training
-    y_pred_orig: torch.Tensor,  # (T,H,Q) original (untransformed) model outputs
-    transformer: DataTransformer,  # your DataTransformer instance
-    invalid_h: torch.Tensor,  # (H,) horizons with no training data
-):
-    """
-    Returns adjusted predictions in original space, with fallback to y_pred_orig
-    for horizons that had no training data.
-    """
-    device = next(model.parameters()).device
-    x = x.to(device=device, dtype=torch.float32)
-
-    # Forward in transformed space
-    adj_trans = model(x)  # (T,H,Q)
-
-    # Inverse transform back to original space (expects numpy -> convert)
-    adj = transformer.inverse_transform(adj_trans.cpu().numpy())
-
-    # Fallback for invalid horizons (use original predictions)
-    adj = adj.copy()
-    invalid_h_np = invalid_h.cpu().numpy()
-    adj[:, invalid_h_np, :] = y_pred_orig[:, invalid_h_np, :]
-
-    return adj  # numpy array (T,H,Q)
-
-
-def pack_params_for_old_postprocess(model: BatchedQuantileCalibrator, invalid_h):
-    """
-    model: BatchedQuantileCalibrator with attributes a (H,Q), b (H,Q)
-    invalid_h: torch.BoolTensor of shape (H,), True where no training data
-    Returns: params_array (H, Q, 2) with [intercept, slope]
-    """
-    # pull to CPU numpy
-    a = model.a.detach().cpu().numpy()  # (H, Q)
-    b = model.b.detach().cpu().numpy()  # (H, Q)
-
-    params_array = np.empty((a.shape[0], a.shape[1], 2), dtype=np.float32)
-    params_array[..., 0] = a  # intercept in slot 0
-    params_array[..., 1] = b  # slope in slot 1
-
-    # mark horizons with no data as NaN so your postprocess falls back to y_pred
-    invalid_h_np = invalid_h.detach().cpu().numpy()
-    params_array[invalid_h_np, :, :] = np.nan
-    return params_array
 
 
 class PostprocessorFastQR(AbstractPostprocessor):
@@ -395,9 +340,7 @@ class PostprocessorFastQR(AbstractPostprocessor):
         y_true_padded = np.concatenate([y_true_series, pad])
         y_true = np.lib.stride_tricks.sliding_window_view(y_true_padded, window_shape=H)  # (T, H)
 
-        y_true = y_true[data.forecast_mask]
-        # if you use burn-in:
-        y_true = y_true[self.ignore_first_n_train_entries :]
+        y_true = y_true[data.forecast_mask][self.ignore_first_n_train_entries :]
         y_pred = y_pred[self.ignore_first_n_train_entries :]
 
         # --- 2) Transform both predictors and targets once ---
@@ -413,7 +356,9 @@ class PostprocessorFastQR(AbstractPostprocessor):
         q_t = torch.from_numpy(np.array(data.quantiles))  # (Q,)
 
         # --- 4) Train batched calibrator ---
-        model, invalid_h = train_calibrator(
+        model = LinearQRCalibrator(H, Q, 0, 1, dtype=torch.float32).to(self.device)
+
+        invalid_h = model.fit(
             y_true=y_t,
             x=x_t,
             quantiles=q_t,
@@ -430,7 +375,7 @@ class PostprocessorFastQR(AbstractPostprocessor):
         return self.params
 
     def _postprocess(self, data: TimeSeriesForecast, params: Any) -> TimeSeriesForecast:
-        model: BatchedQuantileCalibrator = params["model"].to(device=self.device)
+        model: LinearQRCalibrator = params["model"].to(device=self.device)
         transformer: DataTransformer = params["transformer"]
         invalid_h: torch.Tensor = params["invalid_h"]
 
@@ -441,7 +386,7 @@ class PostprocessorFastQR(AbstractPostprocessor):
         # Run calibrator
         x_t = torch.from_numpy(x).to(dtype=torch.float32, device=next(model.parameters()).device)
         with torch.no_grad():
-            adj_trans = model(x_t).cpu().numpy()  # (T, H, Q)
+            adj_trans = model(x_t).quantile_preds.cpu().numpy()  # (T, H, Q)
 
         # Inverse transform
         adj = transformer.inverse_transform(adj_trans)
