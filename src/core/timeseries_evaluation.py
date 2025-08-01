@@ -188,6 +188,39 @@ class TimeSeriesForecast(BaseModel):
 
         return merged
 
+    def get_aligned_predictions_and_targets(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Returns aligned predicted quantiles (y_pred) and targets (y_true) for all lead times.
+
+        Returns
+        -------
+        y_pred : np.ndarray
+            Array of shape (T, H, Q) where H is the number of lead times and Q the number of quantiles.
+        y_true : np.ndarray
+            Array of shape (T, H) aligned to predictions, with NaNs where target is not available.
+        """
+        # Stack forecasted quantiles → shape (T, H, Q)
+        y_pred = np.stack([fc.predictions for fc in self.lead_time_forecasts.values()]).swapaxes(0, 1)
+        T, H, Q = y_pred.shape
+
+        # Align targets for all horizons: (T, H)
+        y_true_series = self.data["target"].values
+        y_true_series = np.roll(y_true_series, -1)
+        y_true_series[-1] = np.nan  # last obs has no 1-step-ahead truth
+
+        pad = np.full(H - 1, np.nan)
+        y_true_padded = np.concatenate([y_true_series, pad])
+        y_true = np.lib.stride_tricks.sliding_window_view(y_true_padded, window_shape=H)  # (T, H)
+
+        # Apply forecast mask and burn-in
+        y_true = y_true[self.forecast_mask]
+
+        # Drop last row due to lack of final ground truth
+        y_true = y_true[:-1]
+        y_pred = y_pred[:-1]
+
+        return y_pred, y_true
+
     def to_AutogluonFormat(self, idx: int = -1) -> TimeSeriesDataFrame:
         """Converts a TimeSeriesForecast into a TimeSeriesDataFrame compatible with Autogluon"""
         preds = []
@@ -213,16 +246,16 @@ class TimeSeriesForecast(BaseModel):
         preds = []
         for lt, horizon_fc in self.lead_time_forecasts.items():
             preds.append(horizon_fc.predictions[idx].unsqueeze(0))
-        preds = torch.cat(preds, dim=0).swapaxes(0,1)
+        preds = torch.cat(preds, dim=0).swapaxes(0, 1)
         freq = pd.tseries.frequencies.to_offset(self.freq)
         latest_ts = self.data.index.get_level_values(1)[idx] + freq
-        
+
         return QuantileForecast(
             forecast_arrays=preds,
             start_date=latest_ts.to_period(freq),
             forecast_keys=list(map(str, self.quantiles)),
             item_id=self.item_id,
-            )
+        )
 
     def get_crps(self, forecast_horizon: int, mean_time: bool = True) -> np.ndarray:
         """
@@ -552,7 +585,7 @@ class ForecastCollection(BaseModel):
         for item_id in self.get_item_ids():
             preds.append(self.get_time_series_forecast(item_id).to_QuantileForecast(idx))
         return preds
-    
+
     def get_crps(
         self,
         item_ids: Optional[List[int]] = None,
