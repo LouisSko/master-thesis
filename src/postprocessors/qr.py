@@ -72,25 +72,17 @@ class PostprocessorQR(AbstractPostprocessor):
 
         # 1.  Pre‑compute matrices shared by all horizons
         y_pred = np.stack([fc.predictions for fc in data.lead_time_forecasts.values()]).swapaxes(0, 1)
+
+        y_pred, y_true = data.get_aligned_predictions_and_targets()
+        y_pred = y_pred[self.ignore_first_n_train_entries :]
+        y_true = y_true[self.ignore_first_n_train_entries :]
+
         T, H, Q = y_pred.shape
         params_array = np.full((H, Q, 2), np.nan)
 
-        # targets aligned for all horizons: (T, H)
-        y_true_series = data.data["target"].values
-        y_true_series = np.roll(y_true_series, -1)
-        y_true_series[-1] = np.nan  # last obs has no 1‑step‑ahead truth
-
-        pad = np.full(H - 1, np.nan)
-        y_true_padded = np.concatenate([y_true_series, pad])
-        y_true = np.lib.stride_tricks.sliding_window_view(y_true_padded, window_shape=H)  # (T, H)
-
-        # apply global forecast mask + burn‑in once
-        y_true = y_true[data.forecast_mask][self.ignore_first_n_train_entries :]
-        y_pred = y_pred[self.ignore_first_n_train_entries :]
-
         # 2.  Prepare transformer and containers
         transformer = DataTransformer(self.transformer)
-        transformer.fit(data.data)
+        transformer.fit(data.data["target"])
 
         for h in range(H):  # h = 0..H‑1, corresponds to lead_time = h+1
             # column‑select once per horizon
@@ -329,20 +321,12 @@ class PostprocessorFastQR(AbstractPostprocessor):
 
         lambda_noncross = 0.0
         verbose = False
-        # --- 1) Build y_pred (T,H,Q) and y_true (T,H) exactly as you already do ---
-        y_pred = np.stack([fc.predictions for fc in data.lead_time_forecasts.values()]).swapaxes(0, 1)
-        T, H, Q = y_pred.shape
 
-        y_true_series = data.data["target"].values
-        y_true_series = np.roll(y_true_series, -1)
-        y_true_series[-1] = np.nan
-        pad = np.full(H - 1, np.nan)
-        y_true_padded = np.concatenate([y_true_series, pad])
-        y_true = np.lib.stride_tricks.sliding_window_view(y_true_padded, window_shape=H)  # (T, H)
-
-        y_true = y_true[data.forecast_mask][self.ignore_first_n_train_entries :]
+        y_pred, y_true = data.get_aligned_predictions_and_targets()
         y_pred = y_pred[self.ignore_first_n_train_entries :]
+        y_true = y_true[self.ignore_first_n_train_entries :]
 
+        T, H, Q = y_pred.shape
         # --- 2) Transform both predictors and targets once ---
         transformer = DataTransformer(self.transformer)
         transformer.fit(data.data)

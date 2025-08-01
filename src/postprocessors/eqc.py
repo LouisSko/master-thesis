@@ -1,10 +1,10 @@
 import numpy as np
 from src.core.base import AbstractPostprocessor
-from src.core.timeseries_evaluation import TimeSeriesForecast, HorizonForecast, TARGET
+from src.core.timeseries_evaluation import TimeSeriesForecast
 import torch
 from pathlib import Path
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -80,22 +80,11 @@ class PostprocessorEQC(AbstractPostprocessor):
             Each entry `offset[h, q]` represents the empirical offset
             for quantile `q` at horizon `h`.
         """
-        # get the preds as (T, H, Q)
-        y_pred = np.stack([fc.predictions for fc in data.lead_time_forecasts.values()]).swapaxes(0, 1)
-
-        # get the label
-        y_true = data.data["target"].values
-        y_true = np.roll(y_true, -1)  # move everything one step left
-        y_true[-1] = np.nan
+        y_pred, y_true = data.get_aligned_predictions_and_targets()
+        y_pred = y_pred[self.ignore_first_n_train_entries :]
+        y_true = y_true[self.ignore_first_n_train_entries :]
 
         T, H, Q = y_pred.shape  # grab sizes
-        pad = np.full(H - 1, np.nan)  # so late rows can be NaN-padded
-        y_true_padded = np.concatenate([y_true, pad])
-        y_true = np.lib.stride_tricks.sliding_window_view(y_true_padded, window_shape=H)
-
-        y_true = y_true[data.forecast_mask][-self.ignore_first_n_train_entries :]
-        y_pred = y_pred[-self.ignore_first_n_train_entries :]
-
         residuals = y_true[:, :, None] - y_pred  # T, H, Q
 
         # describes the offset for each quantile and forecast
@@ -142,106 +131,3 @@ class PostprocessorEQC(AbstractPostprocessor):
             fc.predictions = y_adj[:, h - 1, :]
 
         return ts_fc
-
-
-class PostprocessorEQC_old(AbstractPostprocessor):
-    """
-    EmpiricalQuantileCalibrator.
-
-    Slow implementation.
-
-    This postprocessor adjusts quantile regression outputs by computing empirical offsets to improve quantile coverage.
-    """
-
-    def __init__(self, output_dir: Optional[Path] = None, name: Optional[str] = None, n_jobs: int = 1) -> None:
-        super().__init__(output_dir, name, n_jobs)
-
-    def _fit(self, data: TimeSeriesForecast) -> Dict[int, Dict[float, float]]:
-        """
-        Calibrates predicted quantiles by computing empirical offsets for each lead time.
-
-        This method estimates how much each predicted quantile should be shifted so that
-        the resulting quantile forecasts achieve the correct empirical coverage on the
-        calibration set. For each lead time and quantile, it calculates the empirical
-        error between the predicted quantile and the true target and stores the
-        corresponding offset.
-
-        Parameters
-        ----------
-        data : TimeSeriesForecast
-            Forecast data for a single item, including predicted quantiles and targets,
-            used for calibration.
-
-        Returns
-        -------
-        Dict[int, Dict[float, float]]
-            A nested dictionary of empirical quantile offsets structured as:
-            {
-                lead_time_1: {
-                    quantile_1: offset,
-                    quantile_2: offset,
-                    ...
-                },
-                ...
-            }
-            where each offset can be used to shift the corresponding quantile prediction.
-        """
-        conf_thresholds = {}
-        for lead_time in data.get_lead_times():
-            conf_thresholds[lead_time] = {}
-            # TODO: could be made more efficient by accessing the predictions directly
-            df = data.to_dataframe(lead_time).iloc[self.ignore_first_n_train_entries :].dropna().copy()
-
-            if len(df) == 0:
-                logging.info("No calibration data available for item_id: %s, lead time: %s.", data.item_id, lead_time)
-                for q in data.quantiles:
-                    conf_thresholds[lead_time][q] = None
-                continue
-
-            for q in data.quantiles:
-                scores = df[TARGET] - df[q]
-                conf_thresholds[lead_time][q] = np.quantile(scores, q=q)
-
-        return conf_thresholds
-
-    def _postprocess(self, data: TimeSeriesForecast, params: Dict[int, Dict[float, float]]) -> TimeSeriesForecast:
-        """
-        Applies the empirical quantile offsets to adjust predictions.
-
-        Parameters
-        -----------
-        data : TimeSeriesForecast
-            Prediction data to be postprocessed, containing raw quantile predictions.
-
-        params : Dict[int, Dict[float, float]]
-            A nested dictionary of empirical quantile offsets
-
-        Returns
-        --------
-        TimeSeriesForecast
-            A new `TimeSeriesForecast` object with calibrated quantile predictions.
-        """
-        results_lt = {}
-        for lead_time in data.get_lead_times():
-            df = data.to_dataframe(lead_time)  # TODO: could be made more efficient by accessing the predictions directly
-            adjusted_predictions = []
-            for quantile in data.quantiles:
-                offset = params[lead_time][quantile]
-                if offset is None:
-                    logging.info("No params available for item: %s, lead time: %s, quantile: %s. Keeping original predictions.", data.item_id, lead_time, quantile)
-                    conformalized_predictions = np.array(df[quantile])
-                else:
-                    conformalized_predictions = np.array(df[quantile] + offset)
-                adjusted_predictions.append(conformalized_predictions)
-            adjusted_predictions = np.column_stack(adjusted_predictions)
-
-            results_lt[lead_time] = HorizonForecast(lead_time=lead_time, predictions=torch.tensor(adjusted_predictions))
-
-        return TimeSeriesForecast(
-            item_id=data.item_id,
-            lead_time_forecasts=results_lt,
-            data=data.data,
-            freq=data.freq,
-            quantiles=data.quantiles,
-            forecast_mask=data.forecast_mask,
-        )
