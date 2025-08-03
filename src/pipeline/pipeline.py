@@ -398,7 +398,7 @@ class ForecastingPipeline(AbstractPipeline):
     def auto_split_train_val(
         self,
         data: TimeSeriesDataFrame,
-        prediction_length: int,
+        val_window_size: int,
         min_val_windows: int = 1,
         max_val_windows: int = 10,
         min_train_windows: int = 1,
@@ -418,8 +418,8 @@ class ForecastingPipeline(AbstractPipeline):
         ----------
         data : TimeSeriesDataFrame
             Full dataset to be split.
-        prediction_length : int
-            Size of each prediction window.
+        val_window_size : int
+            Size of each validation window.
         min_val_windows : int
             Minimum number of validation windows (mandatory).
         max_val_windows : int
@@ -450,22 +450,22 @@ class ForecastingPipeline(AbstractPipeline):
                 max_timesteps,
             )
 
-        min_train_len = prediction_length * min_train_windows
+        min_train_len = val_window_size * min_train_windows
         preferred_train_len = max(min_train_len, int(max_timesteps * min_train_fraction))
-        max_possible_val_windows = (max_timesteps - min_train_len) // prediction_length
+        max_possible_val_windows = (max_timesteps - min_train_len) // val_window_size
         effective_max_val_windows = min(max_val_windows, max_possible_val_windows)
 
-        if max_timesteps < prediction_length * (min_val_windows + min_train_windows):
+        if max_timesteps < val_window_size * (min_val_windows + min_train_windows):
             logging.warning(
                 "Not enough timesteps to create train/val split. " "Required at least %d, but got %d.",
-                prediction_length * (min_val_windows + min_train_windows),
+                val_window_size * (min_val_windows + min_train_windows),
                 max_timesteps,
             )
             return data, None, 1
 
         best_w = None
         for w in reversed(range(min_val_windows, effective_max_val_windows + 1)):
-            val_len = prediction_length * w
+            val_len = val_window_size * w
             train_len = max_timesteps - val_len
 
             if train_len >= min_train_len:
@@ -479,14 +479,14 @@ class ForecastingPipeline(AbstractPipeline):
             logging.warning("Could not find a suitable validation split. Keeping all data for training.")
             return data, None, 1
 
-        split_idx = int(prediction_length * best_w)
+        split_idx = int(val_window_size * best_w)
         data_val = data.slice_by_timestep(start_index=-split_idx)
         data_train = data.slice_by_timestep(end_index=-split_idx)
 
         val_pct = len(data_val) / (len(data_train) + len(data_val)) * 100
         train_pct = 100 - val_pct
-        num_val_windows = split_idx // prediction_length
-        num_train_windows = (max_timesteps - split_idx) // prediction_length
+        num_val_windows = split_idx // val_window_size
+        num_train_windows = (max_timesteps - split_idx) // val_window_size
         logging.info(
             "Split result: %d timesteps for training (%.1f%%), %d timesteps for validation (%.1f%%)",
             len(data_train),
@@ -503,7 +503,7 @@ class ForecastingPipeline(AbstractPipeline):
             "Sliding windows: %d training windows, %d validation windows (window size = %d)",
             num_train_windows,
             num_val_windows,
-            prediction_length,
+            val_window_size,
         )
         return data_train, data_val, best_w
 
@@ -537,7 +537,7 @@ class ForecastingPipeline(AbstractPipeline):
             create sparser training data.
         val_window_step : Optional[int], default=None
             The step size for generating rolling windows on the validation set. If None, defaults to
-            the model's `prediction_length`. Ignored if `auto_determine_val_set=True`.
+            the model's `prediction_length`.
         auto_determine_val_set : bool, default=True
             Whether to automatically create a validation set from the training data if `data_val`
             is not provided based on `max_val_windows`.
@@ -561,8 +561,8 @@ class ForecastingPipeline(AbstractPipeline):
 
         elif auto_determine_val_set:
             logging.info("Inferring validation set from training data...")
-            data_train, data_val, val_windows = self.auto_split_train_val(data_train, self.predictor.prediction_length, max_val_windows=max_val_windows)
-            val_window_step = self.predictor.prediction_length  # TODO: potentially not hardcode this but change it based on number of validation windows
+            val_window_step = val_window_step or self.predictor.prediction_length
+            data_train, data_val, val_windows = self.auto_split_train_val(data_train, val_window_step, max_val_windows=max_val_windows)
         logging.info("Training data from %s to %s", data_train.index.get_level_values("timestamp").min(), data_train.index.get_level_values("timestamp").max())
 
         if data_val is not None:
