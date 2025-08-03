@@ -84,13 +84,14 @@ class BaseTimeSeriesDataset(Dataset):
         if self.return_target:
             data = data.sort_values([ITEMID, TIMESTAMP])
 
-        self.target_array = data[target_column].to_numpy(np.float32)
         self.item_ids = pd.factorize(data.index.get_level_values(ITEMID))[0]
         self.timestamps = data.index.get_level_values(TIMESTAMP)
 
         cum_sizes = data.num_timesteps_per_item().cumsum()
         self.indptr = np.append(0, cum_sizes)
         self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in np.unique(self.item_ids)}
+        target_array = data[target_column].to_numpy(np.float32)
+        self.item_series = {item_id: target_array[mask] for item_id, mask in self.item_ids_mask.items()}
 
         self._compute_valid_indices(skip_first_n_samples)
 
@@ -179,9 +180,8 @@ class BaseTimeSeriesDataset(Dataset):
         item_start = self.indptr[item_id]
         pos_in_series = real_idx - item_start
 
-        series = self.target_array[self.item_ids_mask[item_id]]
         # get series of corresponding item id
-        series = self.target_array[self.item_ids_mask[item_id]]
+        series = self.item_series[item_id]
         context = self._get_context(series[: pos_in_series + 1])
 
         if self.return_target:
