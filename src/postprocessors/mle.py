@@ -2,15 +2,16 @@ import numpy as np
 import statsmodels.api as sm
 import scipy.stats as stats
 from scipy.optimize import minimize
-from src.core.base import AbstractPostprocessor
+from src.core.base import AbstractPostprocessor, AbstractPytorchCalibrator, ModelOutput
 from src.core.utils import set_global_seed
 from src.core.timeseries_evaluation import TimeSeriesForecast
 from src.data.transformer import DataTransformer
 import torch
-from typing import Tuple, Dict, Union, Optional, Literal
+from typing import Tuple, Dict, Union, Optional, Literal, Any
 import logging
 from pathlib import Path
 import pandas as pd
+from torch import nn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 set_global_seed()
@@ -248,3 +249,240 @@ class PostprocessorMLE(AbstractPostprocessor):
             c_init, d_init = 1e-2, 1.0
 
         return a_init, b_init, c_init, d_init
+
+
+class NormalMLECalibrator(AbstractPytorchCalibrator):
+    """
+    Horizon-wise MLE calibrator using:
+      mu = a[h] + b[h] * M
+      sigma = c[h] + d[h] * IQR
+
+    Applies calibration per horizon and outputs adjusted quantile predictions.
+    """
+
+    def __init__(self, H: int, init_vals: Optional[Tuple[float, float, float, float]] = None, dtype=torch.float32):
+        super().__init__()
+        if init_vals is None:
+            init_vals = (0.0, 1.0, 0.0, 1.0)
+        a, b, c, d = init_vals
+
+        self.a = nn.Parameter(torch.full((H,), a, dtype=dtype))
+        self.b = nn.Parameter(torch.full((H,), b, dtype=dtype))
+        self.c = nn.Parameter(torch.full((H,), c, dtype=dtype))
+        self.d = nn.Parameter(torch.full((H,), d, dtype=dtype))
+        self.dtype = dtype
+        self.loc = None
+        self.scale = None
+
+    def forward(
+        self,
+        x: torch.Tensor,  # (T, H, Q)
+        quantiles: torch.Tensor,  # (Q,)
+        target: Optional[torch.Tensor] = None,  # (T, H)
+        mask: Optional[torch.Tensor] = None,  # (T, H)
+    ) -> "ModelOutput":
+
+        if target is not None:
+            self.scale = torch.std(target, dim=0, keepdim=True)  # (1, H)
+            self.loc = torch.mean(target, dim=0, keepdim=True)  # (1, H)
+            target = (target - self.loc) / self.scale
+
+        x = (x - self.loc.unsqueeze(-1)) / self.scale.unsqueeze(-1)
+
+        # TODO: make this more robust
+        idx_05 = 4
+        idx_09 = 8
+        idx_01 = 0
+
+        # Extract median and IQR
+        M = x[:, :, idx_05]  # (T, H)
+        IQR = x[:, :, idx_09] - x[:, :, idx_01]  # (T, H)
+
+        mu = self.a.unsqueeze(0) + self.b.unsqueeze(0) * M
+        sigma = torch.clamp(self.c.unsqueeze(0) + self.d.unsqueeze(0) * IQR, min=1e-4)
+
+        # Adjust quantile predictions
+        mu_exp = mu.unsqueeze(-1)  # (T, H, 1)
+        sigma_exp = sigma.unsqueeze(-1)  # (T, H, 1)
+        q = quantiles.view(1, 1, -1)  # (1, 1, Q)
+
+        dist = torch.distributions.Normal(mu_exp, sigma_exp)
+        quantile_preds = dist.icdf(q)  # (T, H, Q)
+
+        loss = mle_nll_loss(target, mu, sigma, mask) if target is not None else None
+
+        quantile_preds = quantile_preds * self.scale.unsqueeze(-1) + self.loc.unsqueeze(-1)
+
+        return ModelOutput(loss=loss, quantile_preds=quantile_preds)
+
+
+def mle_nll_loss(
+    target: torch.Tensor,  # (T, H)
+    mu: torch.Tensor,  # (T, H)
+    sigma: torch.Tensor,  # (T, H), positive std
+    mask: Optional[torch.Tensor] = None,  # (T, H) bool
+) -> torch.Tensor:
+    """
+    Computes the negative log-likelihood loss for Normal(mu, sigma).
+
+    Parameters:
+        target: actual values
+        mu: predicted means
+        sigma: predicted stddevs
+        mask: optional boolean mask
+
+    Returns:
+        scalar loss
+    """
+    if mask is None:
+        mask = ~torch.isnan(target)
+    target = torch.where(mask, target, torch.zeros_like(target))  # (T, H)
+
+    dist = torch.distributions.Normal(loc=mu, scale=sigma)
+    log_prob = dist.log_prob(target)  # (T, H)
+
+    return -log_prob[mask].mean()
+
+
+class PostprocessorFastMLE(AbstractPostprocessor):
+    """
+    Vectorized MLE using PyTorch.
+
+    This version calibrates all quantiles and horizons jointly by training a
+    batched linear model with the quantile (pinball) loss using PyTorch. It is
+    designed for efficient calibration on large forecast matrices.
+
+    Parameters
+    ----------
+    output_dir : pathlib.Path, optional
+        Directory for saving outputs or artifacts, if any.
+    name : str, optional
+        Optional identifier for the post-processor.
+    transformer : {'yeo-johnson', 'box-cox', 'log', 'arcsinh'}, optional
+        Transformation applied to both targets and predictions before training.
+        If None, no transformation is applied.
+    device : {'mps', 'cuda', 'cpu'}, optional
+        Device used for PyTorch training and inference. If None, selected automatically.
+    n_jobs : int, default=1
+        Number of parallel jobs during fitting.
+
+    Returns
+    -------
+    dict
+        A dictionary containing:
+        - "model": BatchedQuantileCalibrator
+          Trained PyTorch model with learned calibration parameters.
+        - "invalid_h": torch.BoolTensor of shape (H,)
+          Mask indicating which horizons had no valid training targets.
+        - "transformer": DataTransformer
+          The transformer instance used during fitting.
+
+    Notes
+    -----
+    - Calibrates all (horizon, quantile) pairs jointly using a single model.
+    - Falls back to original predictions for horizons without training data.
+    - Does not enforce monotonicity between quantiles unless regularization is added.
+    """
+
+    def __init__(
+        self,
+        output_dir: Optional[Path] = None,
+        name: Optional[str] = None,
+        transformer: Optional[Literal["yeo-johnson", "box-cox", "log", "arcsinh"]] = None,
+        device: Optional[Literal["mps", "cuda", "cpu"]] = None,
+        n_jobs: int = 1,
+    ) -> None:
+        super().__init__(output_dir, name, n_jobs)
+        self.transformer = transformer
+        if device is None:
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif torch.backends.mps.is_available():
+                self.device = torch.device("mps")
+            else:
+                self.device = torch.device("cpu")
+        else:
+            self.device = device
+
+    def _fit(self, data: TimeSeriesForecast):
+        """
+        Returns dict with trained torch model, transformer, and invalid horizon mask.
+        """
+        n_steps = 5000
+        lr = 0.001
+
+        lambda_noncross = 0.0
+        verbose = False
+        # --- 1) Build y_pred (T,H,Q) and y_true (T,H) exactly as you already do ---
+        y_pred = np.stack([fc.predictions for fc in data.lead_time_forecasts.values()]).swapaxes(0, 1)
+        T, H, Q = y_pred.shape
+
+        y_true_series = data.data["target"].values
+        y_true_series = np.roll(y_true_series, -1)
+        y_true_series[-1] = np.nan
+        pad = np.full(H - 1, np.nan)
+        y_true_padded = np.concatenate([y_true_series, pad])
+        y_true = np.lib.stride_tricks.sliding_window_view(y_true_padded, window_shape=H)  # (T, H)
+
+        y_true = y_true[data.forecast_mask][self.ignore_first_n_train_entries :]
+        y_pred = y_pred[self.ignore_first_n_train_entries :]
+
+        # --- 2) Transform both predictors and targets once ---
+        transformer = DataTransformer(self.transformer)
+        transformer.fit(data.data)
+
+        x_trans = transformer.transform(y_pred)  # (T,H,Q)
+        y_true_trans = transformer.transform(y_true)  # (T,H)
+
+        # --- 3) Torch tensors ---
+        x_t = torch.from_numpy(x_trans)  # (T,H,Q)
+        y_t = torch.from_numpy(y_true_trans)  # (T,H)
+        q_t = torch.from_numpy(np.array(data.quantiles))  # (Q,)
+
+        # --- 4) Train batched calibrator ---
+        model = NormalMLECalibrator(H, init_vals=[0, 1, 0, 1], dtype=torch.float32).to(self.device)
+
+        invalid_h = model.fit(
+            y_true=y_t,
+            x=x_t,
+            quantiles=q_t,
+            num_steps=n_steps,
+            lr=lr,
+            lambda_noncross=lambda_noncross,
+            verbose=verbose,
+            device=self.device,
+        )
+
+        # params_array = pack_params_for_old_postprocess(model, invalid_h)
+        self.params = {"model": model, "invalid_h": invalid_h, "transformer": transformer}
+
+        return self.params
+
+    def _postprocess(self, data: TimeSeriesForecast, params: Any) -> TimeSeriesForecast:
+        model: NormalMLECalibrator = params["model"].to(device=self.device)
+        transformer: DataTransformer = params["transformer"]
+        invalid_h: torch.Tensor = params["invalid_h"]
+
+        # Load raw predictions and transform
+        y_pred = np.stack([fc.predictions for fc in data.lead_time_forecasts.values()]).swapaxes(0, 1)
+        x = transformer.transform(y_pred)  # (T, H, Q)
+
+        quantiles = torch.tensor(data.quantiles, dtype=model.dtype, device=self.device)
+        # Run calibrator
+        x_t = torch.from_numpy(x).to(dtype=model.dtype, device=self.device)
+        with torch.no_grad():
+            adj_trans = model(x_t, quantiles).quantile_preds.cpu().numpy()  # (T, H, Q)
+
+        # Inverse transform
+        adj = transformer.inverse_transform(adj_trans)
+
+        # Fallback for horizons with no training data
+        adj = adj.copy()
+        invalid_h_np = invalid_h.cpu().numpy()
+        adj[:, invalid_h_np, :] = y_pred[:, invalid_h_np, :]
+
+        # Write predictions back
+        ts_fc = data.model_copy(deep=True)
+        for h, fc in ts_fc.lead_time_forecasts.items():
+            fc.predictions = torch.tensor(adj[:, h - 1, :])
+        return ts_fc
