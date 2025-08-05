@@ -486,14 +486,14 @@ class Chronos(AbstractPredictor):
         model_inits = {"full": init_full, "last_layer": init_last, "LoRA": init_lora}
 
         # here a warmup is not necessary, since output neurons are already trained
-        if self.pipeline.inner_model.config.chronos_config["prediction_length"] >= self.prediction_length:
+        if self.pipeline.inner_model.config.chronos_config["prediction_length"] >= self.prediction_length and self.finetuning_warmup_new_neurons:
             self.finetuning_warmup_new_neurons = False
             logging.info(
                 "Warmup training of new output neurons gets disabled since prediction length fo %s is not greater than the configured prediction length of %s",
                 self.prediction_length,
                 self.pipeline.inner_model.config.chronos_config["prediction_length"],
             )
-        # Ensure config.prediction_length is up-to-date for T5 (no head resize)
+        # update prediction length
         if self.finetuning_adjust_pretrained_prediction_length:
             prediction_length = self.prediction_length
             self.pipeline.model.config.prediction_length = prediction_length  # TODO: check if I need this
