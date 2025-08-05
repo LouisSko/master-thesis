@@ -561,7 +561,9 @@ class ForecastingPipeline(AbstractPipeline):
 
         elif auto_determine_val_set:
             logging.info("Inferring validation set from training data...")
-            val_window_step = val_window_step or self.predictor.prediction_length
+            if val_window_step is None or val_window_step < self.predictor.prediction_length:
+                val_window_step = self.predictor.prediction_length
+                logging.info("Setting val_window_step to prediction_length: %s", val_window_step)
             data_train, data_val, val_windows = self.auto_split_train_val(data_train, val_window_step, max_val_windows=max_val_windows)
         logging.info("Training data from %s to %s", data_train.index.get_level_values("timestamp").min(), data_train.index.get_level_values("timestamp").max())
 
@@ -643,7 +645,7 @@ class ForecastingPipeline(AbstractPipeline):
             max_calibration_samples,
         )
         idx_split = max_calibration_samples * window_step
-        logging.info("Automatically determined window_step: %s", window_step) 
+        logging.info("Automatically determined window_step: %s", window_step)
         # Prepare truncated calibration set from the tail of data_test
         other_data = data_test.slice_by_timestep(end_index=-idx_split)
         data_test = data_test.slice_by_timestep(start_index=-idx_split)
