@@ -655,7 +655,7 @@ class ForecastingPipeline(AbstractPipeline):
         else:
             data_previous_context = other_data
 
-        if len(data_previous_context) is 0:
+        if len(data_previous_context) == 0:
             data_previous_context = None
 
         return self.generate_forecasts(
