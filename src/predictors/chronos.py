@@ -32,6 +32,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 set_global_seed()
 
 
+LR_WARMUP = 1e-4
+LR_FT = 1e-5  # chronos bolt tiny
+# LR_FT = 1e-6 # chronos bolt small
+
+
 class ChronosLoraConfig(LoraConfig):
     """Chronos t5 lora configuration"""
 
@@ -55,7 +60,7 @@ class BaseTimeSeriesDataset(Dataset):
 
     def __init__(
         self,
-        data: TimeSeriesDataFrame,
+        data: "TimeSeriesDataFrame",
         context_length: int,
         window_step: int = 1,
         skip_first_n_samples: Optional[Dict[int, int]] = None,
@@ -69,9 +74,9 @@ class BaseTimeSeriesDataset(Dataset):
         assert context_length > 0, "context_length must be greater than 0"
         assert window_step > 0, "window_step must be greater than 0"
 
-        self.context_length = context_length
-        self.window_step = window_step
-        self.return_target = return_target
+        self.context_length = int(context_length)
+        self.window_step = int(window_step)
+        self.return_target = bool(return_target)
         self.prediction_length = prediction_length
         self.tokenizer = tokenizer
         self.skip_first_n_samples = skip_first_n_samples
@@ -81,82 +86,105 @@ class BaseTimeSeriesDataset(Dataset):
         if self.return_target and self.prediction_length is None:
             raise ValueError("prediction_length must be set when return_target=True")
 
+        # Ensure (item_id, timestamp) ordering is contiguous by item.
+        # This guarantees each item occupies a single block so we can
+        # slice with indptr instead of per-item masks.
         if self.return_target:
             data = data.sort_values([ITEMID, TIMESTAMP])
 
-        self.item_ids = pd.factorize(data.index.get_level_values(ITEMID))[0]
+        # Factorized item ids
+        item_id_values = data.index.get_level_values(ITEMID)
+        self.item_ids, _ = pd.factorize(item_id_values, sort=False)
+        self.item_ids = self.item_ids.astype(np.int32, copy=False)
+
+        # Store timestamps and target as flat arrays.
         self.timestamps = data.index.get_level_values(TIMESTAMP)
+        self.target_array = data[target_column].to_numpy(np.float32)
 
-        cum_sizes = data.num_timesteps_per_item().cumsum()
-        self.indptr = np.append(0, cum_sizes)
-        self.item_ids_mask = {item_id: self.item_ids == item_id for item_id in np.unique(self.item_ids)}
-        target_array = data[target_column].to_numpy(np.float32)
-        self.item_series = {item_id: target_array[mask] for item_id, mask in self.item_ids_mask.items()}
+        # Build CSR-like pointers so that item k occupies:
+        # [indptr[k] : indptr[k+1]) in the flat arrays.
+        counts_per_item = data.num_timesteps_per_item().to_numpy()
+        self.indptr = np.empty(len(counts_per_item) + 1, dtype=np.int64)
+        self.indptr[0] = 0
+        np.cumsum(counts_per_item, out=self.indptr[1:])
 
-        self._compute_valid_indices(skip_first_n_samples)
-
+        # Precompute valid indices depending on mode
         if self.rolling:
-            self._compute_valid_indices(skip_first_n_samples)
+            self._compute_valid_indices(self.skip_first_n_samples)
         else:
             # only last observation per series
             self.valid_idx = self._compute_latest_indices()
 
-    def _compute_latest_indices(self):
-        indices = []
-        for item_id in np.unique(self.item_ids):
-            mask = self.item_ids_mask[item_id]
-            idx = np.where(mask)[0][-1]
-            indices.append(idx)
-        return np.array(indices)
+        if self.valid_idx.dtype != np.int32:
+            self.valid_idx = self.valid_idx.astype(np.int32, copy=False)
 
-    def _compute_valid_indices(self, skip_first_n_samples):
-        self.valid_idx = []
-        self.ranges = {}  # item_id -> (start, stop)
+    def _series_bounds(self, item_id: int):
+        """Return [start, end) bounds (global indices) for an item."""
+        # item_id here refers to the factorized id in [0..n_items-1]
+        s = int(self.indptr[item_id])
+        e = int(self.indptr[item_id + 1])
+        return s, e
 
-        pointer = 0
-        for item_id in np.unique(self.item_ids):
-            mask = self.item_ids == item_id
-            series_len = mask.sum()
-            offset = self.indptr[item_id]
-            start = skip_first_n_samples.get(item_id, 0) if skip_first_n_samples else 0
-            end = series_len - 1
+    def _compute_latest_indices(self) -> np.ndarray:
+        """Return the last (global) index for each item (shape: [n_items])."""
+        n_items = len(self.indptr) - 1
+        latest = np.empty(n_items, dtype=np.int32)
+        for item_id in range(n_items):
+            s, e = self._series_bounds(item_id)
+            latest[item_id] = e - 1
+        return latest
 
-            # TODO: keep this or not
-            # if self.return_target:
-            #     end -= self.prediction_length
+    def _compute_valid_indices(self, skip_first_n_samples: Optional[Dict[int, int]]):
+        """
+        Compute all valid positions (global indices) we will create windows for,
+        stepping every `window_step`. If skip_last_n_samples is provided, the
+        last positions are trimmed accordingly.
+        """
+        n_items = len(self.indptr) - 1
+        idxs = []
+
+        for item_id in range(n_items):
+            s, e = self._series_bounds(item_id)
+            series_len = e - s
+            start = (skip_first_n_samples or {}).get(item_id, 0)
+            end = series_len - 1  # inclusive
 
             if self.skip_last_n_samples:
                 end -= self.skip_last_n_samples.get(item_id, 0)
 
-            idxs = offset + np.arange(start, end + 1, self.window_step)
-            self.valid_idx.extend(idxs)
+            if end < start:
+                continue
 
-            self.ranges[item_id] = (pointer, pointer + len(idxs))
-            pointer += len(idxs)
+            # Map local [start..end] to global indices [s+start .. s+end]
+            local = np.arange(start, end + 1, self.window_step, dtype=np.int32)
+            if local.size:
+                idxs.append(s + local)
 
-        self.valid_idx = np.array(self.valid_idx, dtype=int)
+        if idxs:
+            self.valid_idx = np.concatenate(idxs, axis=0)
+        else:
+            self.valid_idx = np.empty(0, dtype=np.int32)
 
     def __len__(self):
-        """Returns the total number of time steps in the dataset."""
-        return len(self.valid_idx)
+        return int(self.valid_idx.size)
 
     def _get_context(self, a: np.ndarray, pad_value=np.nan):
-        """Extracts the context window, padding with a specified value if needed."""
+        """Extract the last `context_length` values with left pad if needed."""
         a = a[-self.context_length :]
         pad_size = self.context_length - len(a)
         if pad_size > 0:
-            pad = np.full(shape=(pad_size,), fill_value=pad_value)
-            a = np.concatenate((pad, a))
-        return a.astype(np.float32)
+            pad = np.full(shape=(pad_size,), fill_value=pad_value, dtype=np.float32)
+            a = np.concatenate((pad, a.astype(np.float32, copy=False)))
+        return a.astype(np.float32, copy=False)
 
     def _get_future_targets(self, a: np.ndarray, pad_value=np.nan):
-        """Extracts the future targets, padding with a specified value if needed."""
+        """Take first `prediction_length` values with right pad if needed."""
         a = a[: self.prediction_length]
         pad_size = self.prediction_length - len(a)
         if pad_size > 0:
-            pad = np.full(shape=(pad_size,), fill_value=pad_value)
-            a = np.concatenate((a, pad))
-        return a.astype(np.float32)
+            pad = np.full(shape=(pad_size,), fill_value=pad_value, dtype=np.float32)
+            a = np.concatenate((a.astype(np.float32, copy=False), pad))
+        return a.astype(np.float32, copy=False)
 
     def to_chronos_format(self, context: np.ndarray, future_target: np.ndarray):
         input_ids, attention_mask, scale = self.tokenizer.context_input_transform(torch.tensor(context).unsqueeze(0))
@@ -173,18 +201,20 @@ class BaseTimeSeriesDataset(Dataset):
         return {"context": context, "target": future_target}
 
     def __getitem__(self, idx) -> np.ndarray:
-        """Retrieves the context window for the given index within its corresponding time series."""
-
-        real_idx = self.valid_idx[idx]
-        item_id = self.item_ids[real_idx]
-        item_start = self.indptr[item_id]
+        """Return context (and optionally labels) for the global position `idx`."""
+        real_idx = int(self.valid_idx[idx])
+        item_id = int(self.item_ids[real_idx])
+        item_start, item_end = self._series_bounds(item_id)
         pos_in_series = real_idx - item_start
 
-        # get series of corresponding item id
-        series = self.item_series[item_id]
+        # Slice the series for this item as a view
+        series = self.target_array[item_start:item_end]
+
+        # Build context up to current position (inclusive)
         context = self._get_context(series[: pos_in_series + 1])
 
         if self.return_target:
+            # Future targets start AFTER the current position
             future_target = self._get_future_targets(series[pos_in_series + 1 :])
 
             if self.tokenizer is not None:
@@ -193,6 +223,67 @@ class BaseTimeSeriesDataset(Dataset):
                 return self.to_chronos_bolt_format(context, future_target)
 
         return context
+
+    @property
+    def pred_index(self):
+        # MultiIndex of (item_id, timestamp) for each position in valid_idx
+        return pd.MultiIndex.from_arrays(
+            [self.item_ids[self.valid_idx], self.timestamps[self.valid_idx]],
+            names=[ITEMID, TIMESTAMP],
+        )
+
+    @property
+    def valid_item_ids(self):
+        return self.item_ids[self.valid_idx]
+
+    @property
+    def valid_timestamps(self):
+        try:
+            return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
+        except (ValueError, TypeError):
+            # Fallback: let pandas infer (e.g., already Timestamps)
+            return pd.to_datetime(self.timestamps[self.valid_idx])
+
+
+    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: "TimeSeriesDataFrame"):
+        """
+        Assemble a ForecastCollection given model predictions.
+
+        predictions: Tensor [N x num_quantiles x prediction_length]
+        """
+        from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast  # local import to avoid cycles
+
+        freq = pd.tseries.frequencies.to_offset(output_data.freq)
+
+        preds_df = pd.DataFrame(
+            {
+                "item_id": self.item_ids[self.valid_idx],
+                "timestamp": self.timestamps[self.valid_idx],
+            }
+        )
+
+        assert len(preds_df) == predictions.shape[0], "Row count mismatch between preds and indices."
+
+        forecasts = {}
+        for item_id, group in preds_df.groupby("item_id", sort=False):
+            s, e = group.index.min(), group.index.max() + 1
+            preds = predictions[s:e]
+            timestamps = group["timestamp"]
+
+            mask = output_data.loc[[item_id]].index.get_level_values(TIMESTAMP).isin(timestamps)
+
+            lt_forecasts = {lt: HorizonForecast(lead_time=lt, predictions=preds[..., lt - 1]) for lt in lead_times}
+
+            forecasts[item_id] = TimeSeriesForecast(
+                item_id=item_id,
+                lead_time_forecasts=lt_forecasts,
+                data=output_data.loc[[item_id]],
+                freq=freq,
+                forecast_mask=mask,
+            )
+
+        return ForecastCollection(item_ids=forecasts)
+
 
     @property
     def pred_index(self):
@@ -312,7 +403,6 @@ class Chronos(AbstractPredictor):
         self.finetuning_hp_search_trials = finetuning_hp_search_trials
         self.lora = False
         self.finetuning_warmup_new_neurons = finetuning_warmup_new_neurons
-
         self.quantiles = np.arange(0.1, 1, 0.1).round(1)
         # if self.prediction_length > 64:
         #    logging.error("Maximum supported lead time is 64 currently.")
@@ -336,6 +426,10 @@ class Chronos(AbstractPredictor):
             self.sampling = False
         else:
             raise ValueError("Unknown base_model_name: %s. Either needs to contain 'chronos-t5' or 'chronos-bolt'.", self.base_model_name)
+
+    @property
+    def model_internal_prediction_length(self) -> int:
+        return self.prediction_length if self.finetuning_adjust_pretrained_prediction_length else self.pipeline.model.config.prediction_length
 
     def _pipeline_init(self, pretrained_model_name_or_path: Union[str, Path]) -> BaseChronosPipeline:
         """Creates and returns an instance of the Chronos pipeline."""
@@ -522,13 +616,13 @@ class Chronos(AbstractPredictor):
             logging.info(">>> Warm-up: training only new output neurons …")
 
             fine_tune(
-                model_init=init_new_rows,
+                model_init=init_last,
                 ds_train=ds_train,
                 ds_val=ds_val,
                 output_dir=warm_dir,
                 hp_tuning=self.finetuning_hp_search,
                 n_trials=self.finetuning_hp_search_trials,
-                specific_train_kwargs={"learning_rate": 1e-4, "num_train_epochs": 20, "warmup_ratio": 0.0, "lr_scheduler_type": "constant"},
+                specific_train_kwargs={"learning_rate": LR_WARMUP, "num_train_epochs": 20, "warmup_ratio": 0.0, "lr_scheduler_type": "constant"},
             )
             warm_ckpt = warm_dir / "fine-tuned-ckpt"
             logging.info("Warm-up finished, best checkpoint at %s", warm_ckpt)
@@ -688,7 +782,7 @@ class Chronos(AbstractPredictor):
             rolling=rolling,
         )
 
-        dl = DataLoader(ds, batch_size=128)
+        dl = DataLoader(ds, batch_size=512, num_workers=4)
 
         forecasts = []
 
@@ -830,14 +924,6 @@ def fine_tune(
         Whether to perform hyperparameter tuning using Optuna.
     n_trials : Optional[int], default=None
         Number of Optuna trials. Required if `hp_tuning` is True.
-    context_length : int, default=2048
-        Context length the model sees during training.
-    prediction_length : Optional[int], default=None
-        Number of timestamps the model is required to predict in the future.
-    train_window_step : int, default=1.
-        The stride on the train dataset. Recommended to use all data (=1) since early stopping is used.
-    val_window_step : int, default=None.
-        The stride on the validation dataset. Defaults to prediction length.
     specific_train_kwargs : Dict, default={},
         Additional training arguments to include. Override default values
     """
@@ -1029,7 +1115,7 @@ def build_train_args(
         per_device_train_batch_size=bs,
         per_device_eval_batch_size=bs,
         auto_find_batch_size=True,
-        learning_rate=1e-5,
+        learning_rate=LR_FT,
         lr_scheduler_type="linear",
         warmup_ratio=0.0,
         weight_decay=0.0,
