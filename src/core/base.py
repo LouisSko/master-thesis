@@ -185,6 +185,12 @@ class AbstractPredictor(ABC):
     ) -> ForecastCollection:
         pass
 
+    @property
+    @abstractmethod
+    def model_internal_prediction_length(self) -> int:
+        """Length of prediction that the model can produce internally."""
+        pass
+    
     def _merge_data(
         self,
         data: TimeSeriesDataFrame,
