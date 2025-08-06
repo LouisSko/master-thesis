@@ -154,11 +154,8 @@ class LinearQRCalibrator(AbstractPytorchCalibrator):
         target: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
     ) -> ModelOutput:
-        x_transformed = torch.arcsinh(x)  # safe for all real values
-        y = self.a.unsqueeze(0) + self.b.unsqueeze(0) * x_transformed
-        x_adj = torch.sinh(y)
 
-        # x_adj = self.a.unsqueeze(0) + self.b.unsqueeze(0) * x
+        x_adj = self.a.unsqueeze(0) + self.b.unsqueeze(0) * x
         loss = smoothed_pinball_loss(target, x_adj, quantiles, mask) if target is not None else None
 
         return ModelOutput(loss=loss, quantile_preds=x_adj)
