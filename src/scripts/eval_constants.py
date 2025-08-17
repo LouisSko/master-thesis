@@ -6,14 +6,14 @@ from src.postprocessors.eqc import PostprocessorEQC
 from pathlib import Path
 from src.data.preprocessor import read_smard_data, read_exchange_rates_data
 
-lead_times = np.arange(1, 192 + 1).tolist()
+lead_times = np.arange(1, (64*10) + 1).tolist()
 quantiles = np.round(np.arange(0.1, 1, 0.1), 1).tolist()
 test_start_date = pd.Timestamp("2023-01-01")
 postprocessors = [PostprocessorEQC, PostprocessorFastQR, PostprocessorMLE]
 postprocessor_kwargs = [
-    {"transformer": None, "n_jobs": 4, "name": "PP_Offset"},
-    {"transformer": None, "n_jobs": 4, "name": "PP_QuantReg"},
-    {"transformer": None, "n_jobs": 4, "name": "PP_Gauss"},
+    {"n_jobs": 2, "name": "PP_Offset"},
+    {"n_jobs": 2, "name": "PP_QuantReg"},
+    {"n_jobs": 2, "name": "PP_Gauss"},
     ]
 
 # whether to evaluate using auto calibration or not
