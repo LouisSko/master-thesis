@@ -643,6 +643,8 @@ class Chronos(AbstractPredictor):
 
         logging.info("Prediction length will be set to %s during training.", prediction_length)
 
+        tokenizer = getattr(self.pipeline, "tokenizer", None)
+
         # 1) create datasets
         ds_train, ds_val = self._create_datasets(
             data_train=data_train,
@@ -651,7 +653,7 @@ class Chronos(AbstractPredictor):
             prediction_length=prediction_length,
             train_window_step=train_window_step,
             val_window_step=val_window_step,
-            tokenizer=getattr(self.pipeline, "tokenizer", None),
+            tokenizer=tokenizer,
         )
 
         # perform (multi stage) training
@@ -670,6 +672,10 @@ class Chronos(AbstractPredictor):
                 train_kwargs.update({"learning_rate": 1e-4, "num_train_epochs": 10})
             else:  # full / last_layer
                 train_kwargs.update({"learning_rate": LR_FT, "num_train_epochs": 10})
+
+            # add specific train args for chronos bolt
+            if tokenizer is None:
+                train_kwargs.update({"label_names": [TARGET]})
 
             # model_init = lambda source=model_ckpt, mode=stage: _build_model(source, mode)
             model_init = lambda: _build_model(model_ckpt, stage)
@@ -910,9 +916,6 @@ class BestCheckpointCallback(TrainerCallback):
         state.best_model_checkpoint = ckpt_dir
 
     def on_evaluate(self, args, state: TrainerState, control: TrainerControl, metrics, **kwargs):
-        # ensure our metric is present
-        if self.metric_name not in metrics:
-            return
 
         current = metrics[self.metric_name]
         prev_best = self.best_metric
@@ -950,7 +953,6 @@ def fine_tune(
     output_dir: Union[str, Path] = Path("./models/test-finetuning/"),
     hp_tuning: bool = False,
     n_trials: Optional[int] = None,
-    tokenizer: Optional["ChronosTokenizer"] = None,
     specific_train_kwargs: Dict = {},
 ):
     """
@@ -986,10 +988,6 @@ def fine_tune(
     # Create separate directory for final training
     final_training_path = output_dir / "training"
     final_training_path.mkdir(exist_ok=True, parents=True)
-
-    # add specific train args for chronos bolt
-    if tokenizer is None:
-        specific_train_kwargs.update({"label_names": [TARGET]})
 
     # Create args for final training with best hyperparameters
     fine_tune_trainer_kwargs = build_train_args(
