@@ -117,10 +117,7 @@ class BaseTimeSeriesDataset(Dataset):
         if self.valid_idx.dtype != np.int32:
             self.valid_idx = self.valid_idx.astype(np.int32, copy=False)
 
-        self.series_dict = {
-            item_id: self.target_array[start:end]
-            for item_id, (start, end) in enumerate(zip(self.indptr[:-1], self.indptr[1:]))
-        }
+        self.series_dict = {item_id: self.target_array[start:end] for item_id, (start, end) in enumerate(zip(self.indptr[:-1], self.indptr[1:]))}
 
     def _series_bounds(self, item_id: int):
         """Return [start, end) bounds (global indices) for an item."""
@@ -674,7 +671,7 @@ class Chronos(AbstractPredictor):
             else:  # full / last_layer
                 train_kwargs.update({"learning_rate": LR_FT, "num_train_epochs": 10})
 
-            #model_init = lambda source=model_ckpt, mode=stage: _build_model(source, mode)
+            # model_init = lambda source=model_ckpt, mode=stage: _build_model(source, mode)
             model_init = lambda: _build_model(model_ckpt, stage)
 
             fine_tune(
@@ -826,7 +823,12 @@ class Chronos(AbstractPredictor):
             rolling=rolling,
         )
 
-        dl = DataLoader(ds, batch_size=512, num_workers=4)
+        if isinstance(self.pipeline, ChronosPipeline):
+            batch_size = 128
+        elif isinstance(self.pipeline, ChronosBoltPipeline):
+            batch_size = 512
+
+        dl = DataLoader(ds, batch_size=batch_size, num_workers=4)
 
         forecasts = []
 
