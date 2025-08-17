@@ -325,17 +325,6 @@ class SeasonalNaive(AbstractPredictor):
 
         return ForecastCollection(item_ids=ts_forecast)
 
-    def _fit(
-        self,
-        data_train: TimeSeriesDataFrame,
-        data_val: Optional[TimeSeriesDataFrame] = None,
-        **kwargs,
-    ) -> None:
-        """
-        No fitting required. This predictor uses only historical patterns at predict time.
-        """
-        logging.info("SeasonalNaive: No fit step; provide data in predict() function.")
-
 
 class RollingQuantilePredictor(AbstractPredictor):
     """
