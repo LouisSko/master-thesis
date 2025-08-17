@@ -613,9 +613,11 @@ class ForecastingPipeline(AbstractPipeline):
             Dictionary mapping the predictor name to its generated ForecastCollection.
         """
 
-        results = self.auto_generate_calibration_config(data_test=data_test, data_previous_context=data_previous_context, max_calibration_samples=max_calibration_samples)
+        data_test, data_previous_context, rolling, window_step = self.auto_generate_calibration_config(
+            data_test=data_test, data_previous_context=data_previous_context, max_calibration_samples=max_calibration_samples
+        )
 
-        return self.generate_forecasts(**results)
+        return self.generate_forecasts(data_test, data_previous_context, rolling, window_step)
 
     def auto_generate_calibration_config(
         self,
