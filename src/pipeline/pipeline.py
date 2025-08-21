@@ -863,7 +863,7 @@ class ForecastingPipeline(AbstractPipeline):
                 calibration_data = pd.concat([data_train, data_val]).sort_index()
                 context_data = None
             elif calibration_based_on == "auto":
-                calibration_data, context_data, rolling, calibration_window_step = self.auto_generate_calibration_config(data_train, max_calibration_samples=100000)
+                calibration_data, context_data, rolling, calibration_window_step = self.auto_generate_calibration_config(data_train, max_calibration_samples=500)
             else:
                 raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
 
