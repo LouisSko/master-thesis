@@ -188,9 +188,9 @@ class AbstractPredictor(ABC):
     @property
     @abstractmethod
     def model_internal_prediction_length(self) -> int:
-        """Length of prediction that the model can produce internally."""
+        """Length of prediction that the model can produce internally. Only used for training purposes."""
         pass
-    
+
     def _merge_data(
         self,
         data: TimeSeriesDataFrame,
@@ -297,7 +297,7 @@ class AbstractPostprocessor(ABC):
         else:
             # wrap the Parallel call in the tqdm_joblib context manager
             with tqdm_joblib(tqdm(desc=f"Fitting {self.name} for each time series (item)", total=len(item_ids))):
-                results = Parallel(n_jobs=self.n_jobs, backend="loky")(
+                results = Parallel(n_jobs=self.n_jobs, backend="threading")(
                     delayed(_fit_one)(
                         iid,
                         data.get_time_series_forecast(iid),

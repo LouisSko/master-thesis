@@ -66,7 +66,12 @@ class TiRex(AbstractPredictor):
         except requests.RequestException as e:
             logging.error("TiRex microservice is not reachable. Make sure it is running.")
             raise RuntimeError("TiRex microservice unavailable.") from e
-
+    
+    @property
+    def model_internal_prediction_length(self) -> int:
+        """Length of prediction that the model can produce internally. Only used for training purposes."""
+        return self.prediction_length
+    
     def _fit(
         self,
         data_train: TimeSeriesDataFrame,
