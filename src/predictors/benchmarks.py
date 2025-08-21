@@ -143,6 +143,11 @@ class SeasonalNaive(AbstractPredictor):
 
         return history
 
+    @property
+    def model_internal_prediction_length(self) -> int:
+        """Length of prediction that the model can produce internally. Only used for training purposes."""
+        return self.prediction_length
+
     def _fit(
         self,
         data_train: TimeSeriesDataFrame,
@@ -558,6 +563,12 @@ class RandomWalk(AbstractPredictor):
         super().__init__(lead_times=lead_times, name=name, output_dir=output_dir)
         self.quantiles = quantiles
         self.sd_yd = {}  # standard deviation for each item id
+        self.shift_c = {}  # shift used to make data positive
+
+    @property
+    def model_internal_prediction_length(self) -> int:
+        """Length of prediction that the model can produce internally. Only used for training purposes."""
+        return self.prediction_length
 
     def _fit(
         self,
@@ -577,15 +588,23 @@ class RandomWalk(AbstractPredictor):
         """
 
         for id in data_train.item_ids:
-            data_sub = data_train.loc[[id]][TARGET].values
+            y_raw = data_train.loc[[id]][TARGET].values.astype(float).copy()
 
-            if any(data_sub <= 0):
-                raise ValueError("This model can only be used with strictly positive time series.")
+            # compute item-wise shift to ensure positivity
+            eps = 1e-8
+            m = np.nanmin(y_raw)  # handle NaNs if present
+            c = 0.0
+            if not np.isnan(m) and m <= 0:
+                c = -m + eps  # this makes min(y_raw + c) = eps > 0
+                logging.warning(f"Item {id}: non-positive values found; shifting by c={c:.6g} to make series positive.")
+                y_raw = y_raw + c
 
-            y = np.log(data_sub)
+            y = np.log(y_raw)
             y_diff = np.diff(y)
             y_diff = y_diff[~np.isnan(y_diff)]
-            self.sd_yd[id] = np.std(y_diff)
+
+            self.sd_yd[id] = float(np.nanstd(y_diff))
+            self.shift_c[id] = c  # store the shift for prediction
 
         logging.info("RandomWalk estimated standard deviation for each time series from training data.")
 
@@ -634,10 +653,19 @@ class RandomWalk(AbstractPredictor):
             data_sub = data.loc[[item_id]]
 
             timestamps = data_sub.index.get_level_values("timestamp")
-            targets = data_sub["target"]
-            if (targets <= 0).any():
+
+            T = self.shift_c.get(item_id, 0.0)  # same shift learned in fit
+
+            y_raw = data_sub["target"].astype(float).values
+            y_pos = y_raw + T  # apply the shift again
+            if (y_pos <= 0).any():
+                # this should not happen unless new data is below training min
+                mn = np.nanmin(y_pos)
                 logging.warning(f"Item {item_id} in `data` contains non-positive values; log is undefined.")
-            log_targets = np.log(targets).values
+                # raise ValueError(f"Item {item_id}: shifted values still non-positive (min={mn}); "
+                #                 "training-time shift may be insufficient for this window.")
+
+            log_targets = np.log(y_pos)
 
             q_fc_matrix = np.sqrt(h_steps) @ z * self.sd_yd[item_id]
 
@@ -662,7 +690,7 @@ class RandomWalk(AbstractPredictor):
                 else:
                     q_fc_y.append(q_fc_matrix + log_y)
 
-            q_fc_y = np.exp(np.stack(q_fc_y, axis=0))
+            q_fc_y = np.exp(np.stack(q_fc_y, axis=0)) - T  # remove the shift to return to original scale
 
             lt_forcast: Dict[int, HorizonForecast] = {}
 
@@ -723,6 +751,11 @@ class OnlineRandomWalk(AbstractPredictor):
         self.last_n_samples = last_n_samples
         self.sd_yd = {}  # standard deviation for each item id
 
+    @property
+    def model_internal_prediction_length(self) -> int:
+        """Length of prediction that the model can produce internally. Only used for training purposes."""
+        return self.prediction_length
+
     def _fit(
         self,
         data_train: TimeSeriesDataFrame,
@@ -765,6 +798,7 @@ class OnlineRandomWalk(AbstractPredictor):
                 context_data_sub = previous_context_data.loc[[item_id]].copy()
                 data_merged, skip_first = self._merge_data(data_sub, context_data_sub, len(context_data_sub))
                 skip_first = skip_first[item_id]
+
             else:
                 data_merged = data_sub
                 skip_first = 0
@@ -778,10 +812,12 @@ class OnlineRandomWalk(AbstractPredictor):
             log_targets_merged = np.log(targets_merged + epsilon)
             log_returns = log_targets_merged.diff()
             if self.last_n_samples is None:
-                rolling_std = log_returns.expanding(min_periods=2).std()[skip_first:]
+                rolling_std = log_returns.expanding(min_periods=2).std()
             else:
-                rolling_std = log_returns.rolling(window=self.last_n_samples, min_periods=2).std()[skip_first:]
-            log_targets = log_targets_merged[skip_first:]
+                rolling_std = log_returns.rolling(window=self.last_n_samples, min_periods=2).std()
+
+            log_targets = log_targets_merged.iloc[skip_first:]
+            rolling_std = rolling_std.iloc[skip_first:]
 
             # Decide forecast time steps
             if rolling:
