@@ -123,11 +123,11 @@ class PostprocessorEQC(AbstractPostprocessor):
         y_pred = np.stack([fc.predictions for fc in data.lead_time_forecasts.values()]).swapaxes(0, 1)
 
         # 3. Broadcast addition – NumPy handles (H, Q) vs (T, H, Q).
-        y_adj = torch.tensor(y_pred + params)  # (T, H, Q)
+        y_adj = y_pred + params  # (T, H, Q)
 
         # 4. Wrap adjusted array back into container.
         ts_fc = data.model_copy(deep=True)
         for h, fc in ts_fc.lead_time_forecasts.items():
-            fc.predictions = y_adj[:, h - 1, :]
+            fc.predictions = torch.tensor(y_adj[:, h - 1, :])
 
         return ts_fc

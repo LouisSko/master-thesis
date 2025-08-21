@@ -33,8 +33,7 @@ set_global_seed()
 
 
 LR_WARMUP = 1e-4
-LR_FT = 1e-5  # chronos bolt tiny
-# LR_FT = 1e-6 # chronos bolt small
+LR_FT = 1e-5
 
 
 class ChronosLoraConfig(LoraConfig):
@@ -117,6 +116,8 @@ class BaseTimeSeriesDataset(Dataset):
 
         if self.valid_idx.dtype != np.int32:
             self.valid_idx = self.valid_idx.astype(np.int32, copy=False)
+
+        self.series_dict = {item_id: self.target_array[start:end] for item_id, (start, end) in enumerate(zip(self.indptr[:-1], self.indptr[1:]))}
 
     def _series_bounds(self, item_id: int):
         """Return [start, end) bounds (global indices) for an item."""
@@ -208,8 +209,9 @@ class BaseTimeSeriesDataset(Dataset):
         pos_in_series = real_idx - item_start
 
         # Slice the series for this item as a view
-        series = self.target_array[item_start:item_end]
+        # series = self.target_array[item_start:item_end]
 
+        series = self.series_dict[item_id]
         # Build context up to current position (inclusive)
         context = self._get_context(series[: pos_in_series + 1])
 
@@ -243,7 +245,6 @@ class BaseTimeSeriesDataset(Dataset):
         except (ValueError, TypeError):
             # Fallback: let pandas infer (e.g., already Timestamps)
             return pd.to_datetime(self.timestamps[self.valid_idx])
-
 
     def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: "TimeSeriesDataFrame"):
         """
@@ -283,7 +284,6 @@ class BaseTimeSeriesDataset(Dataset):
             )
 
         return ForecastCollection(item_ids=forecasts)
-
 
     @property
     def pred_index(self):
@@ -350,7 +350,7 @@ class Chronos(AbstractPredictor):
     pretrained_model_name_or_path : str or Path, optional
         Name or path of the chronos model. Defaults to "amazon/chronos-bolt-tiny".
     device_map : str, optional
-        Device to run inference on, e.g., "cpu", "cuda", or "mps". Defaults to "mps".
+        Device to run inference on, e.g., "cpu", "cuda", or "mps". Defaults to "cpu".
     context_length : int, optional
         Number of timesteps used as context for prediction. Defaults to 2048.
     lead_times : Optional[Iterable[int]], default=None
@@ -358,8 +358,8 @@ class Chronos(AbstractPredictor):
         If None, defaults to [1, 2, 3].
     sampling: bool, optional
         Whether to sample multiple trajectories. Defaults to False.
-    finetuning_type : {"full", "last_layer", "LoRA"}, optional
-        Type of fine-tuning to apply. Defaults to "full".
+    finetuning_schedule : Optional[List[Literal["last_layer", "full", "lora"]]], optional
+        Fine-tuning stages to apply. Defaults to None. If None, a reasonable default is selected.
     finetuning_adjust_pretrained_prediction_length : bool, defaults to True
         Whether the original pretrained prediction length should be overwritten.
         This involves changing the number of output neurons in case of chronos-bolt. Defaults to true.
@@ -379,15 +379,15 @@ class Chronos(AbstractPredictor):
     def __init__(
         self,
         pretrained_model_name_or_path: Union[str, Path] = "amazon/chronos-bolt-tiny",
-        device_map: str = "mps",
+        device_map: str = "cpu",
         context_length: int = 2048,
         lead_times: Optional[Iterable[int]] = None,
         sampling: bool = False,
-        finetuning_type: Literal["full", "last_layer", "LoRA"] = "full",
+        finetuning_schedule: Optional[List[Literal["last_layer", "full", "lora"]]] = None,
         finetuning_adjust_pretrained_prediction_length: bool = True,
+        finetuning_warmup_new_neurons: bool = True,
         finetuning_hp_search: Optional[bool] = False,
         finetuning_hp_search_trials: Optional[int] = 10,
-        finetuning_warmup_new_neurons: bool = True,
         output_dir: Optional[Path] = Path("./models/"),
         name: Optional[str] = None,
     ) -> None:
@@ -397,18 +397,15 @@ class Chronos(AbstractPredictor):
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.base_model_name = None
         self.device_map = device_map
-        self.finetuning_type = finetuning_type
         self.finetuning_adjust_pretrained_prediction_length = finetuning_adjust_pretrained_prediction_length
         self.finetuning_hp_search = finetuning_hp_search
         self.finetuning_hp_search_trials = finetuning_hp_search_trials
         self.lora = False
-        self.finetuning_warmup_new_neurons = finetuning_warmup_new_neurons
         self.quantiles = np.arange(0.1, 1, 0.1).round(1)
-        # if self.prediction_length > 64:
-        #    logging.error("Maximum supported lead time is 64 currently.")
-        #    raise ValueError("Maximum supported lead time is 64 currently.")
 
         self.pipeline = self._pipeline_init(self.pretrained_model_name_or_path)
+
+        self.finetuning_schedule = self._determine_finetuning_schedule(finetuning_schedule, finetuning_warmup_new_neurons)
 
         if isinstance(self.pipeline, ChronosBoltPipeline):
             if self.context_length > 2048:
@@ -429,7 +426,7 @@ class Chronos(AbstractPredictor):
 
     @property
     def model_internal_prediction_length(self) -> int:
-        return self.prediction_length if self.finetuning_adjust_pretrained_prediction_length else self.pipeline.model.config.prediction_length
+        return self.prediction_length if self.finetuning_adjust_pretrained_prediction_length else self.pipeline.inner_model.config.chronos_config["prediction_length"]
 
     def _pipeline_init(self, pretrained_model_name_or_path: Union[str, Path]) -> BaseChronosPipeline:
         """Creates and returns an instance of the Chronos pipeline."""
@@ -438,7 +435,7 @@ class Chronos(AbstractPredictor):
 
         # add lora weights if adapter_config exists in directory
         if (Path(pretrained_model_name_or_path) / "adapter_config.json").exists():
-            logging.info(f"Found LoRA configuration in {pretrained_model_name_or_path}.")
+            logging.info(f"Found lora configuration in {pretrained_model_name_or_path}.")
 
             with open(Path(pretrained_model_name_or_path) / "adapter_config.json", "r") as f:
                 adapter_config: dict = json.load(f)
@@ -453,15 +450,15 @@ class Chronos(AbstractPredictor):
             # TODO: this is a hack. it produces a warning, that there is an unexpected keyword argument. Should get fixed
             if isinstance(pipeline, ChronosPipeline):
                 pred_length = adapter_config.get("prediction_length")
-                logging.info("Setting prediction length of chronos-t5 to %s based on LoRA configuration.", pred_length)
+                logging.info("Setting prediction length of chronos-t5 to %s based on lora configuration.", pred_length)
                 pipeline.inner_model.config.prediction_length = pred_length
                 pipeline.inner_model.config.chronos_config["prediction_length"] = pred_length
                 pipeline.model.config.prediction_length = pred_length
 
-            # Apply LoRA adapters
+            # Apply lora adapters
             pipeline.inner_model = PeftModel.from_pretrained(pipeline.inner_model, pretrained_model_name_or_path, is_trainable=False)
             self.lora = True
-            logging.info("LoRA adapters applied successfully.")
+            logging.info("lora adapters applied successfully.")
 
         else:
             logging.info("Initializing Chronos pipeline with model: %s", pretrained_model_name_or_path)
@@ -470,6 +467,78 @@ class Chronos(AbstractPredictor):
         # pipeline = resize_chronos_bolt_output_layers(pipeline, self.prediction_length)
 
         return pipeline
+
+    def _determine_finetuning_schedule(
+        self,
+        finetuning_schedule: Optional[List[str]],
+        warmup_new_neurons: bool,
+    ) -> List[str]:
+        """
+        Build and validate the fine-tuning schedule.
+
+        Rules
+        -----
+        1. Default when the user gives `None`
+        • if we resize the head → ["new_neurons", "last_layer", "full"]
+        • else → ["last_layer", "full"]
+
+        2. Always lowercase stage names.
+
+        3. When warm-up is requested (Chronos-Bolt + resize + flag):
+        prepend "new_neurons" unless it’s already present.
+
+        4. Drop duplicate consecutive stages.
+
+        5. "lora" may appear *once* and only as the final stage.
+
+        Returns
+        -------
+        List[str]
+            A validated list of stage names.
+        """
+        # 1) defaults
+        if finetuning_schedule is None:
+            if self.finetuning_adjust_pretrained_prediction_length:
+                finetuning_schedule = ["new_neurons", "last_layer", "full"]
+                logging.info("Using default schedule because head is resized.")
+            else:
+                finetuning_schedule = ["last_layer", "full"]
+                logging.info("Using default schedule without head resize.")
+
+        # copy & normalise
+        schedule = [str(s).lower() for s in list(finetuning_schedule)]
+
+        # 3) warm-up prepend
+        needs_warmup = (
+            isinstance(self.pipeline, ChronosBoltPipeline) and self.finetuning_adjust_pretrained_prediction_length and warmup_new_neurons and "new_neurons" not in schedule
+        )
+        # here a warmup is not necessary, since output neurons are already trained
+        if needs_warmup and (self.pipeline.inner_model.config.chronos_config["prediction_length"] >= self.prediction_length):
+            needs_warmup = False
+            logging.info(
+                "Warmup training of new output neurons gets disabled since prediction length of %s is not greater than the configured prediction length of %s",
+                self.prediction_length,
+                self.pipeline.inner_model.config.chronos_config["prediction_length"],
+            )
+
+        if needs_warmup:
+            schedule.insert(0, "new_neurons")
+            logging.info("Prepended 'new_neurons' for warm-up of new output rows.")
+
+        # 4) de-duplicate
+        deduped = []
+        for s in schedule:
+            if not deduped or s != deduped[-1]:
+                deduped.append(s)
+        if len(deduped) < len(schedule):
+            logging.info("Removed duplicate consecutive stages.")
+
+        # 5) validate lora placement
+        if "lora" in deduped and deduped[-1] != "lora":
+            raise ValueError("lora adapters must be the *final* stage in finetuning_schedule.")
+
+        logging.info("Final fine-tuning schedule: %s", " → ".join(deduped))
+        return deduped
 
     def _fit(
         self,
@@ -500,7 +569,7 @@ class Chronos(AbstractPredictor):
 
         def _build_model(
             source: Union[str, Path],  # name or ckpt dir
-            mode: Literal["full", "last_layer", "LoRA", "new_rows"],
+            mode: Literal["full", "last_layer", "lora", "new_neurons"],
         ) -> PreTrainedModel:
             """Helper that creates a pipeline (optionally from a checkpoint) and prepares it according to `mode`"""
 
@@ -512,7 +581,7 @@ class Chronos(AbstractPredictor):
 
             # resize head if requested (only for Bolt)
             if isinstance(pipe, ChronosBoltPipeline) and self.finetuning_adjust_pretrained_prediction_length:
-                unfreeze_new = mode == "new_rows"
+                unfreeze_new = mode == "new_neurons"
                 pipe = resize_chronos_bolt_output_layers(pipe, self.prediction_length, unfreeze_new_neurons=unfreeze_new)
 
             # unfreeze
@@ -530,13 +599,13 @@ class Chronos(AbstractPredictor):
                         for p in m.parameters():
                             p.requires_grad = True
 
-            elif mode == "new_rows":
+            elif mode == "new_neurons":
                 # nothing extra to do – resize_chronos_bolt_output_layers already
                 # attached the gradient mask and left requires_grad=True
                 pass
 
-            elif mode == "LoRA":
-                # attach LoRA adapters (all original params stay frozen)
+            elif mode == "lora":
+                # attach lora adapters (all original params stay frozen)
                 if isinstance(pipe, ChronosPipeline):
                     lcfg = ChronosLoraConfig(
                         prediction_length=self.prediction_length,
@@ -564,29 +633,6 @@ class Chronos(AbstractPredictor):
             print_trainable_params(pipe.inner_model)
             return pipe.inner_model
 
-        # convenience wrappers for Trainer
-        def init_full():
-            return _build_model(self.pretrained_model_name_or_path, "full")
-
-        def init_last():
-            return _build_model(self.pretrained_model_name_or_path, "last_layer")
-
-        def init_lora():
-            return _build_model(self.pretrained_model_name_or_path, "LoRA")
-
-        def init_new_rows():
-            return _build_model(self.pretrained_model_name_or_path, "new_rows")
-
-        model_inits = {"full": init_full, "last_layer": init_last, "LoRA": init_lora}
-
-        # here a warmup is not necessary, since output neurons are already trained
-        if self.pipeline.inner_model.config.chronos_config["prediction_length"] >= self.prediction_length and self.finetuning_warmup_new_neurons:
-            self.finetuning_warmup_new_neurons = False
-            logging.info(
-                "Warmup training of new output neurons gets disabled since prediction length fo %s is not greater than the configured prediction length of %s",
-                self.prediction_length,
-                self.pipeline.inner_model.config.chronos_config["prediction_length"],
-            )
         # update prediction length
         if self.finetuning_adjust_pretrained_prediction_length:
             prediction_length = self.prediction_length
@@ -597,6 +643,8 @@ class Chronos(AbstractPredictor):
 
         logging.info("Prediction length will be set to %s during training.", prediction_length)
 
+        tokenizer = getattr(self.pipeline, "tokenizer", None)
+
         # 1) create datasets
         ds_train, ds_val = self._create_datasets(
             data_train=data_train,
@@ -605,50 +653,49 @@ class Chronos(AbstractPredictor):
             prediction_length=prediction_length,
             train_window_step=train_window_step,
             val_window_step=val_window_step,
-            tokenizer=getattr(self.pipeline, "tokenizer", None),
+            tokenizer=tokenizer,
         )
 
-        # 1) optional warm-up
-        warm_ckpt: Optional[Path] = None
+        # perform (multi stage) training
+        model_ckpt = self.pretrained_model_name_or_path
+        for i, stage in enumerate(self.finetuning_schedule):
+            logging.info(">>> Stage %d: %s", i, stage)
 
-        if isinstance(self.pipeline, ChronosBoltPipeline) and self.finetuning_adjust_pretrained_prediction_length and self.finetuning_warmup_new_neurons:
-            warm_dir = self.output_dir / "warmup-new-neurons"
-            logging.info(">>> Warm-up: training only new output neurons …")
+            out_dir = self.output_dir / f"stage_{i}_{stage}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            # pick LR/epochs
+            train_kwargs = {}
+            if stage in {"new_neurons"}:
+                train_kwargs.update({"learning_rate": LR_WARMUP, "num_train_epochs": 20})
+            elif stage in {"lora"}:
+                train_kwargs.update({"learning_rate": 1e-4, "num_train_epochs": 10})
+            else:  # full / last_layer
+                train_kwargs.update({"learning_rate": LR_FT, "num_train_epochs": 10})
+
+            # add specific train args for chronos bolt
+            if tokenizer is None:
+                train_kwargs.update({"label_names": [TARGET]})
+
+            # model_init = lambda source=model_ckpt, mode=stage: _build_model(source, mode)
+            model_init = lambda: _build_model(model_ckpt, stage)
 
             fine_tune(
-                model_init=init_last,
+                model_init=model_init,
                 ds_train=ds_train,
                 ds_val=ds_val,
-                output_dir=warm_dir,
+                output_dir=out_dir,
                 hp_tuning=self.finetuning_hp_search,
                 n_trials=self.finetuning_hp_search_trials,
-                specific_train_kwargs={"learning_rate": LR_WARMUP, "num_train_epochs": 20, "warmup_ratio": 0.0, "lr_scheduler_type": "constant"},
+                specific_train_kwargs=train_kwargs,
             )
-            warm_ckpt = warm_dir / "fine-tuned-ckpt"
-            logging.info("Warm-up finished, best checkpoint at %s", warm_ckpt)
 
-        # 2) main fine-tune
-        final_dir = self.output_dir / f"finetuned-{self.finetuning_type}"
-        logging.info(">>> Main fine-tuning (%s) …", self.finetuning_type)
-
-        if warm_ckpt is not None:
-            model_init_main = lambda: _build_model(warm_ckpt, self.finetuning_type)
-        else:
-            model_init_main = model_inits[self.finetuning_type]
-
-        fine_tune(
-            model_init=model_init_main,
-            ds_train=ds_train,
-            ds_val=ds_val,
-            output_dir=final_dir,
-            hp_tuning=self.finetuning_hp_search,
-            n_trials=self.finetuning_hp_search_trials,
-            specific_train_kwargs={"num_train_epochs": 10},
-        )
+            # next stage starts from this checkpoint
+            model_ckpt = out_dir / "fine-tuned-ckpt"
 
         # reload final model
-        self.pipeline = self._pipeline_init(final_dir / "fine-tuned-ckpt")
-        logging.info("Two-stage fine-tuning complete – model reloaded.")
+        self.pipeline = self._pipeline_init(model_ckpt)
+        logging.info("Fine-tuning completed – model reloaded.")
 
     def _create_datasets(
         self,
@@ -782,7 +829,12 @@ class Chronos(AbstractPredictor):
             rolling=rolling,
         )
 
-        dl = DataLoader(ds, batch_size=512, num_workers=4)
+        if isinstance(self.pipeline, ChronosPipeline):
+            batch_size = 128
+        elif isinstance(self.pipeline, ChronosBoltPipeline):
+            batch_size = 512
+
+        dl = DataLoader(ds, batch_size=batch_size, num_workers=4)
 
         forecasts = []
 
@@ -864,9 +916,6 @@ class BestCheckpointCallback(TrainerCallback):
         state.best_model_checkpoint = ckpt_dir
 
     def on_evaluate(self, args, state: TrainerState, control: TrainerControl, metrics, **kwargs):
-        # ensure our metric is present
-        if self.metric_name not in metrics:
-            return
 
         current = metrics[self.metric_name]
         prev_best = self.best_metric
@@ -904,7 +953,6 @@ def fine_tune(
     output_dir: Union[str, Path] = Path("./models/test-finetuning/"),
     hp_tuning: bool = False,
     n_trials: Optional[int] = None,
-    tokenizer: Optional["ChronosTokenizer"] = None,
     specific_train_kwargs: Dict = {},
 ):
     """
@@ -940,10 +988,6 @@ def fine_tune(
     # Create separate directory for final training
     final_training_path = output_dir / "training"
     final_training_path.mkdir(exist_ok=True, parents=True)
-
-    # add specific train args for chronos bolt
-    if tokenizer is None:
-        specific_train_kwargs.update({"label_names": [TARGET]})
 
     # Create args for final training with best hyperparameters
     fine_tune_trainer_kwargs = build_train_args(

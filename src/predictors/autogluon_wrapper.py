@@ -46,15 +46,14 @@ class GluonTSDataset(BaseTimeSeriesDataset):
             - 'start' : float
                 The timestamp (POSIX float) of the first observation in the window.
         """
-        real_idx = self.valid_idx[idx]
-        item_id = self.item_ids[real_idx]
-        timestamp = self.timestamps[real_idx].timestamp()
-        item_start = self.indptr[item_id]
+        real_idx = int(self.valid_idx[idx])
+        item_id = int(self.item_ids[real_idx])
+        item_start, item_end = self._series_bounds(item_id)
         pos_in_series = real_idx - item_start
-
-        series = self.target_array[self.item_ids_mask[item_id]]
+        timestamp = self.timestamps[real_idx].timestamp()
         # get series of corresponding item id
-        series = self.target_array[self.item_ids_mask[item_id]]
+        series = self.series_dict[item_id]
+        # Build context up to current position (inclusive)
         context = self._get_context(series[: pos_in_series + 1])
 
         return {"item_id": item_id, "target": context, "start": timestamp}
@@ -113,6 +112,11 @@ class AutogluonPredictor(AbstractPredictor):
         self.predict_kwargs = predict_kwargs or {}
         self.context_length = context_length
         self.freq = freq
+
+    @property
+    def model_internal_prediction_length(self) -> int:
+        """Length of prediction that the model can produce internally. Only used for training purposes."""
+        return self.prediction_length
 
     def _init_model(self):
 
