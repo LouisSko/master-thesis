@@ -240,64 +240,6 @@ class BaseTimeSeriesDataset(Dataset):
 
     @property
     def valid_timestamps(self):
-        try:
-            return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
-        except (ValueError, TypeError):
-            # Fallback: let pandas infer (e.g., already Timestamps)
-            return pd.to_datetime(self.timestamps[self.valid_idx])
-
-    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: "TimeSeriesDataFrame"):
-        """
-        Assemble a ForecastCollection given model predictions.
-
-        predictions: Tensor [N x num_quantiles x prediction_length]
-        """
-        from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast  # local import to avoid cycles
-
-        freq = pd.tseries.frequencies.to_offset(output_data.freq)
-
-        preds_df = pd.DataFrame(
-            {
-                "item_id": self.item_ids[self.valid_idx],
-                "timestamp": self.timestamps[self.valid_idx],
-            }
-        )
-
-        assert len(preds_df) == predictions.shape[0], "Row count mismatch between preds and indices."
-
-        forecasts = {}
-        for item_id, group in preds_df.groupby("item_id", sort=False):
-            s, e = group.index.min(), group.index.max() + 1
-            preds = predictions[s:e]
-            timestamps = group["timestamp"]
-
-            mask = output_data.loc[[item_id]].index.get_level_values(TIMESTAMP).isin(timestamps)
-
-            lt_forecasts = {lt: HorizonForecast(lead_time=lt, predictions=preds[..., lt - 1]) for lt in lead_times}
-
-            forecasts[item_id] = TimeSeriesForecast(
-                item_id=item_id,
-                lead_time_forecasts=lt_forecasts,
-                data=output_data.loc[[item_id]],
-                freq=freq,
-                forecast_mask=mask,
-            )
-
-        return ForecastCollection(item_ids=forecasts)
-
-    @property
-    def pred_index(self):
-        return pd.MultiIndex.from_arrays(
-            [self.item_ids[self.valid_idx], self.timestamps[self.valid_idx]],
-            names=[ITEMID, TIMESTAMP],
-        )
-
-    @property
-    def valid_item_ids(self):
-        return self.item_ids[self.valid_idx]
-
-    @property
-    def valid_timestamps(self):
         return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
 
     def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame) -> ForecastCollection:
