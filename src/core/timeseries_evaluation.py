@@ -1065,31 +1065,110 @@ class ForecastCollection(BaseModel):
         return _done(out)
 
     def get_empirical_coverage_rates(
-        self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, decimal_places: Optional[int] = None
+        self,
+        item_ids: Optional[List[int]] = None,
+        lead_times: Optional[List[int]] = None,
+        mean_lead_times: bool = False,
+        decimal_places: Optional[int] = None,
+        average_type: Literal["macro", "micro"] = "micro",
     ) -> pd.DataFrame:
+        """
+        Compute empirical coverage rates for specified item IDs and lead times.
 
+        This method calculates how well the predicted quantile intervals cover the true values
+        across different forecasting horizons and time series items. Coverage rates indicate
+        the percentage of true values that fall within the predicted intervals.
+
+        Two averaging strategies are available:
+        - **Macro averaging**: Individually computes coverage rates for each item-lead time combination, 
+          then optionally averages across items and optionally averages across lead times
+        - **Micro averaging**: Directly averages the binary hit/miss indicators across all
+          item-lead time combinations simultaneously.
+
+        Parameters
+        ----------
+        item_ids : Optional[List[int]], default=None
+            List of item IDs to include in the computation. If None, all available item IDs are used.
+        lead_times : Optional[List[int]], default=None
+            List of lead times (forecasting horizons) to include. If None, all available lead times are used.
+        mean_lead_times : bool, default=False
+            If True, averages coverage rates across all lead times, returning a single column.
+            If False, returns separate coverage rates for each lead time.
+        decimal_places : Optional[int], default=None
+            Number of decimal places to round the final coverage rates. If None, no rounding is applied.
+        average_type : Literal["macro", "micro"], default="micro"
+            Averaging strategy:
+            - "macro": First average across items for each lead time, then optionally across lead times
+            - "micro": Average across all item-lead time combinations simultaneously
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with empirical coverage rates:
+            - Rows: quantile levels (e.g., 0.1, 0.5, 0.9)
+            - Columns: lead times (if mean_lead_times=False) or single averaged column
+            - Values: coverage rates between 0 and 1, where 1.0 means perfect coverage
+        """
+        # Use all available item IDs and lead times if none specified
         item_ids = item_ids or self.get_item_ids()
         if lead_times is None:
             lead_times = self.get_lead_times()
 
-        rates = {lt: [] for lt in lead_times}
+        if average_type == "macro":
+            # Macro averaging: compute coverage rates per item-lead time, then average across items
+            # Initialize dictionary to collect coverage rates for each lead time
+            rates = {lt: [] for lt in lead_times}
 
-        for item_id in item_ids:
-            item = self.get_time_series_forecast(item_id)
-            for lt in lead_times:
-                if lt in item.lead_time_forecasts:
-                    val = item.get_empirical_coverage_rates(lt)
-                    rates[lt].append(pd.Series(val))
+            # Iterate through each item and collect coverage rates
+            for item_id in item_ids:
+                item = self.get_time_series_forecast(item_id)
+                for lt in lead_times:
+                    if lt in item.lead_time_forecasts:
+                        # Get coverage rates for this specific item and lead time
+                        val = item.get_empirical_coverage_rates(lt)
+                        rates[lt].append(pd.Series(val))
 
-        coverage_df = pd.DataFrame({lt: pd.concat(rates[lt], axis=1).mean(axis=1) for lt in lead_times if rates[lt]})
+            # Average coverage rates across items for each lead time
+            # Only include lead times that have data
+            coverage_df = pd.DataFrame({lt: pd.concat(rates[lt], axis=1).mean(axis=1) for lt in lead_times if rates[lt]})
 
-        if mean_lead_times:
-            coverage_df = pd.DataFrame(coverage_df.mean(axis=1), columns=["Empirical coverage rates averaged over all lead times"])
+            if mean_lead_times:
+                # Average across all lead times to get a single coverage rate per quantile
+                coverage_df = pd.DataFrame(coverage_df.mean(axis=1), columns=["Empirical coverage rates averaged over all lead times"])
+            else:
+                # Add a column with the average across lead times while keeping individual lead time columns
+                coverage_df.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_df.mean(axis=1)
+
         else:
-            coverage_df.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_df.mean(axis=1)
+            # Micro averaging: directly average binary hit/miss indicators across all combinations
+            # Collect all hit/miss indicators across items and lead times
+            hits_all = []
+            for item_id in item_ids:
+                item = self.get_time_series_forecast(item_id)
+                y_pred, y_true = item.get_aligned_predictions_and_targets()
+                # Load binary indicators: True if true value falls within predicted interval
+                hits = item._load_or_build_pack("hits", item._build_hits_pack)  # Shape: (T, H, Q) where T=time, H=horizon, Q=quantiles
+                # Select only the specified lead times (convert to 0-based indices)
+                lead_time_indices = np.array(lead_times) - 1
+                hits = hits[:, lead_time_indices, :]
+                hits_all.append(hits)
 
+            # Stack all items together for simultaneous averaging
+            hits_all = np.vstack(hits_all)  # Shape: (N*T, H, Q) where N=number of items
+
+            if mean_lead_times:
+                # Average across both time steps and lead times, keeping quantiles
+                cv = np.nanmean(hits_all, axis=(0, 1))  # Average over time and lead times
+                coverage_df = pd.DataFrame(cv, columns=[f"({min(lead_times)}-{max(lead_times)})"], index=item.quantiles)
+            else:
+                # Average only across time steps, keeping lead times and quantiles separate
+                cv = np.nanmean(hits_all, axis=0)  # Average over time only
+                coverage_df = pd.DataFrame(cv, columns=lead_times, index=item.quantiles)
+
+        # Set index name for clarity
         coverage_df.index.name = "quantile"
 
+        # Apply rounding if requested
         if decimal_places:
             return coverage_df.round(decimal_places)
         return coverage_df
