@@ -1,7 +1,7 @@
 """This Module provides utilities for probabilistic time series forecasting, including data structures, evaluation, and visualization tools."""
 
 import os
-from typing import List, Optional, Dict, Tuple, Union, Callable
+from typing import List, Optional, Dict, Tuple, Union, Callable, Literal
 import pandas as pd
 import torch
 import numpy as np
@@ -16,6 +16,7 @@ import matplotlib.dates as mdates
 import matplotlib as mpl
 from pathlib import Path
 import joblib
+from joblib import Parallel, delayed
 from tqdm_joblib import tqdm_joblib
 import logging
 from tqdm import tqdm
@@ -28,7 +29,6 @@ import json
 from hashlib import blake2b
 import tempfile
 
-from typing import Literal
 
 PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
 PREDICTIONS_FILENAME = "predictions.joblib"
@@ -275,7 +275,9 @@ class TimeSeriesForecast(BaseModel):
         """
         y_pred, y_true = self.get_aligned_predictions_and_targets()  # (T,H,Q), (T,H)
         # broadcast y_true (T,H,1) against y_pred (T,H,Q)
-        hits = y_true[..., None] <= y_pred  # (T,H,Q), dtype=bool
+        hits = (y_true[..., None] <= y_pred).astype(float)  # (T,H,Q), dtype=bool
+        mask = np.isnan(y_true)
+        hits[mask] = np.nan
         return hits
 
     def get_lead_times(self) -> List[int]:
@@ -457,6 +459,7 @@ class TimeSeriesForecast(BaseModel):
 
         hits_pack = self._load_or_build_pack("hits", self._build_hits_pack)  # (T,H,Q), bool
         hits = hits_pack[:, col, :].astype(float)  # (T, Q)
+
         cov = np.nanmean(hits, axis=0)  # (Q,)
 
         return {q: float(c) for q, c in zip(self.quantiles, cov)}
@@ -745,6 +748,138 @@ class ForecastCollection(BaseModel):
         for item_id in self.get_item_ids():
             preds.append(self.get_time_series_forecast(item_id).to_QuantileForecast(idx))
         return preds
+
+    def plot_forecasts(
+        self,
+        start: Optional[Union[int, pd.Timestamp]] = None,
+        context_length: int = 100,
+        max_historical_context: int = 1000,
+        max_forecast_steps: Optional[int] = None,
+        figsize: Optional[Tuple[int, int]] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        max_cols: int = 3,
+        sharex: bool = False,
+        sharey: bool = False,
+        show_xy_labels: bool = True,
+        show_legend: bool = True,
+        title_prefix: str = "",
+        legend_position: str = "below",
+        font_sizes: Optional[Dict[str, int]] = None,
+        tight_margins: bool = False,
+        margin_padding: float = 0.05,
+        show_history_overview: bool = False,
+        history_overview_height: float = 0.3,
+        save_path: Optional[str] = None,
+        dpi: int = 300,
+    ) -> None:
+        """
+        Plot all TimeSeriesForecast objects in this collection using the plot_multiple_forecasts function.
+
+        Parameters
+        ----------
+        start : Optional[Union[int, pd.Timestamp]]
+            - If int: Index into the time series to start the forecast from.
+            - If pd.Timestamp: Timestamp to start the forecast from. Must exist in the time series index.
+            - If None: Defaults to the last available index for each forecast.
+
+        context_length : int
+            Number of historical data points to include in the plot before the forecast start.
+
+        max_historical_context : int
+            Maximum number of historical data points to show in the history overview subplot.
+            This controls how far back the overview looks from the forecast start point.
+            Default: 1000. Use larger values for longer historical context.
+
+        max_forecast_steps : Optional[int]
+            Maximum number of forecast steps to plot. If None, plots all available forecast steps.
+            If specified, limits the number of future time steps displayed in the forecast plots.
+            Useful for focusing on short-term predictions or reducing visual clutter.
+
+        figsize : Optional[Tuple[int, int]]
+            Figure size as (width, height). If provided, overrides width and height parameters.
+
+        width : Optional[int]
+            Figure width in inches. Used only if figsize is None.
+
+        height : Optional[int]
+            Figure height in inches. Used only if figsize is None.
+
+        max_cols : int
+            Maximum number of columns in the grid layout.
+
+        sharex : bool
+            Whether to share x-axis across subplots.
+
+        sharey : bool
+            Whether to share y-axis across subplots.
+
+        show_xy_labels : bool
+            Whether to show x- and y-labels on subplots.
+
+        show_legend : bool
+            Whether to show a single legend.
+
+        title_prefix : str
+            Prefix for subplot titles.
+
+        legend_position : str
+            Position of the legend: "below" (below the plots) or "right" (to the right of the plots).
+
+        font_sizes : Optional[Dict[str, int]]
+            Dictionary controlling font sizes for various text elements. If None, default sizes are used.
+            Available keys: 'title', 'subtitle', 'xlabel', 'ylabel', 'legend', 'tick_labels', 'grid_labels'.
+
+        tight_margins : bool
+            Whether to use tight margins around the data. If True, reduces padding between plot borders and data.
+
+        margin_padding : float
+            Padding factor for margins when tight_margins=True. Smaller values (0.01-0.05) create tighter plots,
+            larger values (0.1-0.2) create more spacious plots. Default: 0.05.
+
+        show_history_overview : bool
+            Whether to add a full-length historical overview subplot at the top showing the complete time series.
+            This provides context for the zoomed-in forecast plots below.
+
+        history_overview_height : float
+            Height ratio for the history overview subplot relative to the total figure height.
+            Range: 0.1 to 0.5. Default: 0.3 (30% of total height).
+
+        save_path : Optional[str]
+            If provided, save the plot to this path.
+
+        dpi : int
+            DPI for saving the plot.
+
+        Returns
+        -------
+        None
+            Displays a matplotlib figure with subplots showing forecasts for each TimeSeriesForecast object.
+        """
+        plot_multiple_forecasts(
+            forecasts_dict=self.item_ids,
+            start=start,
+            context_length=context_length,
+            max_historical_context=max_historical_context,
+            max_forecast_steps=max_forecast_steps,
+            figsize=figsize,
+            width=width,
+            height=height,
+            max_cols=max_cols,
+            sharex=sharex,
+            sharey=sharey,
+            show_xy_labels=show_xy_labels,
+            show_legend=show_legend,
+            title_prefix=title_prefix,
+            legend_position=legend_position,
+            font_sizes=font_sizes,
+            tight_margins=tight_margins,
+            margin_padding=margin_padding,
+            show_history_overview=show_history_overview,
+            history_overview_height=history_overview_height,
+            save_path=save_path,
+            dpi=dpi,
+        )
 
     def get_crps(
         self,
@@ -1293,13 +1428,6 @@ def get_empirical_coverage_rates(
     return scores
 
 
-from pathlib import Path
-from typing import Dict, Union, Optional, List, Tuple
-import joblib
-import pandas as pd
-from joblib import Parallel, delayed
-
-
 def _compute_crps_one(
     key: str,
     value: Union["ForecastCollection", str, Path],
@@ -1512,10 +1640,10 @@ def plot_crps_across_lead_times(
         predictions = {key: value for key, value in predictions.items() if key in selected_keys}
 
     df = get_crps_scores(predictions, item_ids=item_ids, lead_times=lead_times, reference_predictions=reference_predictions, add_mean=False, decimal_places=None)
-
+    df.rename(columns={reference_predictions: f"{reference_predictions} (Reference)"}, inplace=True)
     ax = df.plot(figsize=(12, 8), legend=True)
-    ax.set_title("CRPS Scores Comparison across Forecasting Lead Times", fontsize=16)
-    ax.set_ylabel("CRPS Score", fontsize=14)
+    # ax.set_title("CRPS Scores Comparison across Forecasting Lead Times", fontsize=16)
+    ax.set_ylabel("Relative Mean CRPS Score", fontsize=14)
     ax.set_xlabel("Lead Times", fontsize=14)
     ax.grid(True, axis="y", linestyle="--", alpha=0.7)
 
@@ -1750,7 +1878,7 @@ def get_pairwise_diebold_mariano_test(
         keys = list(scores_dict.keys())
     if top_k:
         keys = keys[:top_k] if sort else sorted(scores_dict, key=lambda k: scores_dict[k].mean())[:top_k]
-    print(keys)
+
     if reduce_matrix:
         dm_tval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
         dm_pval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
@@ -2312,11 +2440,11 @@ def plot_reliability_diagram(
     # Defaults
     if font_sizes is None:
         font_sizes = {}
-    label_fs = font_sizes.get("labels", 12)
-    tick_fs = font_sizes.get("ticks", 10)
-    title_fs = font_sizes.get("titles", 14)
-    legend_fs = font_sizes.get("legend", 12)
-    sup_fs = font_sizes.get("suptitle", 16)
+    label_fs = font_sizes.get("labels", 18)
+    tick_fs = font_sizes.get("ticks", 18)
+    title_fs = font_sizes.get("titles", 18)
+    legend_fs = font_sizes.get("legend", 18)
+    sup_fs = font_sizes.get("suptitle", 24)
 
     # ------------------------------------------------------------------
     # Utilities (DRY helpers)
@@ -2459,7 +2587,7 @@ def plot_reliability_diagram(
             fig_height = rows * 8
             figsize = (fig_width, fig_height)
 
-        fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False)
+        fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False, constrained_layout=True)
         axes = axes.ravel()
 
         legend_handles = {}
@@ -2528,7 +2656,7 @@ def plot_reliability_diagram(
             fontsize=legend_fs,
         )
 
-        fig.tight_layout(rect=(0, 0, 1, 1))
+        fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1, hspace=0.2, wspace=0.2)
         plt.show()
         return
 
@@ -2902,9 +3030,18 @@ def load_execution_times(
             continue
 
         exec_dict: dict = cfg.get("execution_time")
+
         if exec_dict is None:
             logging.warning(f"`execution_time` missing in `{filepath}`; skipping.")
             continue
+
+        # Optionally. could also be done relative / update total_train_time
+        if "execution_time_predictor" in exec_dict:
+            predictor_results = exec_dict["execution_time_predictor"]
+            exec_dict["predictor_train_time"] = predictor_results["predictor_train_time"]
+            exec_dict["predictor_inference_time"] = predictor_results["predictor_inference_time"]
+            # if predictor_results["predictor_train_time"] is not None:
+            #    exec_dict["total_train_time"] += predictor_results["predictor_train_time"]
 
         exec_dict.pop("execution_time_predictor", None)
         exec_dict.pop("postprocessor_name", None)
@@ -2936,3 +3073,386 @@ def load_execution_times(
         df[num_cols] = df[num_cols].round(round_ndigits)
 
     return df
+
+
+def plot_multiple_forecasts(
+    forecasts_dict: Dict[int, "TimeSeriesForecast"],
+    start: Optional[Union[int, pd.Timestamp]] = None,
+    context_length: int = 100,
+    max_historical_context: int = 1000,
+    max_forecast_steps: Optional[int] = None,
+    complete_data: Optional["TimeSeriesDataFrame"] = None,  # kept for API compatibility
+    figsize: Optional[Tuple[int, int]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    max_cols: int = 3,
+    sharex: bool = False,
+    sharey: bool = False,
+    show_xy_labels: bool = True,
+    show_legend: bool = True,
+    title_prefix: str = "",
+    legend_position: str = "below",  # "below" or "right"
+    font_sizes: Optional[Dict[str, int]] = None,
+    tight_margins: bool = False,
+    margin_padding: float = 0.05,
+    show_history_overview: bool = False,
+    history_overview_height: float = 0.3,
+    save_path: Optional[str] = None,
+    dpi: int = 300,
+) -> None:
+    """
+    Plot multiple TimeSeriesForecast objects in a grid layout with subplots.
+
+    Parameters
+    ----------
+    forecasts_dict : Dict[int, TimeSeriesForecast]
+        Dictionary mapping item_id to TimeSeriesForecast objects.
+
+    start : Optional[Union[int, pd.Timestamp]]
+        - If int: Index into the time series to start the forecast from.
+        - If pd.Timestamp: Timestamp to start the forecast from. Must exist in the time series index.
+        - If None: Defaults to the last available index for each forecast.
+
+    context_length : int
+        Number of historical data points to include in the plot before the forecast start.
+
+    max_historical_context : int
+        Maximum number of historical data points to show in the history overview subplot.
+        This controls how far back the overview looks from the forecast start point.
+        Default: 1000. Use larger values for longer historical context.
+
+    max_forecast_steps : Optional[int]
+        Maximum number of forecast steps to plot. If None, plots all available forecast steps.
+        If specified, limits the number of future time steps displayed in the forecast plots.
+        Useful for focusing on short-term predictions or reducing visual clutter.
+
+    figsize : Optional[Tuple[int, int]]
+        Figure size as (width, height). If provided, overrides width and height parameters.
+
+    width : Optional[int]
+        Figure width in inches. Used only if figsize is None.
+
+    height : Optional[int]
+        Figure height in inches. Used only if figsize is None.
+
+    max_cols : int
+        Maximum number of columns in the grid layout.
+
+    sharex : bool
+        Whether to share x-axis across subplots.
+
+    sharey : bool
+        Whether to share y-axis across subplots.
+
+    show_xy_labels : bool
+        Whether to show x- and y-labels on subplots.
+
+    show_legend : bool
+        Whether to show legends on subplots.
+
+    title_prefix : str
+        Prefix for subplot titles.
+
+    legend_position : str
+        Position of the legend: "below" (below the plots) or "right" (to the right of the plots).
+
+    font_sizes : Optional[Dict[str, int]]
+        Dictionary controlling font sizes for various text elements. If None, default sizes are used.
+        Available keys: 'title', 'subtitle', 'xlabel', 'ylabel', 'legend', 'tick_labels', 'grid_labels'.
+        Example: {'title': 16, 'subtitle': 14, 'xlabel': 12, 'ylabel': 12, 'legend': 10, 'tick_labels': 10}.
+
+    tight_margins : bool
+        Whether to use tight margins around the data. If True, reduces padding between plot borders and data.
+
+    margin_padding : float
+        Padding factor for margins when tight_margins=True. Smaller values (0.01-0.05) create tighter plots,
+        larger values (0.1-0.2) create more spacious plots. Default: 0.05.
+
+    show_history_overview : bool
+        Whether to add a full-length historical overview subplot at the top showing the complete time series.
+        This provides context for the zoomed-in forecast plots below.
+
+    history_overview_height : float
+        Height ratio for the history overview subplot relative to the total figure height.
+        Range: 0.1 to 0.5. Default: 0.3 (30% of total height).
+
+    save_path : Optional[str]
+        If provided, save the plot to this path.
+
+    dpi : int
+        DPI for saving the plot.
+
+    Returns
+    -------
+    None
+        Displays a matplotlib figure with subplots showing forecasts for each TimeSeriesForecast object.
+    """
+
+    if isinstance(start, int):
+        start: pd.Timestamp = next(iter(forecasts_dict.values())).data.index.get_level_values(TIMESTAMP)[start]
+
+    if not forecasts_dict:
+        raise ValueError("forecasts_dict cannot be empty")
+
+    # ---------- small helpers (reduce repetition) ----------
+
+    def merge_font_sizes(user_fs: Optional[Dict[str, int]]) -> Dict[str, int]:
+        base = {"title": 16, "subtitle": 14, "xlabel": 12, "ylabel": 12, "legend": 10, "tick_labels": 10, "grid_labels": 10}
+        if user_fs:
+            base.update(user_fs)
+        return base
+
+    def grid_dims(n: int, max_cols_: int) -> Tuple[int, int]:
+        cols = min(max_cols_, n)
+        rows = (n + cols - 1) // cols
+        return rows, cols
+
+    def resolve_figsize(n_rows: int, n_cols: int, add_overview: bool) -> Tuple[int, int]:
+        """Return (fig_w, fig_h) applying width/height/figsize rules once."""
+        if figsize is not None:
+            w, h = figsize
+        else:
+            w = width if width is not None else 6 * n_cols
+            h = height if height is not None else 4 * n_rows
+        if add_overview:
+            h = h * (1 + history_overview_height)
+        return (w, h)
+
+    def determine_start_index(start_, data_length: int, timestamps=None) -> int:
+        if isinstance(start_, pd.Timestamp):
+            if timestamps is not None and start_ in timestamps:
+                return timestamps.get_loc(start_)
+            return data_length - 1
+        if isinstance(start_, int):
+            if start_ < 0:
+                return start_ % data_length
+            return min(start_, data_length - 1)
+        return data_length - 1
+
+    def corrected_start(timestamps: pd.Index, forecast_mask) -> Tuple[pd.Timestamp, int]:
+        """Return (corrected_start_date, corrected_start_idx) using global `start`."""
+        start_idx = determine_start_index(start, len(timestamps), timestamps)
+        start_date = timestamps[start_idx]
+        forecasted_ts = timestamps[forecast_mask]
+        start_idx_preds = forecasted_ts.get_indexer([start_date], method="backfill")[0]
+        corr_start_date = forecasted_ts[start_idx_preds]
+        corr_start_idx = timestamps.get_indexer([corr_start_date])[0]
+        return corr_start_date, corr_start_idx
+
+    def format_axes(ax: plt.Axes, fs: Dict[str, int], show_labels: bool, tight: bool):
+        if show_labels:
+            ax.set_xlabel("Date", fontsize=fs["xlabel"])
+            ax.set_ylabel("Value", fontsize=fs["ylabel"])
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right", fontsize=fs["tick_labels"])
+        plt.setp(ax.yaxis.get_majorticklabels(), fontsize=fs["tick_labels"])
+        if tight:
+            ax.margins(y=margin_padding, x=0)
+
+    def add_prediction_intervals(
+        ax: plt.Axes,
+        selected_predictions: pd.DataFrame,
+        intervals: List[Tuple[float, float]],
+        base_color: str = "orange",
+        lw_outer: float = 0.1,
+        lw_inner: float = 0.1,
+    ) -> None:
+        n = len(intervals)
+        for i, (ql, qu) in enumerate(intervals):
+            if ql not in selected_predictions.columns or qu not in selected_predictions.columns:
+                continue
+            alpha = 0.2 + 0.15 * (n - 1 - i)
+            ax.fill_between(
+                selected_predictions.index,
+                selected_predictions[ql],
+                selected_predictions[qu],
+                color=base_color,
+                alpha=alpha,
+                label=f"{int(qu*100)}–{int(ql*100)} % interval",
+            )
+            lw = lw_outer + (lw_inner - lw_outer) * (n - 1 - i) / max(n - 1, 1)
+            ax.plot(selected_predictions.index, selected_predictions[ql], color=base_color, alpha=alpha + 0.1, linewidth=lw)
+            ax.plot(selected_predictions.index, selected_predictions[qu], color=base_color, alpha=alpha + 0.1, linewidth=lw)
+
+    def build_selected_predictions(forecast, corr_start_date: pd.Timestamp, start_idx_preds: int, max_lt: int) -> pd.DataFrame:
+        preds = torch.stack([hf.predictions for hf in forecast.lead_time_forecasts.values()], dim=1)
+        freq_offset = pd.tseries.frequencies.to_offset(forecast.freq)
+        pred_dates = [corr_start_date + freq_offset * lt for lt in range(1, max_lt + 1)]
+        return pd.DataFrame(
+            data=preds[start_idx_preds, :max_lt, :].numpy(),
+            columns=forecast.quantiles,
+            index=pred_dates,
+        )
+
+    def extend_historic_data(forecast, complete_data: Optional["TimeSeriesDataFrame"] = None) -> Tuple[pd.DataFrame, pd.Index, np.ndarray]:
+        """Get the appropriate data for individual subplots, using complete_data if available."""
+        if complete_data is not None:
+            item_id = forecast.data.item_ids[0]
+            id_complete_data = complete_data.loc[[item_id]]
+            full_data = id_complete_data.reset_index(level=0, drop=True)
+            ts = full_data.index
+            forecast_mask = forecast.forecast_mask
+            missing_vals = len(full_data) - len(forecast_mask)
+            mask_pad = np.full(missing_vals, False)
+            forecast_mask = np.concatenate((mask_pad, forecast_mask), axis=0)
+        else:
+            full_data = forecast.data.reset_index(level=0, drop=True)
+            ts = full_data.index
+            forecast_mask = forecast.forecast_mask
+
+        return full_data, ts, forecast_mask
+
+    def history_overview_subplot(fig_, n_rows: int, n_cols: int, first_forecast, fs: Dict[str, int]) -> Tuple[plt.Axes, pd.Index, pd.Timestamp, int]:
+
+        if complete_data is not None:
+            full_data, ts, forecast_mask = extend_historic_data(
+                first_forecast,
+                complete_data,
+            )
+
+        else:
+            full_data = first_forecast.data.reset_index(level=0, drop=True)
+            ts = full_data.index
+            forecast_mask = first_forecast.forecast_mask
+
+        corr_start_date, corr_start_idx = corrected_start(ts, forecast_mask)
+
+        history_start_idx = max(0, corr_start_idx - max_historical_context)
+        history_data = full_data.iloc[history_start_idx : corr_start_idx + 1]
+
+        ax_hist = plt.subplot2grid((n_rows, n_cols), (0, 0), colspan=n_cols, fig=fig_)
+
+        ax_hist.plot(history_data.index, history_data["target"], color="black", linestyle="--", linewidth=1)
+
+        # Highlight area if start specified
+        if start is not None:
+            forecast_start = full_data.index[corr_start_idx]
+            forecast_end = full_data.index[min(corr_start_idx + context_length, len(full_data) - 1)]
+            ax_hist.axvspan(forecast_start, forecast_end, alpha=0.1, color="gray", label="_nolegend_")
+            ax_hist.axvline(forecast_start, color="black", linestyle=":", alpha=0.7, label="Prediction start")
+
+        ax_hist.set_title("Historical Overview", fontsize=fs["subtitle"])
+        # ax_hist.set_xlabel("Time", fontsize=fs["xlabel"])
+        # ax_hist.set_ylabel("Value", fontsize=fs["ylabel"])
+        ax_hist.grid(True, alpha=0.3)
+        if tight_margins:
+            ax_hist.margins(y=margin_padding, x=0)
+
+        return ax_hist, ts, corr_start_date, corr_start_idx
+
+    def gather_legend(fig_, axes_for_legend: List[plt.Axes], fs: Dict[str, int]):
+        handles, labels = [], []
+        for ax_ in axes_for_legend:
+            h, l = ax_.get_legend_handles_labels()
+            for hh, ll in zip(h, l):
+                if ll not in labels:
+                    handles.append(hh)
+                    labels.append(ll)
+        if not handles:
+            return
+        if legend_position == "below":
+            fig_.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.05), ncol=min(4, len(handles)), fontsize=fs["legend"], frameon=True)
+        elif legend_position == "right":
+            fig_.legend(handles, labels, loc="center left", bbox_to_anchor=(1.05, 0.5), ncol=1, fontsize=fs["legend"], frameon=True)
+
+    # ---------- compute layout / sizes once ----------
+
+    font_sizes = merge_font_sizes(font_sizes)
+    num_forecasts = len(forecasts_dict)
+    n_rows, n_cols = grid_dims(num_forecasts, max_cols)
+
+    if show_history_overview:
+        n_rows += 1
+
+    fig_w, fig_h = resolve_figsize(n_rows, n_cols, show_history_overview)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), sharey=sharey, sharex=sharex, squeeze=False, constrained_layout=True)
+
+    axes_flat = axes.flatten()
+
+    # ---------- optional history overview ----------
+
+    if show_history_overview:
+        first_fc = next(iter(forecasts_dict.values()))
+        hist_ax, first_ts, corr_start_date_first, corr_start_idx_first = history_overview_subplot(fig, n_rows, n_cols, first_fc, font_sizes)
+        forecast_axes = axes[1:].flatten() if n_rows > 1 else axes_flat
+
+        for i in range(0, n_cols):
+            axes.flatten()[i].set_visible(False)
+
+    else:
+        hist_ax = None
+        forecast_axes = axes_flat
+
+    # ---------- plot individual forecasts ----------
+
+    for idx, (item_id, forecast) in enumerate(forecasts_dict.items()):
+        if idx >= len(forecast_axes):
+            break
+        ax = forecast_axes[idx]
+
+        # try:
+        # Get the appropriate data (using complete_data if available)
+        full_data, timestamps, forecast_mask = extend_historic_data(forecast, complete_data)
+        corr_start_date, corr_start_idx = corrected_start(timestamps, forecast_mask)
+
+        # context (past) - now can use extended context if complete_data is available
+        historic_start_idx = max(0, corr_start_idx - context_length)
+        past = full_data.iloc[historic_start_idx:corr_start_idx]
+
+        # horizon (future)
+        max_lt = max(forecast.get_lead_times())
+        if max_forecast_steps is not None:
+            max_lt = min(max_lt, max_forecast_steps)
+        future = full_data.iloc[corr_start_idx : corr_start_idx + max_lt]
+
+        # predictions aligned to dates
+        forecasted_ts = timestamps[forecast_mask]
+        start_idx_preds = forecasted_ts.get_indexer([corr_start_date])[0]
+        selected_predictions = build_selected_predictions(forecast, corr_start_date, start_idx_preds, max_lt)
+
+        # plots
+        ax.plot(past.index, past["target"], label="Past", color="black", linestyle="--", linewidth=1)
+        ax.plot(future.index, future["target"], label="Future (true)", color="blue", linewidth=1.5)
+
+        if 0.5 in selected_predictions.columns:
+            ax.plot(selected_predictions.index, selected_predictions[0.5].values, label="Prediction (median)", color="red", linewidth=1.5)
+
+        ax.axvline(corr_start_date, color="black", linestyle=":", label="Prediction start")
+        forecast_end = selected_predictions.index[-1]
+        ax.axvspan(corr_start_date, forecast_end, alpha=0.1, color="gray", label="_nolegend_")
+
+        add_prediction_intervals(
+            ax,
+            selected_predictions,
+            intervals=[(0.4, 0.6), (0.3, 0.7), (0.2, 0.8), (0.1, 0.9)],
+            base_color="orange",
+        )
+
+        ax.set_title(f"{item_id}", fontsize=font_sizes["subtitle"])
+        format_axes(ax, font_sizes, show_xy_labels, tight_margins)
+
+    # hide unused subplots
+    for idx in range(num_forecasts, len(forecast_axes)):
+        forecast_axes[idx].set_visible(False)
+
+    # unified legend
+    if show_legend:
+        legend_axes = [hist_ax] if (hist_ax is not None) else []
+        # add the first visible forecast axis (enough to capture handles)
+        for ax in forecast_axes[:num_forecasts]:
+            if ax.get_visible():
+                legend_axes.append(ax)
+                break
+        gather_legend(fig, legend_axes, font_sizes)
+
+    # title
+    if title_prefix:
+        fig.suptitle(title_prefix, fontsize=font_sizes["title"], y=0.98)
+
+    if save_path:
+        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        print(f"Plot saved to: {save_path}")
+
+    plt.show()
