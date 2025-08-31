@@ -1080,7 +1080,7 @@ class ForecastCollection(BaseModel):
         the percentage of true values that fall within the predicted intervals.
 
         Two averaging strategies are available:
-        - **Macro averaging**: Individually computes coverage rates for each item-lead time combination, 
+        - **Macro averaging**: Individually computes coverage rates for each item-lead time combination,
           then optionally averages across items and optionally averages across lead times
         - **Micro averaging**: Directly averages the binary hit/miss indicators across all
           item-lead time combinations simultaneously.
@@ -1129,15 +1129,13 @@ class ForecastCollection(BaseModel):
                         rates[lt].append(pd.Series(val))
 
             # Average coverage rates across items for each lead time
-            # Only include lead times that have data
             coverage_df = pd.DataFrame({lt: pd.concat(rates[lt], axis=1).mean(axis=1) for lt in lead_times if rates[lt]})
-
             if mean_lead_times:
                 # Average across all lead times to get a single coverage rate per quantile
-                coverage_df = pd.DataFrame(coverage_df.mean(axis=1), columns=["Empirical coverage rates averaged over all lead times"])
+                coverage_df = pd.DataFrame(coverage_df.mean(axis=1), columns=["Mean (macro)"])
             else:
                 # Add a column with the average across lead times while keeping individual lead time columns
-                coverage_df.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_df.mean(axis=1)
+                coverage_df.loc[:, "Mean (macro)"] = coverage_df.mean(axis=1)
 
         else:
             # Micro averaging: directly average binary hit/miss indicators across all combinations
@@ -1145,7 +1143,6 @@ class ForecastCollection(BaseModel):
             hits_all = []
             for item_id in item_ids:
                 item = self.get_time_series_forecast(item_id)
-                y_pred, y_true = item.get_aligned_predictions_and_targets()
                 # Load binary indicators: True if true value falls within predicted interval
                 hits = item._load_or_build_pack("hits", item._build_hits_pack)  # Shape: (T, H, Q) where T=time, H=horizon, Q=quantiles
                 # Select only the specified lead times (convert to 0-based indices)
@@ -1162,8 +1159,9 @@ class ForecastCollection(BaseModel):
                 coverage_df = pd.DataFrame(cv, columns=[f"({min(lead_times)}-{max(lead_times)})"], index=item.quantiles)
             else:
                 # Average only across time steps, keeping lead times and quantiles separate
-                cv = np.nanmean(hits_all, axis=0)  # Average over time only
+                cv = np.nanmean(hits_all, axis=0).swapaxes(0, 1)  # Average over time only
                 coverage_df = pd.DataFrame(cv, columns=lead_times, index=item.quantiles)
+                coverage_df.loc[:, "Mean (micro)"] = np.nanmean(hits_all, axis=(0, 1))
 
         # Set index name for clarity
         coverage_df.index.name = "quantile"
@@ -2475,10 +2473,10 @@ def plot_pairwise_diebold_mariano_test(
 def plot_reliability_diagram(
     collections: Dict[str, "ForecastCollection"],
     lead_times: Optional[Union[List[int], List[List[int]]]] = None,
-    overlay: bool = True,
     item_ids: Optional[List[int]] = None,
     show_individual_lead_times: bool = False,
     mean_lead_times: bool = True,
+    average_type: Literal["micro", "macro"] = "micro",
     figsize: Optional[Tuple[float, float]] = None,
     font_sizes: Optional[Dict[str, int]] = None,
 ) -> None:
@@ -2486,15 +2484,19 @@ def plot_reliability_diagram(
 
     Supports three display modes:
 
-    1. **Single-overlay (default)**: If ``overlay=True`` and ``lead_times`` is a *flat* list (or ``None``), all
+    1. **Single-overlay (default)**: If ``lead_times`` is a *flat* list (or ``None``), all
        collections are plotted together in one axis. Optionally show individual lead lines and/or an equal-weight
        macro-mean across the selected lead times.
-    2. **Multi-panel overlay**: If ``overlay=True`` *and* ``lead_times`` is a *list of lead-time groups* (list of lists),
+    2. **Multi-panel overlay**: If ``lead_times`` is a *list of lead-time groups* (list of lists),
        one subplot is created per group; *within* each subplot all collections are overlaid for the group's lead set.
        A single shared legend is placed to the **right** of the grid (as you requested).
-    3. **Faceted by collection**: If ``overlay=False`` (regardless of lead-time grouping), create one subplot per
-       collection (original behavior). Lead-time grouping is ignored in this mode; pass a flat list of leads to control
-       the subset used in each panel.
+
+       
+    Two averaging strategies are available:
+        - **Macro averaging**: Individually computes coverage rates for each item-lead time combination,
+          then optionally averages across items and optionally averages across lead times
+        - **Micro averaging**: Directly averages the binary hit/miss indicators across all
+          item-lead time combinations simultaneously.
 
     Parameters
     ----------
@@ -2504,14 +2506,18 @@ def plot_reliability_diagram(
         Flat list → single group.
         List of lists → multi-panel overlay with one subplot per group.
         ``None`` → use the union of *all* available lead times across collections (single group).
-    overlay : bool, default True
-        Overlay across *collections* (single axis or multi-panel grouping). If False, facet by collection.
     item_ids : list[int], optional
         Restrict to these item IDs (applied independently per collection). Missing IDs are ignored.
     show_individual_lead_times : bool, default False
         Plot per-lead curves (within whichever axes the mode dictates).
     mean_lead_times : bool, default True
-        Plot macro-mean curve across the selected lead_times (within panel) using equal-weight mean across leads.
+        Plot mean curve across the selected lead_times (within panel) using equal-weight mean across leads.
+    average_type : Literal["micro", "macro"], default "micro"
+        Average type for the empirical coverage rates.
+    figsize : tuple[float, float], optional
+        Figure size.
+    font_sizes : dict[str, int], optional
+        Font sizes for labels, ticks, titles, legend, and super-title.
     """
     if not collections:
         raise ValueError("No ForecastCollection objects supplied.")
@@ -2525,6 +2531,9 @@ def plot_reliability_diagram(
     legend_fs = font_sizes.get("legend", 18)
     sup_fs = font_sizes.get("suptitle", 24)
 
+    if show_individual_lead_times is False and mean_lead_times is False:
+        raise ValueError("At least one of `show_individual_lead_times` or `mean_lead_times` needs to be true")
+
     # ------------------------------------------------------------------
     # Utilities (DRY helpers)
     # ------------------------------------------------------------------
@@ -2535,47 +2544,6 @@ def plot_reliability_diagram(
                 fc = ForecastCollection.load(fc)
             leads.update(fc.get_lead_times())
         return sorted(leads)
-
-    def _collect_coverages(fc: "ForecastCollection", leads: List[int]):
-        """Return dict: {lead_time: [Series per item]}.
-
-        Each Series indexed by nominal quantile (floats).
-        """
-        out = {lt: [] for lt in leads}
-        if isinstance(fc, Path):
-            fc = ForecastCollection.load(fc)
-
-        for item_id in fc.get_item_ids():
-            if item_ids and item_id not in item_ids:
-                continue
-            item = fc.get_time_series_forecast(item_id)
-            for lt in leads:
-                if lt in item.lead_time_forecasts:
-                    val = item.get_empirical_coverage_rates(lt)  # {alpha: cov}
-                    out[lt].append(pd.Series(val))
-        return out
-
-    def _macro_mean(series_list: List[pd.Series]):
-        if not series_list:
-            return None
-        return pd.concat(series_list, axis=1).mean(axis=1)
-
-    def _aggregate_fc(fc: "ForecastCollection", leads: List[int]):
-        """Gather per-item coverages, per-lead macro means, and optional mean across leads.
-
-        Returns (emp_per_lead: dict[int, Series], emp_avg: Series|None).
-        """
-        per_lead = _collect_coverages(fc, leads)
-        emp_per_lead = {}
-        for lt, ser_list in per_lead.items():
-            if ser_list:
-                emp_per_lead[lt] = _macro_mean(ser_list)
-        emp_avg = None
-        if mean_lead_times:
-            all_ser = [s for s in emp_per_lead.values() if s is not None]
-            if all_ser:
-                emp_avg = pd.concat(all_ser, axis=1).mean(axis=1)
-        return emp_per_lead, emp_avg
 
     def _infer_quantile_levels(emp_per_lead, emp_avg):
         if emp_avg is not None:
@@ -2611,6 +2579,20 @@ def plot_reliability_diagram(
         ax.grid(True, which="both", linestyle=":", linewidth=0.5)
         ax.set_aspect("equal", adjustable="box")
 
+    def _aggregate_fc(fc: "ForecastCollection", leads: List[int]):
+        """Gather per-item coverages, per-lead macro means, and optional mean across leads.
+
+        Returns (emp_per_lead: dict[int, Series], emp_avg: Series|None).
+        """
+        if isinstance(fc, Union[str, Path]):
+            fc = ForecastCollection.load(fc)
+        cv = fc.get_empirical_coverage_rates(item_ids=item_ids, lead_times=leads, mean_lead_times=False, average_type=average_type)
+        emp_per_lead = {}
+        for lt in leads:
+            emp_per_lead[lt] = cv[lt]
+        mean = cv.iloc[:, -1]
+        return emp_per_lead, mean
+
     for k, fc in collections.items():
         if isinstance(fc, str):
             collections[k] = Path(str)
@@ -2632,23 +2614,13 @@ def plot_reliability_diagram(
     if not any(grp for grp in lead_time_groups):
         raise ValueError("No lead times available across supplied collections.")
 
-    # ------------------------------------------------------------------
-    # Helper to precompute aggregations *for a given lead group*
-    # ------------------------------------------------------------------
-    def _precompute_for_group(leads_for_group: List[int]):
-        agg = {}
-        for name, fc in collections.items():
-            emp_per_lead, emp_avg = _aggregate_fc(fc, leads_for_group)
-            agg[name] = (emp_per_lead, emp_avg)
-        return agg
-
     palette = sns.color_palette("deep", n_colors=len(collections))
     color_by_collection = {name: palette[i] for i, name in enumerate(collections)}
 
     # ------------------------------------------------------------------
     # MULTI-PANEL OVERLAY MODE (list-of-lists)
     # ------------------------------------------------------------------
-    if overlay and len(lead_time_groups) > 1:
+    if len(lead_time_groups) > 1:
         n_panels = len(lead_time_groups)
 
         # Grid heuristic
@@ -2671,7 +2643,12 @@ def plot_reliability_diagram(
 
         legend_handles = {}
         for ax, leads_for_group in zip(axes, lead_time_groups):
-            agg = _precompute_for_group(leads_for_group)
+
+            agg = {}
+            for key, fc in collections.items():
+                # only mean lead times
+                agg[key] = _aggregate_fc(fc, leads_for_group)
+
             global_quant_levels = []
             for _, (emp_per_lead, emp_avg) in agg.items():
                 ql = _infer_quantile_levels(emp_per_lead, emp_avg)
@@ -2758,69 +2735,21 @@ def plot_reliability_diagram(
             global_quant_levels = ql
             break
 
-    if overlay:  # single panel overlay
-        fig, ax = plt.subplots(figsize=(8, 8))
-        for name, (emp_per_lead, emp_avg) in agg.items():
-            base_c = color_by_collection[name]
-            if show_individual_lead_times:
-                for lt, emp in emp_per_lead.items():
-                    if emp is None:
-                        continue
-                    ax.plot(
-                        emp.index,
-                        emp.values,
-                        marker="o",
-                        linestyle="--",
-                        label=f"{name} Lead Time {lt}",
-                        alpha=0.8,
-                    )
-            if mean_lead_times and emp_avg is not None:
-                ax.plot(
-                    emp_avg.index,
-                    emp_avg.values,
-                    marker="s",
-                    linestyle="-",
-                    linewidth=2,
-                    label=f"{name}",
-                    color=base_c,
-                )
-
-        _format_ax(ax, global_quant_levels)
-        ttl_bits = []
-        if show_individual_lead_times:
-            ttl_bits.append("Leads")
-        if mean_lead_times:
-            ttl_bits.append("Avg")
-        lt_title = _format_lead_title(leads_for_overlay)
-        suffix = " + ".join(ttl_bits) if ttl_bits else ""
-        title = lt_title if not suffix else f"{lt_title} ({suffix})"
-        ax.set_title(title)
-        ax.legend()
-        plt.show()
-        return
-
-    # ------------------------------------------------------------------
-    # Faceted mode: one subplot per collection
-    # ------------------------------------------------------------------
-    n = len(collections)
-    cols = math.ceil(np.sqrt(n))
-    rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
-    axes = axes.flatten() if n > 1 else [axes]
-
-    for ax, (name, (emp_per_lead, emp_avg)) in zip(axes, agg.items()):
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for name, (emp_per_lead, emp_avg) in agg.items():
         base_c = color_by_collection[name]
         if show_individual_lead_times:
             for lt, emp in emp_per_lead.items():
-                if emp is not None:
-                    ax.plot(
-                        emp.index,
-                        emp.values,
-                        marker="o",
-                        linestyle="--",
-                        label=f"Lead Time {lt}",
-                        alpha=0.8,
-                    )
+                if emp is None:
+                    continue
+                ax.plot(
+                    emp.index,
+                    emp.values,
+                    marker="o",
+                    linestyle="--",
+                    label=f"{name} Lead Time {lt}",
+                    alpha=0.8,
+                )
         if mean_lead_times and emp_avg is not None:
             ax.plot(
                 emp_avg.index,
@@ -2828,35 +2757,23 @@ def plot_reliability_diagram(
                 marker="s",
                 linestyle="-",
                 linewidth=2,
-                label="Avg",
+                label=f"{name}",
                 color=base_c,
             )
 
-        _format_ax(ax, global_quant_levels, add_labels=False)
-        ax.set_title(name)
-        ax.legend(fontsize="small")
-
-    # Hide any unused axes
-    for ax in axes[len(collections) :]:
-        ax.set_visible(False)
-
-    # Set common x/y labels on outer figure
-    fig.supxlabel("Nominal Quantile Level")
-    fig.supylabel("Empirical Coverage")
-
-    # Single suptitle reflecting lead selection & content flags
+    _format_ax(ax, global_quant_levels)
     ttl_bits = []
     if show_individual_lead_times:
         ttl_bits.append("Leads")
     if mean_lead_times:
         ttl_bits.append("Avg")
     lt_title = _format_lead_title(leads_for_overlay)
-    suffix = ' + ".join(ttl_bits) if ttl_bits else "'
-    suptitle = lt_title if not suffix else f"{lt_title} ({suffix})"
-    fig.suptitle(suptitle)
-
-    plt.tight_layout()
+    suffix = " + ".join(ttl_bits) if ttl_bits else ""
+    title = lt_title if not suffix else f"{lt_title} ({suffix})"
+    ax.set_title(title)
+    ax.legend()
     plt.show()
+    return
 
 
 def _coerce_paths(x: Union[List[Union[Path, str]], Path, str, None]) -> Optional[List[Path]]:
