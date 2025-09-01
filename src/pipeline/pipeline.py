@@ -627,7 +627,6 @@ class ForecastingPipeline(AbstractPipeline):
             max_calibration_samples=max_calibration_samples,
             require_full_target=True,
         )
-
         return self.generate_forecasts(data_test, index_mask=mask)
 
     def auto_generate_calibration_config(
@@ -1015,7 +1014,7 @@ class ForecastingPipeline(AbstractPipeline):
                 index_mask = self.auto_generate_calibration_config(
                     data_train,
                     prediction_length=self.predictor.prediction_length,
-                    max_calibration_samples=50,
+                    max_calibration_samples=200,
                     require_full_target=True,
                 )
                 calibration_data = data_train
