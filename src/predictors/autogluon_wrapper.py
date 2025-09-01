@@ -142,6 +142,7 @@ class AutogluonPredictor(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series.
@@ -184,6 +185,7 @@ class AutogluonPredictor(AbstractPredictor):
             window_step,
             skip_first,
             rolling=rolling,
+            index_mask=index_mask,
         )
 
         dl = DataLoader(ds, batch_size=512)
