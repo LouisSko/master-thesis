@@ -638,6 +638,7 @@ class ForecastingPipeline(AbstractPipeline):
         skip_first_n_samples: Optional[Dict[int, int]] = None,
         skip_last_n_samples: Optional[Dict[int, int]] = None,
         require_full_target: bool = False,
+        sampling_method: Literal["fixed_stride", "random"] = "fixed_stride",
     ) -> np.ndarray:
         """
         Returns a 1D global boolean mask with exactly `max_calibration_samples`
@@ -657,6 +658,8 @@ class ForecastingPipeline(AbstractPipeline):
             The number of samples to skip at the end of each time series.
         require_full_target: bool, default=False
             Whether to require the target to be full (i.e. t+h available).
+        sampling_method: Literal["fixed_stride", "random"], default="fixed_stride",
+            The method to use for sampling the calibration samples.
 
         Returns:
         -------
@@ -728,6 +731,14 @@ class ForecastingPipeline(AbstractPipeline):
         step_for_span = {L: _compute_window_step(int(L), prediction_length, max_calibration_samples) for L in groups.keys()}
 
         vals_per_item = {}
+
+        if sampling_method == "fixed_stride":
+            logging.warning(
+                "Using sampling_method='fixed_stride'. "
+                "Note: if prediction_length << seasonality and max_calibration_samples is small, "
+                "calibration coverage may be poor. Consider sampling_method='random' instead. "
+                "TODO: add option to account for seasonality when selecting calibration samples."
+            )
         for i in range(n_items):
             if span[i] == 0:
                 continue
@@ -737,11 +748,26 @@ class ForecastingPipeline(AbstractPipeline):
 
             step_i = step_for_span[int(span[i])]
 
-            # initial stride pick using the aligned step
-            idx = np.arange(s_glob, e_glob + 1, step_i, dtype=np.int64)
+            if sampling_method == "fixed_stride":
+                # initial stride pick using the aligned step
+                # idx = np.arange(s_glob, e_glob + 1, step_i, dtype=np.int32)
+                # pick indices backwards from the end
+                idx = np.arange(e_glob, s_glob - 1, -step_i, dtype=np.int32)
+                idx = idx[::-1]  # optional: keep in ascending order
+                if len(idx) > max_calibration_samples:
+                    idx = idx[-max_calibration_samples:]
+                mask[idx] = True
+                vals_per_item[i] = len(idx)
 
-            mask[idx] = True
-            vals_per_item[i] = len(idx)
+            elif sampling_method == "random":
+                rng = np.random.default_rng(seed=42)
+                valid_idx = np.arange(s_glob, e_glob + 1, dtype=np.int32)
+                chosen = rng.choice(valid_idx, size=max_calibration_samples, replace=False)
+                mask[chosen] = True
+                vals_per_item[i] = len(chosen)
+
+            else:
+                raise ValueError("Unknown sampling method %s", sampling_method)
 
         logging.info("Calibration samples per time series: %s", vals_per_item)
 
@@ -985,26 +1011,33 @@ class ForecastingPipeline(AbstractPipeline):
 
         # ---------- define calibration dataset ----------
         if self.postprocessors is not None:
-            if calibration_based_on == "val":
-                calibration_data = data_val
-                context_data = data_train
-            elif calibration_based_on == "train":
+            if calibration_based_on == "auto":
+                index_mask = self.auto_generate_calibration_config(
+                    data_train,
+                    prediction_length=self.predictor.prediction_length,
+                    max_calibration_samples=50,
+                    require_full_target=True,
+                )
                 calibration_data = data_train
                 context_data = None
-            elif calibration_based_on == "train_val":
-                calibration_data = pd.concat([data_train, data_val]).sort_index()
-                context_data = None
-            elif calibration_based_on == "auto":
-                calibration_data, context_data, rolling, calibration_window_step = self.auto_generate_calibration_config(data_train, max_calibration_samples=500)
             else:
-                raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
+                index_mask = None  # set default to None
+                if calibration_based_on == "val":
+                    calibration_data = data_val
+                    context_data = data_train
+                elif calibration_based_on == "train":
+                    calibration_data = data_train
+                    context_data = None
+                elif calibration_based_on == "train_val":
+                    calibration_data = pd.concat([data_train, data_val]).sort_index()
+                    context_data = None
 
-            logging.info(
-                "Use calibration data from %s to %s for fitting postprocessors",
-                calibration_data.index.get_level_values("timestamp").min(),
-                calibration_data.index.get_level_values("timestamp").max(),
-            )
-            logging.info("Calibration window step: %s", calibration_window_step)
+                logging.info(
+                    "Use calibration data from %s to %s for fitting postprocessors",
+                    calibration_data.index.get_level_values("timestamp").min(),
+                    calibration_data.index.get_level_values("timestamp").max(),
+                )
+                logging.info("Calibration window step: %s", calibration_window_step)
 
             # ---------- generate forecasts on calibration dataset using the predictor ----------
             logging.info("Generating forecasts on calibration data...")
@@ -1013,6 +1046,7 @@ class ForecastingPipeline(AbstractPipeline):
                 data_previous_context=context_data,
                 rolling=True,
                 window_step=calibration_window_step,
+                index_mask=index_mask,
             )
 
             # ---------- train postprocessors ----------
