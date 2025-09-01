@@ -38,7 +38,7 @@ def get_electricity_consumption_config():
         "data": read_smard_data(
             file_paths=[
                 project_root / "data/electricity_consumption/Actual_consumption_201501010000_202001010000_Quarterhour.csv",
-                project_root / "data/electricity_consumption/Actual_consumption_202001010000_202506120000_Quarterhour.csv",
+                project_root / "data/electricity_consumption/Actual_consumption_202001010000_202509010000_Quarterhour.csv",
             ],
             selected_time_series=["grid load [MWh] Original resolutions", "Residual load [MWh] Original resolutions"],
             freq="15 min",
@@ -57,7 +57,7 @@ def get_day_ahead_prices_config():
         "data": read_smard_data(
             file_paths=[
                 project_root / "data/day_ahead_prices/Day-ahead_prices_201501010000_202001010000_Hour.csv",
-                project_root / "data/day_ahead_prices/Day-ahead_prices_202001010000_202506120000_Hour.csv",
+                project_root / "data/day_ahead_prices/Day-ahead_prices_202001010000_202509010000_Hour.csv",
             ],
             selected_time_series=[
                 "Belgium [€/MWh] Original resolutions",
