@@ -69,6 +69,7 @@ class BaseTimeSeriesDataset(Dataset):
         prediction_length: Optional[int] = None,
         tokenizer: Optional["ChronosTokenizer"] = None,
         rolling: bool = False,
+        index_mask: Optional[np.ndarray] = None,
     ):
         assert context_length > 0, "context_length must be greater than 0"
         assert window_step > 0, "window_step must be greater than 0"
@@ -81,6 +82,7 @@ class BaseTimeSeriesDataset(Dataset):
         self.skip_first_n_samples = skip_first_n_samples
         self.skip_last_n_samples = skip_last_n_samples
         self.rolling = rolling
+        self.index_mask = index_mask
 
         if self.return_target and self.prediction_length is None:
             raise ValueError("prediction_length must be set when return_target=True")
@@ -108,7 +110,9 @@ class BaseTimeSeriesDataset(Dataset):
         np.cumsum(counts_per_item, out=self.indptr[1:])
 
         # Precompute valid indices depending on mode
-        if self.rolling:
+        if self.index_mask is not None:
+            self._compute_indices_from_mask(self.index_mask)
+        elif self.rolling:
             self._compute_valid_indices(self.skip_first_n_samples)
         else:
             # only last observation per series
@@ -134,6 +138,32 @@ class BaseTimeSeriesDataset(Dataset):
             s, e = self._series_bounds(item_id)
             latest[item_id] = e - 1
         return latest
+
+    def _compute_indices_from_mask(self, mask: np.ndarray) -> None:
+        """
+        Build self.valid_idx from a global boolean mask.
+        Mask length must equal len(self.target_array).
+        Skip ranges (first/last) are applied on top of the mask.
+        """
+        mask = np.asarray(mask, dtype=bool)
+        if mask.ndim != 1:
+            raise ValueError("index_mask must be a 1D bool array")
+        if mask.size != self.target_array.size:
+            raise ValueError(f"index_mask length {mask.size} != dataset length {self.target_array.size}")
+
+        # apply skip ranges
+        n_items = len(self.indptr) - 1
+        mask = mask.copy()
+        for item_id in range(n_items):
+            s, e = self._series_bounds(item_id)
+            start_skip = (self.skip_first_n_samples or {}).get(item_id, 0)
+            last_skip = (self.skip_last_n_samples or {}).get(item_id, 0)
+            if start_skip > 0:
+                mask[s : s + start_skip] = False
+            if last_skip > 0:
+                mask[e - last_skip : e] = False
+
+        self.valid_idx = np.flatnonzero(mask).astype(np.int32)
 
     def _compute_valid_indices(self, skip_first_n_samples: Optional[Dict[int, int]]):
         """
@@ -726,6 +756,7 @@ class Chronos(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series.
@@ -748,7 +779,9 @@ class Chronos(AbstractPredictor):
             This controls how densely forecasts are generated across time. A smaller value creates more overlapping
             forecasts, while a larger value skips more observations between windows.
             The rolling procedure is applied independently to each time series in the dataset.
-
+        index_mask: np.ndarray
+            A 1D global boolean mask with selected samples to generate forecasts on. If provided
+            `rolling` and `window_step` will be ignored.
         Returns
         -------
         ForecastCollection
@@ -769,6 +802,7 @@ class Chronos(AbstractPredictor):
             window_step,
             skip_first,
             rolling=rolling,
+            index_mask=index_mask,
         )
 
         if isinstance(self.pipeline, ChronosPipeline):
@@ -807,7 +841,7 @@ class Chronos(AbstractPredictor):
         assert forecasts.shape[0] == len(ds), "row count mismatch"
 
         # If rolling, output data covers all input rows
-        if rolling:
+        if rolling or index_mask is not None:
             output_data = data
         else:
             # Only the most recent timestep per series
