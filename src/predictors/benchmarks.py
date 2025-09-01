@@ -6,7 +6,7 @@ import torch
 from tqdm.auto import tqdm
 from src.core.base import AbstractPredictor
 from src.core.utils import set_global_seed
-from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TARGET
+from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast, TARGET, ITEMID, TIMESTAMP
 import logging
 from pydantic import Field
 from pathlib import Path
@@ -49,7 +49,7 @@ class SeasonalNaive(AbstractPredictor):
 
     def __init__(
         self,
-        quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]),
+        quantiles: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         lead_times: Optional[Iterable[int]] = None,
         freq: Union[str, pd.DateOffset] = "1h",
         last_n_samples: Optional[int] = 10,
@@ -133,8 +133,8 @@ class SeasonalNaive(AbstractPredictor):
             Dictionary containing historical target values per item and bucket.
         """
         df = context_data.reset_index()
-        df["bucket"] = df["timestamp"].apply(self._make_key)
-        grouped = df.groupby(["item_id", "bucket"])["target"]
+        df["bucket"] = df[TIMESTAMP].apply(self._make_key)
+        grouped = df.groupby([ITEMID, "bucket"])[TARGET]
 
         history = self._initialize_history(context_data.item_ids)
         for (item_id, bucket), vals in grouped:
@@ -165,6 +165,7 @@ class SeasonalNaive(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series.
@@ -211,10 +212,11 @@ class SeasonalNaive(AbstractPredictor):
 
         # 2. Per-item loop
         for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
-            item_df = data.loc[[item_id]]
+            item_id_mask = data.index.get_level_values(ITEMID) == item_id
+            item_df = data[item_id_mask].copy()
             item_hist = history[item_id]  # shortcut
-            timestamps = item_df.index.get_level_values("timestamp")
-            target_vals = item_df["target"].values
+            timestamps = item_df.index.get_level_values(TIMESTAMP)
+            target_vals = item_df[TARGET].values
 
             # --- Data sufficiency check for historical quantile estimation ---
             num_buckets = len(item_hist)
@@ -230,6 +232,7 @@ class SeasonalNaive(AbstractPredictor):
                 required_samples,
             )
 
+            # TODO: add logging in case index_mask is provided
             if rolling:
                 if previous_context_data is None:
                     logging.warning(
@@ -275,11 +278,15 @@ class SeasonalNaive(AbstractPredictor):
             dirty: set[str] = set()  # buckets whose history we just ch
 
             # Decide at which row indices we will actually issue a forecast
-            if rolling:
-                eval_indices = list(range(0, len(timestamps), window_step))
+            if index_mask is not None:
+                sub_index_mask = index_mask[item_id_mask]
+                eval_indices = np.arange(0, len(timestamps))[sub_index_mask]
+            else:
+                if rolling:
+                    eval_indices = list(range(0, len(timestamps), window_step))
 
-            else:  # single-shot
-                eval_indices = [len(timestamps) - 1]
+                else:  # single-shot
+                    eval_indices = [len(timestamps) - 1]
 
             forecast_mask = np.zeros(len(timestamps), dtype=bool)
             forecast_mask[eval_indices] = True
@@ -401,7 +408,7 @@ class RollingQuantilePredictor(AbstractPredictor):
         history = self._initialize_history(context_data.item_ids)
         df = context_data.reset_index()
 
-        for (item_id,), vals in df.groupby(["item_id"])["target"]:
+        for (item_id,), vals in df.groupby([ITEMID])[TARGET]:
             clean_vals = vals.dropna().values[-self.last_n_samples :] if self.last_n_samples else vals.dropna().values
             history[item_id].extend(clean_vals.tolist())  # extend with list of floats
 
@@ -467,8 +474,8 @@ class RollingQuantilePredictor(AbstractPredictor):
         for item_id in tqdm(data.item_ids, desc="RollingQuantilePredictor"):
             data_sub = data.loc[[item_id]]
             item_history = history[item_id]
-            timestamps = data_sub.index.get_level_values("timestamp")
-            target_vals = data_sub["target"].values
+            timestamps = data_sub.index.get_level_values(TIMESTAMP)
+            target_vals = data_sub[TARGET].values
 
             # Decide which rows we forecast at
             if rolling:
@@ -614,6 +621,7 @@ class RandomWalk(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         """
         Generate quantile forecasts using a Gaussian random walk in log space.
@@ -650,13 +658,13 @@ class RandomWalk(AbstractPredictor):
         z = stats.norm.ppf(np.array(self.quantiles)).reshape(1, -1)
 
         for item_id in tqdm(data.item_ids, desc="Predicting using Random Walk Benchmark"):
-            data_sub = data.loc[[item_id]]
-
-            timestamps = data_sub.index.get_level_values("timestamp")
+            item_id_mask = data.index.get_level_values(ITEMID) == item_id
+            data_sub = data[item_id_mask].copy()
+            timestamps = data_sub.index.get_level_values(TIMESTAMP)
 
             T = self.shift_c.get(item_id, 0.0)  # same shift learned in fit
 
-            y_raw = data_sub["target"].astype(float).values
+            y_raw = data_sub[TARGET].astype(float).values
             y_pos = y_raw + T  # apply the shift again
             if (y_pos <= 0).any():
                 # this should not happen unless new data is below training min
@@ -670,10 +678,14 @@ class RandomWalk(AbstractPredictor):
             q_fc_matrix = np.sqrt(h_steps) @ z * self.sd_yd[item_id]
 
             # Decide at which rows to forecast
-            if rolling:
-                eval_indices = list(range(0, len(timestamps), window_step))
+            if index_mask is not None:
+                sub_index_mask = index_mask[item_id_mask]
+                eval_indices = np.arange(0, len(timestamps))[sub_index_mask]
             else:
-                eval_indices = [len(timestamps) - 1]
+                if rolling:
+                    eval_indices = list(range(0, len(timestamps), window_step))
+                else:
+                    eval_indices = [len(timestamps) - 1]
 
             forecast_mask = np.zeros(len(timestamps), dtype=bool)
             forecast_mask[eval_indices] = True
@@ -781,17 +793,18 @@ class OnlineRandomWalk(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
 
         freq = pd.tseries.frequencies.to_offset(data.freq)
         ts_forecast: Dict[int, TimeSeriesForecast] = {}
-
         h_steps = np.array(self.lead_times).reshape(-1, 1)
         z = stats.norm.ppf(np.array(self.quantiles)).reshape(1, -1)
 
         for item_id in tqdm(data.item_ids, desc="Predicting using Random Walk without drift"):
-            data_sub = data.loc[[item_id]].copy()
-            timestamps = data_sub.index.get_level_values("timestamp")
+            item_id_mask = data.index.get_level_values(ITEMID) == item_id
+            data_sub = data[item_id_mask].copy()
+            timestamps = data_sub.index.get_level_values(TIMESTAMP)
 
             # Compute rolling std of log returns and utilize the context data
             if previous_context_data is not None:
@@ -802,7 +815,7 @@ class OnlineRandomWalk(AbstractPredictor):
             else:
                 data_merged = data_sub
                 skip_first = 0
-            targets_merged = data_merged["target"]
+            targets_merged = data_merged[TARGET]
             min_target = targets_merged.min()
             if min_target <= 0:
                 epsilon = -min_target + 1e-8
@@ -820,10 +833,14 @@ class OnlineRandomWalk(AbstractPredictor):
             rolling_std = rolling_std.iloc[skip_first:]
 
             # Decide forecast time steps
-            if rolling:
-                eval_indices = list(range(0, len(timestamps), window_step))
+            if index_mask is not None:
+                sub_index_mask = index_mask[item_id_mask]
+                eval_indices = np.arange(0, len(timestamps))[sub_index_mask]
             else:
-                eval_indices = [len(timestamps) - 1]
+                if rolling:
+                    eval_indices = list(range(0, len(timestamps), window_step))
+                else:
+                    eval_indices = [len(timestamps) - 1]
             forecast_mask = np.zeros(len(timestamps), dtype=bool)
             forecast_mask[eval_indices] = True
 
