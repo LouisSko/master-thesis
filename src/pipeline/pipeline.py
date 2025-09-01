@@ -726,12 +726,6 @@ class ForecastingPipeline(AbstractPipeline):
 
         # optional: precompute step per unique span using your helper
         # (group by identical spans to avoid repeated calls)
-        span_series = pd.Series(span)
-        groups = span_series.groupby(span_series).apply(lambda x: x.index.tolist()).to_dict()
-        step_for_span = {L: _compute_window_step(int(L), prediction_length, max_calibration_samples) for L in groups.keys()}
-
-        vals_per_item = {}
-
         if sampling_method == "fixed_stride":
             logging.warning(
                 "Using sampling_method='fixed_stride'. "
@@ -739,6 +733,13 @@ class ForecastingPipeline(AbstractPipeline):
                 "calibration coverage may be poor. Consider sampling_method='random' instead. "
                 "TODO: add option to account for seasonality when selecting calibration samples."
             )
+
+            span_series = pd.Series(span)
+            groups = span_series.groupby(span_series).apply(lambda x: x.index.tolist()).to_dict()
+            step_for_span = {L: _compute_window_step(int(L), prediction_length, max_calibration_samples) for L in groups.keys()}
+
+        vals_per_item = {}
+
         for i in range(n_items):
             if span[i] == 0:
                 continue
@@ -746,9 +747,8 @@ class ForecastingPipeline(AbstractPipeline):
             s_glob = int(indptr[i] + start_local[i])
             e_glob = int(indptr[i] + end_local[i])  # inclusive
 
-            step_i = step_for_span[int(span[i])]
-
             if sampling_method == "fixed_stride":
+                step_i = step_for_span[int(span[i])]
                 # initial stride pick using the aligned step
                 # idx = np.arange(s_glob, e_glob + 1, step_i, dtype=np.int32)
                 # pick indices backwards from the end
