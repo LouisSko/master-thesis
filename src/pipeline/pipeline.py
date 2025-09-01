@@ -694,7 +694,7 @@ class ForecastingPipeline(AbstractPipeline):
                 The step size for rolling forecasting that respects the calibration constraint.
             """
             for step in _get_divisors(prediction_length):
-                if samples // step <= max_samples:
+                if np.ceil(samples / step) <= max_samples:
                     return step
             return prediction_length
 
