@@ -164,9 +164,10 @@ class AbstractPredictor(ABC):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         start_time = time.time()
-        forecasts = self._predict(data, previous_context_data, rolling, window_step)
+        forecasts = self._predict(data, previous_context_data, rolling, window_step, index_mask)
         end_time = time.time()
 
         # add execution time
@@ -182,6 +183,7 @@ class AbstractPredictor(ABC):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         pass
 
