@@ -1373,6 +1373,7 @@ class ForecastCollection(BaseModel):
         plt.show()
 
     def save(self, file_path: Path) -> None:
+        self.clear_cache_dir()
         joblib.dump(self, file_path)
         logging.info("Saved prediction collection to %s", file_path)
 
