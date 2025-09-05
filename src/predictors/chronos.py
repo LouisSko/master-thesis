@@ -786,10 +786,6 @@ class Chronos(AbstractPredictor):
         ForecastCollection
             A nested dictionary mapping each item_id to lead time forecasts.
         """
-        print(50 * "+")
-        print(data.freq)
-        print(data.infer_frequency())
-
         # Combine context data if given
         if previous_context_data is not None:
             # skip_first: Dict[item_id -> how many prepended rows], used for dataset indexing
