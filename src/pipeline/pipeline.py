@@ -613,12 +613,13 @@ class ForecastingPipeline(AbstractPipeline):
         Dict[str, ForecastCollection]
             Dictionary mapping the predictor name to its generated ForecastCollection.
         """
-
+        skip_first_n_samples = None
         # join the two datasets
         if data_previous_context is not None:
-            data_test = self.predictor._merge_data(data_test, data_previous_context, 2048)
+            data_test, skip_first_n_samples = self.predictor._merge_data(data_test, data_previous_context, 2048)
 
-        skip_first_n_samples = {item_id: min(self.predictor.prediction_length // 2, ts_len // 2) for item_id, ts_len in data_test.num_timesteps_per_item().to_dict().items()}
+        if skip_first_n_samples is None:
+            skip_first_n_samples = {item_id: min(self.predictor.prediction_length // 2, ts_len // 2) for item_id, ts_len in data_test.num_timesteps_per_item().to_dict().items()}
 
         mask = self.auto_generate_calibration_config(
             data_test=data_test,
