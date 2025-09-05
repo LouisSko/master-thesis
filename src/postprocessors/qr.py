@@ -350,10 +350,7 @@ class PostprocessorFastQR(AbstractPostprocessor):
             device=self.device,
         )
 
-        # params_array = pack_params_for_old_postprocess(model, invalid_h)
-        self.params = {"model": model, "invalid_h": invalid_h, "transformer": transformer}
-
-        return self.params
+        return {"model": model, "invalid_h": invalid_h, "transformer": transformer}
 
     def _postprocess(self, data: TimeSeriesForecast, params: Any) -> TimeSeriesForecast:
         model: LinearQRCalibrator = params["model"].to(device=self.device)
