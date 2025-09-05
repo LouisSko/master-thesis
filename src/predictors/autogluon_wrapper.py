@@ -231,6 +231,8 @@ class AutogluonPredictor(AbstractPredictor):
 
         assert forecasts_array.shape[0] == len(ds), "row count mismatch"
 
+        freq = data.freq
+
         # If rolling, output data covers all input rows
         if rolling:
             output_data = data
@@ -238,7 +240,12 @@ class AutogluonPredictor(AbstractPredictor):
             # Only the most recent timestep per series
             output_data = data.slice_by_timestep(start_index=-1)
 
-        return ds.to_forecast_collection(predictions=torch.tensor(forecasts_array), lead_times=self.lead_times, output_data=output_data)
+        return ds.to_forecast_collection(
+            predictions=torch.tensor(forecasts_array),
+            lead_times=self.lead_times,
+            output_data=output_data,
+            freq=freq,
+        )
 
 
 class PatchTST_Ag(AutogluonPredictor):

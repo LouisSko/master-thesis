@@ -272,14 +272,13 @@ class BaseTimeSeriesDataset(Dataset):
     def valid_timestamps(self):
         return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
 
-    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame) -> ForecastCollection:
+    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame, freq: str) -> ForecastCollection:
         """
         Assemble a ForecastCollection given model predictions.
 
         predictions is a tensor [N x num_quantiles x prediction length]
         """
-
-        freq = pd.tseries.frequencies.to_offset(output_data.freq)
+        freq = pd.tseries.frequencies.to_offset(freq)
 
         preds_df = pd.DataFrame(
             {
@@ -787,6 +786,10 @@ class Chronos(AbstractPredictor):
         ForecastCollection
             A nested dictionary mapping each item_id to lead time forecasts.
         """
+        print(50 * "+")
+        print(data.freq)
+        print(data.infer_frequency())
+
         # Combine context data if given
         if previous_context_data is not None:
             # skip_first: Dict[item_id -> how many prepended rows], used for dataset indexing
@@ -808,7 +811,7 @@ class Chronos(AbstractPredictor):
         if isinstance(self.pipeline, ChronosPipeline):
             batch_size = 128
         elif isinstance(self.pipeline, ChronosBoltPipeline):
-            batch_size = 512
+            batch_size = 128
 
         dl = DataLoader(ds, batch_size=batch_size, num_workers=4)
 
@@ -840,14 +843,16 @@ class Chronos(AbstractPredictor):
         forecasts = torch.vstack(forecasts)
         assert forecasts.shape[0] == len(ds), "row count mismatch"
 
+        freq = data.freq
+
         # If rolling, output data covers all input rows
         if rolling or index_mask is not None:
-            output_data = data
+            output_data = TimeSeriesDataFrame(data)
         else:
             # Only the most recent timestep per series
-            output_data = data.slice_by_timestep(start_index=-1)
+            output_data = data.slice_by_timestep(start_index=-1) # Since Autogluon 1.4 the freq information gets lost during slicing
 
-        collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data)
+        collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data, freq=freq)
 
         return collection
 

@@ -174,6 +174,7 @@ class TiRex(AbstractPredictor):
             logging.error(f"Row count mismatch: predictions={forecasts_tensor.shape[0]} vs dataset={len(ds)}")
             raise ValueError("Mismatch between prediction rows and dataset rows.")
 
+        freq = data.freq
         # If rolling, output data covers all input rows
         if rolling:
             output_data = data
@@ -185,6 +186,7 @@ class TiRex(AbstractPredictor):
             predictions=forecasts_tensor,
             lead_times=self.lead_times,
             output_data=output_data,
+            freq=freq,
         )
 
     def construct_prediction(self, response) -> torch.Tensor:
