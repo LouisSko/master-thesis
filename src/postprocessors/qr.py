@@ -323,6 +323,11 @@ class PostprocessorFastQR(AbstractPostprocessor):
         y_pred = y_pred[self.ignore_first_n_train_entries :]
         y_true = y_true[self.ignore_first_n_train_entries :]
 
+        # remove rows with nan values
+        mask = ~np.isnan(y_pred).any(axis=(1, 2))
+        y_pred = y_pred[mask, ...]
+        y_true = y_true[mask, ...]
+
         T, H, Q = y_pred.shape
         # --- 2) Transform both predictors and targets once ---
         transformer = DataTransformer(self.transformer)
