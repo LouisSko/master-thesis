@@ -62,16 +62,15 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
     if torch.cuda.is_available():
         device_map = "cuda"
+        print("device_count =", torch.cuda.device_count())
+        for i in range(torch.cuda.device_count()):
+            print(i, torch.cuda.get_device_name(i))
+            print("Properties of device", torch.cuda.get_device_properties(i))
+        print("Selected device:", torch.cuda.current_device())
     elif torch.mps.is_available():
         device_map = "mps"
     else:
         device_map = "cpu"
-
-    print("device_count =", torch.cuda.device_count())
-    for i in range(torch.cuda.device_count()):
-        print(i, torch.cuda.get_device_name(i))
-        print("Properties of device", torch.cuda.get_device_properties(i))
-    print("Selected device:", torch.cuda.current_device())
 
     # torch.cuda.set_device(1)
     BOLT = True
