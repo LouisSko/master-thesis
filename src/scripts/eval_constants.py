@@ -1,24 +1,24 @@
 import numpy as np
 import pandas as pd
 from src.postprocessors.mle import PostprocessorMLE
-from src.postprocessors.qr import PostprocessorQR, PostprocessorFastQR
+from src.postprocessors.qr import PostprocessorFastQR
 from src.postprocessors.eqc import PostprocessorEQC
 from pathlib import Path
 from src.data.preprocessor import read_smard_data, read_exchange_rates_data
 
-lead_times = np.arange(1, (64*10) + 1).tolist()
+lead_times = np.arange(1, (64 * 10) + 1).tolist()
 quantiles = np.round(np.arange(0.1, 1, 0.1), 1).tolist()
 test_start_date = pd.Timestamp("2023-01-01")
 postprocessors = [PostprocessorEQC, PostprocessorFastQR, PostprocessorMLE]
 postprocessor_kwargs = [
-    {"n_jobs": 2, "name": "PP_Offset"},
-    {"n_jobs": 2, "name": "PP_QuantReg"},
-    {"n_jobs": 2, "name": "PP_Gauss"},
-    ]
+    {"n_jobs": 8, "name": "PP_Offset"},
+    {"n_jobs": 4, "name": "PP_QuantReg"},
+    {"n_jobs": 8, "name": "PP_Gauss"},
+]
 
 # whether to evaluate using auto calibration or not
-auto_calibration = False # or False
-auto_determine_val_set = False # or False
+auto_calibration = False  # or False
+auto_determine_val_set = False  # or False
 
 # Path to this script
 script_dir = Path(__file__).resolve().parent
