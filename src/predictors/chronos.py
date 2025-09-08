@@ -551,9 +551,12 @@ class Chronos(AbstractPredictor):
                 p.requires_grad = False
 
             # resize head if requested (only for Bolt)
-            if isinstance(pipe, ChronosBoltPipeline) and self.finetuning_adjust_pretrained_prediction_length:
-                unfreeze_new = mode == "new_neurons"
-                pipe = resize_chronos_bolt_output_layers(pipe, self.prediction_length, unfreeze_new_neurons=unfreeze_new)
+            if self.finetuning_adjust_pretrained_prediction_length:
+                if isinstance(pipe, ChronosBoltPipeline):
+                    unfreeze_new = mode == "new_neurons"
+                    pipe = resize_chronos_bolt_output_layers(pipe, self.prediction_length, unfreeze_new_neurons=unfreeze_new)
+                elif isinstance(pipe, ChronosPipeline):
+                    pipe = resize_chronos_t5_output_layers(pipe, self.prediction_length)
 
             # unfreeze
             if mode == "full":
@@ -607,14 +610,13 @@ class Chronos(AbstractPredictor):
         # update prediction length
         if self.finetuning_adjust_pretrained_prediction_length:
             prediction_length = self.prediction_length
-            self.pipeline.model.config.prediction_length = prediction_length  # TODO: check if I need this
-            self.pipeline.inner_model.config.chronos_config["prediction_length"] = prediction_length
         else:
             prediction_length = self.pipeline.inner_model.config.chronos_config["prediction_length"]  # standard
-
         logging.info("Prediction length will be set to %s during training.", prediction_length)
 
         tokenizer = getattr(self.pipeline, "tokenizer", None)
+        if isinstance(self.pipeline, ChronosPipeline):
+            tokenizer.config.prediction_length = prediction_length
 
         # 1) create datasets
         ds_train, ds_val = self._create_datasets(
@@ -846,7 +848,7 @@ class Chronos(AbstractPredictor):
             output_data = TimeSeriesDataFrame(data)
         else:
             # Only the most recent timestep per series
-            output_data = data.slice_by_timestep(start_index=-1) # Since Autogluon 1.4 the freq information gets lost during slicing
+            output_data = data.slice_by_timestep(start_index=-1)  # Since Autogluon 1.4 the freq information gets lost during slicing
 
         collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data, freq=freq)
 
@@ -881,7 +883,7 @@ class BestCheckpointCallback(TrainerCallback):
         trainer = kwargs.get("trainer")
         if trainer and getattr(trainer, "tokenizer", None):
             trainer.tokenizer.save_pretrained(ckpt_dir)
-        print(f"[Unified] saved initial model to {ckpt_dir}")
+        logging.info("Saved initial model to, %s", ckpt_dir)
 
         # initialize both callback and Trainer.state
         init_best = np.inf if not self.greater_is_better else -np.inf
@@ -913,7 +915,7 @@ class BestCheckpointCallback(TrainerCallback):
             ckpt_dir = os.path.join(args.output_dir, ckpt_name)
             state.best_model_checkpoint = ckpt_dir
 
-            print(f"New best @ step {state.global_step}: " f"{self.metric_name}={current:.4f}, marking {ckpt_dir}")
+            logging.info(f"New best @ step {state.global_step}: " f"{self.metric_name}={current:.4f}, marking {ckpt_dir}")
 
     def get_best_metric(self):
         return self.best_metric
@@ -1191,7 +1193,7 @@ def print_trainable_params(model: PreTrainedModel) -> None:
 
     fraction_trainable_params = np.round(fraction_trainable_params * 100, 2)
 
-    print(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
+    logging.info(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
 
 
 def _resize_proj(old_linear: nn.Linear, num_quantiles: int, old_H: int, new_H: int, unfreeze_new_neurons: bool) -> nn.Linear:
@@ -1314,5 +1316,42 @@ def resize_chronos_bolt_output_layers(pipeline, new_prediction_length: int, unfr
         new_prediction_length,
         num_quantiles * old_H,
         num_quantiles * new_prediction_length,
+    )
+    return pipeline
+
+
+def resize_chronos_t5_output_layers(pipeline, new_prediction_length: int):
+    """
+    Resize Chronos T5's prediction length configuration.
+
+    For T5, this doesn't involve resizing physical layers like Bolt,
+    but updating the configuration that controls generation length.
+
+    Parameters
+    ----------
+    pipeline : ChronosPipeline
+        The Chronos T5 pipeline to resize
+    new_prediction_length : int
+        Desired forecast horizon (H).
+    """
+    model = pipeline.inner_model
+    old_H = model.config.chronos_config["prediction_length"]
+
+    if new_prediction_length == old_H:
+        logging.info("Prediction length unchanged (%d); nothing to do.", old_H)
+        return pipeline
+
+    # Update the chronos config in multiple places
+    model.config.chronos_config["prediction_length"] = new_prediction_length
+    model.config.prediction_length = new_prediction_length
+
+    # Update the tokenizer config
+    if hasattr(pipeline, "tokenizer") and hasattr(pipeline.tokenizer, "config"):
+        pipeline.tokenizer.config.prediction_length = new_prediction_length
+
+    logging.info(
+        "Resized Chronos T5 prediction length from %d to %d steps.",
+        old_H,
+        new_prediction_length,
     )
     return pipeline
