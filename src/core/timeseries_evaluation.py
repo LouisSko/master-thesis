@@ -2492,7 +2492,7 @@ def plot_reliability_diagram(
        one subplot is created per group; *within* each subplot all collections are overlaid for the group's lead set.
        A single shared legend is placed to the **right** of the grid (as you requested).
 
-       
+
     Two averaging strategies are available:
         - **Macro averaging**: Individually computes coverage rates for each item-lead time combination,
           then optionally averages across items and optionally averages across lead times
@@ -3389,10 +3389,11 @@ def plot_multiple_forecasts(
             break
         ax = forecast_axes[idx]
 
-        # try:
         # Get the appropriate data (using complete_data if available)
+        # TODO: this is error prone in case provided "complete data" does not cover the period of the forecast
         full_data, timestamps, forecast_mask = extend_historic_data(forecast, complete_data)
         corr_start_date, corr_start_idx = corrected_start(timestamps, forecast_mask)
+        corr_start_idx += 1 # since we make prediction 
 
         # context (past) - now can use extended context if complete_data is available
         historic_start_idx = max(0, corr_start_idx - context_length)
