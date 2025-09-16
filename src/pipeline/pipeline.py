@@ -641,7 +641,7 @@ class ForecastingPipeline(AbstractPipeline):
         sampling_method: Literal["fixed_stride", "random"] = "fixed_stride",
     ) -> np.ndarray:
         """
-        Returns a 1D global boolean mask with exactly `max_calibration_samples`
+        Returns a 1D global boolean mask with max `max_calibration_samples`
         True positions PER ITEM (series). If a series has fewer than that many
         valid positions under the chosen constraints, raises a ValueError.
         Parameters:
