@@ -323,6 +323,11 @@ class PostprocessorFastQR(AbstractPostprocessor):
         y_pred = y_pred[self.ignore_first_n_train_entries :]
         y_true = y_true[self.ignore_first_n_train_entries :]
 
+        # remove rows with nan values
+        mask = ~np.isnan(y_pred).any(axis=(1, 2))
+        y_pred = y_pred[mask, ...]
+        y_true = y_true[mask, ...]
+
         T, H, Q = y_pred.shape
         # --- 2) Transform both predictors and targets once ---
         transformer = DataTransformer(self.transformer)
@@ -350,10 +355,7 @@ class PostprocessorFastQR(AbstractPostprocessor):
             device=self.device,
         )
 
-        # params_array = pack_params_for_old_postprocess(model, invalid_h)
-        self.params = {"model": model, "invalid_h": invalid_h, "transformer": transformer}
-
-        return self.params
+        return {"model": model, "invalid_h": invalid_h, "transformer": transformer}
 
     def _postprocess(self, data: TimeSeriesForecast, params: Any) -> TimeSeriesForecast:
         model: LinearQRCalibrator = params["model"].to(device=self.device)

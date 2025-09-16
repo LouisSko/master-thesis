@@ -9,6 +9,7 @@ from src.core.timeseries_evaluation import (
     DIR_MODELS,
     DIR_POSTPROCESSORS,
     ITEMID,
+    TIMESTAMP,
     TARGET,
     PIPELINE_CONFIG_FILE_NAME,
     BACKTEST_CONFIG_FILENAME,
@@ -612,42 +613,58 @@ class ForecastingPipeline(AbstractPipeline):
         Dict[str, ForecastCollection]
             Dictionary mapping the predictor name to its generated ForecastCollection.
         """
+        skip_first_n_samples = None
+        # join the two datasets
+        if data_previous_context is not None:
+            data_test, skip_first_n_samples = self.predictor._merge_data(data_test, data_previous_context, 2048)
 
-        data_test, data_previous_context, rolling, window_step = self.auto_generate_calibration_config(
-            data_test=data_test, data_previous_context=data_previous_context, max_calibration_samples=max_calibration_samples
+        if skip_first_n_samples is None:
+            skip_first_n_samples = {item_id: min(self.predictor.prediction_length // 2, ts_len // 2) for item_id, ts_len in data_test.num_timesteps_per_item().to_dict().items()}
+
+        mask = self.auto_generate_calibration_config(
+            data_test=data_test,
+            prediction_length=self.predictor.prediction_length,
+            skip_first_n_samples=skip_first_n_samples,
+            max_calibration_samples=max_calibration_samples,
+            require_full_target=True,
         )
-
-        return self.generate_forecasts(data_test, data_previous_context, rolling, window_step)
+        return self.generate_forecasts(data_test, index_mask=mask)
 
     def auto_generate_calibration_config(
         self,
-        data_test: TimeSeriesDataFrame,
-        data_previous_context: Optional[TimeSeriesDataFrame] = None,
-        max_calibration_samples: int = 1000,
-    ) -> Tuple:
+        data_test: "TimeSeriesDataFrame",
+        prediction_length: int,
+        max_calibration_samples: int = 500,
+        skip_first_n_samples: Optional[Dict[int, int]] = None,
+        skip_last_n_samples: Optional[Dict[int, int]] = None,
+        require_full_target: bool = False,
+        sampling_method: Literal["fixed_stride", "random"] = "fixed_stride",
+    ) -> np.ndarray:
         """
-        Convenience function to quickly generate a fixed-size calibration dataset via rolling forecasts.
-
-        This method is intended for easily preparing forecast predictions used to train postprocessing components
-        such as calibration models. It truncates `data_test` to the last portion required to produce
-        up to `max_calibration_samples` rolling forecasts, automatically computing an appropriate
-        `window_step` to meet this constraint. It also sets up the correct `data_previous_context` to
-        preserve sequence continuity. Internally, it delegates to `generate_forecasts` using rolling mode.
-
-        Parameters
+        Returns a 1D global boolean mask with max `max_calibration_samples`
+        True positions PER ITEM (series). If a series has fewer than that many
+        valid positions under the chosen constraints, raises a ValueError.
+        Parameters:
         ----------
-        data_test : TimeSeriesDataFrame
+        data_test: TimeSeriesDataFrame
             The time series data to generate calibration forecasts on. Must include the target values.
-        data_previous_context : Optional[TimeSeriesDataFrame], default=None
-            Optional context data preceding `data_test`. If provided, the truncated portion of the original
-            `data_test` will be prepended to this context to ensure continuity.
-        max_calibration_samples : int, default=1000
-            The maximum number of calibration samples to generate. The function will truncate
-            `data_test` and compute a window step size such that this limit is not exceeded.
+        prediction_length: int
+            The forecast horizon of the model.
+        max_calibration_samples: int
+            The maximum number of calibration samples to generate.
+        skip_first_n_samples: Optional[Dict[int, int]], default=None
+            The number of samples to skip at the beginning of each time series.
+        skip_last_n_samples: Optional[Dict[int, int]], default=None
+            The number of samples to skip at the end of each time series.
+        require_full_target: bool, default=False
+            Whether to require the target to be full (i.e. t+h available).
+        sampling_method: Literal["fixed_stride", "random"], default="fixed_stride",
+            The method to use for sampling the calibration samples.
 
-        Returns
+        Returns:
         -------
-        Tuple containing the forecast configuration for creating calibration predictions
+        np.ndarray
+            A 1D global boolean mask with selected calibration samples.
         """
 
         def _get_divisors(n: int) -> List[int]:
@@ -677,31 +694,84 @@ class ForecastingPipeline(AbstractPipeline):
                 The step size for rolling forecasting that respects the calibration constraint.
             """
             for step in _get_divisors(prediction_length):
-                if samples // step <= max_samples:
+                if np.ceil(samples / step) <= max_samples:
                     return step
             return prediction_length
 
-        samples = data_test.num_timesteps_per_item().max()
-        window_step = _compute_window_step(
-            samples,
-            self.predictor.prediction_length,
-            max_calibration_samples,
-        )
-        idx_split = max_calibration_samples * window_step
-        logging.info("Automatically determined calibration window_step: %s", window_step)
-        # Prepare truncated calibration set from the tail of data_test
-        other_data = data_test.slice_by_timestep(end_index=-idx_split)
-        data_test = data_test.slice_by_timestep(start_index=-idx_split)
+        # ensure contiguous blocks by (item_id, timestamp)
+        data_test = data_test.sort_values([ITEMID, TIMESTAMP])
 
-        if data_previous_context is not None:
-            data_previous_context = pd.concat([data_previous_context, other_data]).sort_index()
-        else:
-            data_previous_context = other_data
+        lengths = data_test.num_timesteps_per_item().to_numpy()  # [n_items]
+        n_items = len(lengths)
 
-        if len(data_previous_context) == 0:
-            data_previous_context = None
+        # CSR-style pointers into the flattened arrays
+        indptr = np.empty(n_items + 1, dtype=np.int64)
+        indptr[0] = 0
+        np.cumsum(lengths, out=indptr[1:])
+        N_total = int(indptr[-1])
 
-        return data_test, data_previous_context, True, window_step
+        # drop the first samples
+        sf = skip_first_n_samples or {}
+        sl = skip_last_n_samples or {}
+
+        # per-item valid local range (inclusive)
+        start_local = np.array([sf.get(i, 0) for i in range(n_items)], dtype=int)
+        end_local = lengths - 1 - np.array([sl.get(i, 0) for i in range(n_items)], dtype=int)
+        if require_full_target:
+            end_local = np.minimum(end_local, lengths - 1 - prediction_length)
+
+        # span = number of candidate anchors at step=1
+        span = (end_local - start_local + 1).clip(min=0)
+        mask = np.zeros(N_total, dtype=bool)
+
+        # optional: precompute step per unique span using your helper
+        # (group by identical spans to avoid repeated calls)
+        if sampling_method == "fixed_stride":
+            logging.warning(
+                "Using sampling_method='fixed_stride'. "
+                "Note: if prediction_length << seasonality and max_calibration_samples is small, "
+                "calibration coverage may be poor. Consider sampling_method='random' instead. "
+                "TODO: add option to account for seasonality when selecting calibration samples."
+            )
+
+            span_series = pd.Series(span)
+            groups = span_series.groupby(span_series).apply(lambda x: x.index.tolist()).to_dict()
+            step_for_span = {L: _compute_window_step(int(L), prediction_length, max_calibration_samples) for L in groups.keys()}
+
+        vals_per_item = {}
+
+        for i in range(n_items):
+            if span[i] == 0:
+                continue
+
+            s_glob = int(indptr[i] + start_local[i])
+            e_glob = int(indptr[i] + end_local[i])  # inclusive
+
+            if sampling_method == "fixed_stride":
+                step_i = step_for_span[int(span[i])]
+                # initial stride pick using the aligned step
+                # idx = np.arange(s_glob, e_glob + 1, step_i, dtype=np.int32)
+                # pick indices backwards from the end
+                idx = np.arange(e_glob, s_glob - 1, -step_i, dtype=np.int32)
+                idx = idx[::-1]  # optional: keep in ascending order
+                if len(idx) > max_calibration_samples:
+                    idx = idx[-max_calibration_samples:]
+                mask[idx] = True
+                vals_per_item[i] = len(idx)
+
+            elif sampling_method == "random":
+                rng = np.random.default_rng(seed=42)
+                valid_idx = np.arange(s_glob, e_glob + 1, dtype=np.int32)
+                chosen = rng.choice(valid_idx, size=max_calibration_samples, replace=False)
+                mask[chosen] = True
+                vals_per_item[i] = len(chosen)
+
+            else:
+                raise ValueError("Unknown sampling method %s", sampling_method)
+
+        logging.info("Calibration samples per time series: %s", vals_per_item)
+
+        return mask
 
     def generate_forecasts(
         self,
@@ -709,6 +779,7 @@ class ForecastingPipeline(AbstractPipeline):
         data_previous_context: Optional[Union[TimeSeriesDataFrame, TabularDataFrame]] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> Dict[str, ForecastCollection]:
         """
         Generates forecasts using the predictor, supporting both single-shot and rolling modes.
@@ -725,6 +796,9 @@ class ForecastingPipeline(AbstractPipeline):
         window_step : int, default=1
             Step size for rolling forecast windows. Smaller values create denser forecasts.
             **Note**: This parameter is ignored if `max_calibration_samples` is set.
+        index_mask: np.ndarray
+            A 1D global boolean mask with selected samples to generate forecasts on. If provided
+            `rolling` and `window_step` will be ignored.
 
         Returns
         -------
@@ -741,7 +815,7 @@ class ForecastingPipeline(AbstractPipeline):
             data_test.index.get_level_values("timestamp").min(),
             data_test.index.get_level_values("timestamp").max(),
         )
-        predictions = self.predictor.predict(data_test, data_previous_context, rolling, window_step)
+        predictions = self.predictor.predict(data_test, data_previous_context, rolling, window_step, index_mask)
 
         return {self.predictor.name: predictions}
 
@@ -853,26 +927,33 @@ class ForecastingPipeline(AbstractPipeline):
 
         # ---------- define calibration dataset ----------
         if self.postprocessors is not None:
-            if calibration_based_on == "val":
-                calibration_data = data_val
-                context_data = data_train
-            elif calibration_based_on == "train":
+            if calibration_based_on == "auto":
+                index_mask = self.auto_generate_calibration_config(
+                    data_train,
+                    prediction_length=self.predictor.prediction_length,
+                    max_calibration_samples=200,
+                    require_full_target=True,
+                )
                 calibration_data = data_train
                 context_data = None
-            elif calibration_based_on == "train_val":
-                calibration_data = pd.concat([data_train, data_val]).sort_index()
-                context_data = None
-            elif calibration_based_on == "auto":
-                calibration_data, context_data, rolling, calibration_window_step = self.auto_generate_calibration_config(data_train, max_calibration_samples=500)
             else:
-                raise ValueError(f"Invalid calibration_based_on: {calibration_based_on}")
+                index_mask = None  # set default to None
+                if calibration_based_on == "val":
+                    calibration_data = data_val
+                    context_data = data_train
+                elif calibration_based_on == "train":
+                    calibration_data = data_train
+                    context_data = None
+                elif calibration_based_on == "train_val":
+                    calibration_data = pd.concat([data_train, data_val]).sort_index()
+                    context_data = None
 
-            logging.info(
-                "Use calibration data from %s to %s for fitting postprocessors",
-                calibration_data.index.get_level_values("timestamp").min(),
-                calibration_data.index.get_level_values("timestamp").max(),
-            )
-            logging.info("Calibration window step: %s", calibration_window_step)
+                logging.info(
+                    "Use calibration data from %s to %s for fitting postprocessors",
+                    calibration_data.index.get_level_values("timestamp").min(),
+                    calibration_data.index.get_level_values("timestamp").max(),
+                )
+                logging.info("Calibration window step: %s", calibration_window_step)
 
             # ---------- generate forecasts on calibration dataset using the predictor ----------
             logging.info("Generating forecasts on calibration data...")
@@ -881,6 +962,7 @@ class ForecastingPipeline(AbstractPipeline):
                 data_previous_context=context_data,
                 rolling=True,
                 window_step=calibration_window_step,
+                index_mask=index_mask,
             )
 
             # ---------- train postprocessors ----------

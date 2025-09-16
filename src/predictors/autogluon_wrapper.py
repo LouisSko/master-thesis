@@ -142,6 +142,7 @@ class AutogluonPredictor(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series.
@@ -184,6 +185,7 @@ class AutogluonPredictor(AbstractPredictor):
             window_step,
             skip_first,
             rolling=rolling,
+            index_mask=index_mask,
         )
 
         dl = DataLoader(ds, batch_size=512)
@@ -229,6 +231,8 @@ class AutogluonPredictor(AbstractPredictor):
 
         assert forecasts_array.shape[0] == len(ds), "row count mismatch"
 
+        freq = data.freq
+
         # If rolling, output data covers all input rows
         if rolling:
             output_data = data
@@ -236,7 +240,12 @@ class AutogluonPredictor(AbstractPredictor):
             # Only the most recent timestep per series
             output_data = data.slice_by_timestep(start_index=-1)
 
-        return ds.to_forecast_collection(predictions=torch.tensor(forecasts_array), lead_times=self.lead_times, output_data=output_data)
+        return ds.to_forecast_collection(
+            predictions=torch.tensor(forecasts_array),
+            lead_times=self.lead_times,
+            output_data=output_data,
+            freq=freq,
+        )
 
 
 class PatchTST_Ag(AutogluonPredictor):

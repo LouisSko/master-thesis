@@ -1,20 +1,23 @@
 """This Module provides utilities for probabilistic time series forecasting, including data structures, evaluation, and visualization tools."""
 
 import os
-from typing import List, Optional, Dict, Tuple, Union
+from typing import List, Optional, Dict, Tuple, Union, Callable, Literal
 import pandas as pd
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import scoringrules as sr
 from scipy.interpolate import interp1d
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, PrivateAttr
 from autogluon.timeseries import TimeSeriesDataFrame
 from gluonts.model.forecast import QuantileForecast
 import math
 import matplotlib.dates as mdates
+import matplotlib as mpl
 from pathlib import Path
 import joblib
+from joblib import Parallel, delayed
+from tqdm_joblib import tqdm_joblib
 import logging
 from tqdm import tqdm
 from numpy.typing import NDArray
@@ -23,6 +26,9 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import seaborn as sns
 import json
+from hashlib import blake2b
+import tempfile
+
 
 PIPELINE_CONFIG_FILE_NAME = "pipeline_config.json"
 PREDICTIONS_FILENAME = "predictions.joblib"
@@ -34,6 +40,9 @@ DIR_POSTPROCESSORS = "postprocessors"
 ITEMID = "item_id"
 TIMESTAMP = "timestamp"
 TARGET = "target"
+
+
+CACHE_DIR = Path(__file__).resolve().parents[2] / "results" / "metrics_cache"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(filename)s - %(message)s")
 
@@ -133,9 +142,143 @@ class TimeSeriesForecast(BaseModel):
     quantiles: List[float] = Field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
     freq: Union[pd.Timedelta, pd.DateOffset]
     forecast_mask: NDArray[np.bool_]
+    _cache_dir: Optional[Path] = PrivateAttr(default=None)
+    _mem_cache: Dict[str, np.ndarray] = PrivateAttr(default_factory=dict)  # key=f"{kind}:{sig}"
+    _cache_sig: str = PrivateAttr(default="")
 
     class Config:
         arbitrary_types_allowed = True
+
+        # ---------- cache control ----------
+
+    def set_cache_dir(self, path: Union[str, Path]) -> None:
+        """Enable disk caching in a directory and reset mem cache."""
+        p = Path(path)
+        p.mkdir(parents=True, exist_ok=True)
+        self._cache_dir = p
+        self._mem_cache = {}
+        self._cache_sig = self._pack_signature()
+
+    def clear_cache_dir(self) -> None:
+        """Disable disk caching (memory cache stays)."""
+        self._cache_dir = None
+        self._mem_cache = {}
+        self._cache_sig = ""
+
+    # ---------- signature ----------
+    def _pack_signature(self) -> str:
+        """
+        Digest that changes if predictions/targets/quantiles/mask/freq/item change.
+        One signature for all packs (crps, quantile_scores, hits/coverage).
+        """
+        y_pred, y_true = self.get_aligned_predictions_and_targets()  # y_pred: (T,H,Q), y_true: (T,H)
+        h = blake2b(digest_size=16)
+        h.update(np.asarray(self.quantiles, dtype=float).tobytes())
+        h.update(np.asarray(self.forecast_mask, dtype=bool).tobytes())
+        h.update(str(self.freq).encode())
+        h.update(np.asarray(self.item_id, dtype=np.int64).tobytes())
+        # content
+        h.update(y_pred.shape.__repr__().encode())
+        h.update(y_pred.tobytes())
+        h.update(y_true.shape.__repr__().encode())
+        h.update(y_true.tobytes())
+        return h.hexdigest()
+
+    # ---------- file helpers ----------
+    def _pack_file(self, kind: str) -> Optional[Path]:
+        """
+        File path for a given pack kind ("crps", "quantile_scores", "hits").
+        Stored as .npz with a single array under the same key name.
+        """
+        if self._cache_dir is None:
+            return None
+        return self._cache_dir / f"{kind}_item{self.item_id}_{self._cache_sig}.npz"
+
+    # ---------- generic loader/builder ----------
+    def _load_or_build_pack(self, kind: str, builder: Callable[[], np.ndarray]) -> np.ndarray:
+        """
+        Loads a pack from memory/disk if available; otherwise builds it via `builder`,
+        stores to disk (if cache dir is set), and memoizes in-memory.
+
+        kind ∈ {"crps", "quantile_scores", "hits"}
+        """
+        # lazy init for legacy objects (keep names stable for users migrating)
+        if not (hasattr(self, "_mem_cache") and hasattr(self, "_cache_dir") and hasattr(self, "_cache_sig")):
+            # default: no disk caching; just compute signature for mem cache
+            self._cache_dir = None
+            self._mem_cache = {}
+            self._cache_sig = self._pack_signature()
+
+        key = f"{kind}:{self._cache_sig}"
+        if key in self._mem_cache:
+            return self._mem_cache[key]
+
+        fpath = self._pack_file(kind)
+        if fpath is not None and fpath.exists():
+            with np.load(fpath) as z:
+                arr = z[kind]
+            self._mem_cache[key] = arr
+            return arr
+
+        # build
+        arr = builder()
+
+        # persist atomically
+        if fpath is not None:
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=fpath.parent, delete=False, suffix=".npz") as tmp:
+                np.savez_compressed(tmp.name, **{kind: arr})
+                tmp_name = tmp.name
+            os.replace(tmp_name, fpath)  # atomic on POSIX
+
+        self._mem_cache[key] = arr
+        return arr
+
+    # ---------- concrete pack builders ----------
+    def _build_crps_pack(self) -> np.ndarray:
+        """
+        Returns (T, H) CRPS matrix for all horizons.
+        """
+        y_pred, y_true = self.get_aligned_predictions_and_targets()  # (T,H,Q), (T,H)
+        T, H, Q = y_pred.shape
+        crps_mat = np.full((T, H), np.nan, dtype=float)
+
+        for h in range(H):
+            yh = y_true[:, h]
+            ph = y_pred[:, h, :]
+            crps_vec = sr.crps_quantile(yh, ph, self.quantiles, backend="numpy")  # (T,)
+            crps_mat[:, h] = crps_vec
+        return crps_mat
+
+    def _build_quantile_scores_pack(self) -> np.ndarray:
+        """
+        Returns (T, H, Q) pinball loss per timestamp, horizon, quantile.
+        """
+        y_pred, y_true = self.get_aligned_predictions_and_targets()  # (T,H,Q), (T,H)
+        T, H, Q = y_pred.shape
+        out = np.full((T, H, Q), np.nan, dtype=float)
+
+        # scoringrules.quantile_score expects (N,) y and (N,) preds for one q, or vectorized column-wise
+        for h in range(H):
+            yh = y_true[:, h]  # (T,)
+            ph = y_pred[:, h, :]  # (T,Q)
+            # compute pinball for all q columns
+            # vectorized: for each q, sr.quantile_score(y, preds[:,q], q)
+            for qi, q in enumerate(self.quantiles):
+                out[:, h, qi] = sr.quantile_score(yh, ph[:, qi], q)
+        return out
+
+    def _build_hits_pack(self) -> np.ndarray:
+        """
+        Returns (T, H, Q) boolean indicators of coverage: 1{ y_true <= q̂ }.
+        This lets us compute empirical coverage rates quickly by averaging over time.
+        """
+        y_pred, y_true = self.get_aligned_predictions_and_targets()  # (T,H,Q), (T,H)
+        # broadcast y_true (T,H,1) against y_pred (T,H,Q)
+        hits = (y_true[..., None] <= y_pred).astype(float)  # (T,H,Q), dtype=bool
+        mask = np.isnan(y_true)
+        hits[mask] = np.nan
+        return hits
 
     def get_lead_times(self) -> List[int]:
         return list(self.lead_time_forecasts.keys())
@@ -164,18 +307,18 @@ class TimeSeriesForecast(BaseModel):
         result = pd.DataFrame(horizon_fc.predictions, index=self.data[self.forecast_mask].index, columns=self.quantiles)
 
         # add prediction date information
-        result["prediction_date"] = result.index.get_level_values("timestamp") + self.freq * horizon_fc.lead_time
+        result["prediction_date"] = result.index.get_level_values(TIMESTAMP) + self.freq * horizon_fc.lead_time
 
         # Reset index to turn MultiIndex into columns
         result_reset = result.reset_index()
         data_reset = self.data.reset_index()
 
         # add the target information.
-        merged = result_reset.merge(data_reset, left_on=["item_id", "prediction_date"], right_on=["item_id", "timestamp"], how="left", suffixes=["", "_remove"])
+        merged = result_reset.merge(data_reset, left_on=[ITEMID, "prediction_date"], right_on=[ITEMID, TIMESTAMP], how="left", suffixes=["", "_remove"])
 
         # add actual values
-        data_reset = data_reset.rename(columns={"target": "current"})
-        merged = merged.merge(data_reset, on=["item_id", "timestamp"])
+        data_reset = data_reset.rename(columns={TARGET: "current"})
+        merged = merged.merge(data_reset, on=[ITEMID, TIMESTAMP])
 
         # if merged[TARGET].isna().all():
         #     raise ValueError("target column is nan. Frequency (freq) might not be specified correctly.")
@@ -257,52 +400,69 @@ class TimeSeriesForecast(BaseModel):
             item_id=self.item_id,
         )
 
+    # ---------- public metrics using the packs ----------
     def get_crps(self, forecast_horizon: int, mean_time: bool = True) -> np.ndarray:
         """
-        Computes the Continuous Ranked Probability Score (CRPS) for a forecast horizon.
-
-        Args:
-            data (pd.DataFrame): DataFrame containing actual target values.
-
-        Returns:
-            float: The mean CRPS score across all samples.
+        Selects the requested horizon from the all-horizon CRPS pack.
+        Returns time-mean if mean_time else the per-timestamp vector.
         """
+        lead_times_sorted = sorted(self.lead_time_forecasts.keys())
+        try:
+            col = lead_times_sorted.index(forecast_horizon)
+        except ValueError:
+            raise KeyError(f"Lead time {forecast_horizon} not found for item {self.item_id}")
 
-        data = self.to_dataframe(forecast_horizon)
-        quantile_predictions = data[self.quantiles].to_numpy()
-        target = data["target"].to_numpy()
-
-        if all(np.isnan(target)):
-            # logging.warning("No crps score can be calculated for lead time: %s", forecast_horizon)
-            return np.array([np.nan]) if mean_time else torch.full((len(target),), float("nan"))
-
-        crps = sr.crps_quantile(target, quantile_predictions, self.quantiles, backend="numpy")
+        crps_mat = self._load_or_build_pack("crps", self._build_crps_pack)  # (T, H)
+        crps_vec = crps_mat[:, col]
 
         if mean_time:
-            return np.array([crps[~np.isnan(crps)].mean()])
+            return np.array([np.nanmean(crps_vec)])
         else:
-            return crps
+            return crps_vec
 
-    def get_quantile_score(self, forecast_horizon: int, mean_time: bool = True) -> Union[pd.DataFrame, pd.Series]:
+    def get_quantile_score(self, forecast_horizon: int, mean_time: bool = True) -> Union[pd.Series, pd.DataFrame]:
         """
-        Computes the average quantile score (pinball loss) for the forecast.
+        Returns pinball losses by quantile for one horizon.
+        If mean_time=True → pd.Series of mean loss per quantile.
+        Else → pd.DataFrame indexed by time with columns=self.quantiles.
 
-        Parameters
-        ----------
-            data (pd.DataFrame): DataFrame containing actual target values.
-
-        Returns
-        -------
-            pd.Series: A Series with the mean pinball loss for each quantile.
+        # TODO: to_dataframe is not efficient
         """
-        data = self.to_dataframe(forecast_horizon)
-        quantile_scores = np.column_stack([sr.quantile_score(data["target"].to_numpy(), data[q].to_numpy(), q) for q in self.quantiles])
+        lead_times_sorted = sorted(self.lead_time_forecasts.keys())
+        try:
+            col = lead_times_sorted.index(forecast_horizon)
+        except ValueError:
+            raise KeyError(f"Lead time {forecast_horizon} not found for item {self.item_id}")
 
-        quantile_scores = pd.DataFrame(quantile_scores, columns=self.quantiles, index=data.index)
+        qs_pack = self._load_or_build_pack("quantile_scores", self._build_quantile_scores_pack)  # (T,H,Q)
+
+        # recover the timestamp index that matches get_aligned_predictions_and_targets() slicing
+        # easiest is to reuse to_dataframe() to get the same index; we only need the index shape
+        # df_idx = self.to_dataframe(forecast_horizon).index[:-1]  # aligned with y_pred[:-1]
+        df_idx = self.data.index[self.forecast_mask][:-1]
+
+        mat = qs_pack[:, col, :]  # (T, Q)
         if mean_time:
-            return quantile_scores.mean()
+            return pd.Series(np.nanmean(mat, axis=0), index=self.quantiles)
         else:
-            return quantile_scores
+            return pd.DataFrame(mat, index=df_idx, columns=self.quantiles)
+
+    def get_empirical_coverage_rates(self, forecast_horizon: int) -> Dict[float, float]:
+        """
+        Uses the hits pack (T,H,Q) and averages over time to get empirical coverage.
+        """
+        lead_times_sorted = sorted(self.lead_time_forecasts.keys())
+        try:
+            col = lead_times_sorted.index(forecast_horizon)
+        except ValueError:
+            raise KeyError(f"Lead time {forecast_horizon} not found for item {self.item_id}")
+
+        hits_pack = self._load_or_build_pack("hits", self._build_hits_pack)  # (T,H,Q), bool
+        hits = hits_pack[:, col, :].astype(float)  # (T, Q)
+
+        cov = np.nanmean(hits, axis=0)  # (Q,)
+
+        return {q: float(c) for q, c in zip(self.quantiles, cov)}
 
     def get_pit_values(self, forecast_horizon: int) -> np.ndarray:
         """
@@ -348,13 +508,6 @@ class TimeSeriesForecast(BaseModel):
         plt.title("PIT Histogram")
         plt.legend()
         plt.show()
-
-    def get_empirical_coverage_rates(self, forecast_horizon: int) -> Dict[float, float]:
-
-        results = self.to_dataframe(forecast_horizon).dropna()
-        empirical_coverage_rates = {q: (results[q] >= results["target"]).mean() for q in self.quantiles}
-
-        return empirical_coverage_rates
 
     def get_reliability_diagram(self, forecast_horizon: int) -> None:
 
@@ -553,6 +706,16 @@ class ForecastCollection(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+    def set_cache_dir(self, root: Union[str, Path]) -> None:
+        root = Path(root)
+        root.mkdir(parents=True, exist_ok=True)
+        for item_id in self.get_item_ids():
+            self.get_time_series_forecast(item_id).set_cache_dir(root)
+
+    def clear_cache_dir(self) -> None:
+        for item_id in self.get_item_ids():
+            self.get_time_series_forecast(item_id).clear_cache_dir()
+
     def get_item_ids(self) -> List[int]:
         return list(self.item_ids.keys())
 
@@ -586,79 +749,424 @@ class ForecastCollection(BaseModel):
             preds.append(self.get_time_series_forecast(item_id).to_QuantileForecast(idx))
         return preds
 
+    def plot_forecasts(
+        self,
+        start: Optional[Union[int, pd.Timestamp]] = None,
+        context_length: int = 100,
+        max_historical_context: int = 1000,
+        max_forecast_steps: Optional[int] = None,
+        figsize: Optional[Tuple[int, int]] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        max_cols: int = 3,
+        sharex: bool = False,
+        sharey: bool = False,
+        show_xy_labels: bool = True,
+        show_legend: bool = True,
+        title_prefix: str = "",
+        legend_position: str = "below",
+        font_sizes: Optional[Dict[str, int]] = None,
+        tight_margins: bool = False,
+        margin_padding: float = 0.05,
+        show_history_overview: bool = False,
+        history_overview_height: float = 0.3,
+        save_path: Optional[str] = None,
+        dpi: int = 300,
+    ) -> None:
+        """
+        Plot all TimeSeriesForecast objects in this collection using the plot_multiple_forecasts function.
+
+        Parameters
+        ----------
+        start : Optional[Union[int, pd.Timestamp]]
+            - If int: Index into the time series to start the forecast from.
+            - If pd.Timestamp: Timestamp to start the forecast from. Must exist in the time series index.
+            - If None: Defaults to the last available index for each forecast.
+
+        context_length : int
+            Number of historical data points to include in the plot before the forecast start.
+
+        max_historical_context : int
+            Maximum number of historical data points to show in the history overview subplot.
+            This controls how far back the overview looks from the forecast start point.
+            Default: 1000. Use larger values for longer historical context.
+
+        max_forecast_steps : Optional[int]
+            Maximum number of forecast steps to plot. If None, plots all available forecast steps.
+            If specified, limits the number of future time steps displayed in the forecast plots.
+            Useful for focusing on short-term predictions or reducing visual clutter.
+
+        figsize : Optional[Tuple[int, int]]
+            Figure size as (width, height). If provided, overrides width and height parameters.
+
+        width : Optional[int]
+            Figure width in inches. Used only if figsize is None.
+
+        height : Optional[int]
+            Figure height in inches. Used only if figsize is None.
+
+        max_cols : int
+            Maximum number of columns in the grid layout.
+
+        sharex : bool
+            Whether to share x-axis across subplots.
+
+        sharey : bool
+            Whether to share y-axis across subplots.
+
+        show_xy_labels : bool
+            Whether to show x- and y-labels on subplots.
+
+        show_legend : bool
+            Whether to show a single legend.
+
+        title_prefix : str
+            Prefix for subplot titles.
+
+        legend_position : str
+            Position of the legend: "below" (below the plots) or "right" (to the right of the plots).
+
+        font_sizes : Optional[Dict[str, int]]
+            Dictionary controlling font sizes for various text elements. If None, default sizes are used.
+            Available keys: 'title', 'subtitle', 'xlabel', 'ylabel', 'legend', 'tick_labels', 'grid_labels'.
+
+        tight_margins : bool
+            Whether to use tight margins around the data. If True, reduces padding between plot borders and data.
+
+        margin_padding : float
+            Padding factor for margins when tight_margins=True. Smaller values (0.01-0.05) create tighter plots,
+            larger values (0.1-0.2) create more spacious plots. Default: 0.05.
+
+        show_history_overview : bool
+            Whether to add a full-length historical overview subplot at the top showing the complete time series.
+            This provides context for the zoomed-in forecast plots below.
+
+        history_overview_height : float
+            Height ratio for the history overview subplot relative to the total figure height.
+            Range: 0.1 to 0.5. Default: 0.3 (30% of total height).
+
+        save_path : Optional[str]
+            If provided, save the plot to this path.
+
+        dpi : int
+            DPI for saving the plot.
+
+        Returns
+        -------
+        None
+            Displays a matplotlib figure with subplots showing forecasts for each TimeSeriesForecast object.
+        """
+        plot_multiple_forecasts(
+            forecasts_dict=self.item_ids,
+            start=start,
+            context_length=context_length,
+            max_historical_context=max_historical_context,
+            max_forecast_steps=max_forecast_steps,
+            figsize=figsize,
+            width=width,
+            height=height,
+            max_cols=max_cols,
+            sharex=sharex,
+            sharey=sharey,
+            show_xy_labels=show_xy_labels,
+            show_legend=show_legend,
+            title_prefix=title_prefix,
+            legend_position=legend_position,
+            font_sizes=font_sizes,
+            tight_margins=tight_margins,
+            margin_padding=margin_padding,
+            show_history_overview=show_history_overview,
+            history_overview_height=history_overview_height,
+            save_path=save_path,
+            dpi=dpi,
+        )
+
     def get_crps(
         self,
         item_ids: Optional[List[int]] = None,
         lead_times: Optional[List[int]] = None,
-        mean_time: bool = True,
+        mean_time: bool = False,
         mean_item_ids: bool = False,
         mean_lead_times: bool = False,
         decimal_places: Optional[int] = None,
+        weighting: Literal["micro", "macro"] = "micro",
     ) -> pd.DataFrame:
+        """
+        Aggregates CRPS with flexible outputs:
+
+        Flags:
+        - mean_time:     reduce over time (T)
+        - mean_item_ids: reduce over items (I)
+        - mean_lead_times: reduce over lead_time (L)
+
+        When BOTH mean_time=True and mean_item_ids=True:
+        - weighting="micro": every valid (item, time) gets equal weight (nanmean over I&T).
+        - weighting="macro": average within each item over time, then equal-weight over items.
+
+        Returns:
+        Depending on flags, either:
+            * per-lead rows (or per-lead columns) or
+            * per-item tables, or
+            * per-timestamp tables (when keeping time), or
+            * a single scalar column 'Mean CRPS'.
+        """
         item_ids = item_ids or self.get_item_ids()
-        if lead_times is None:
-            lead_times = self.get_lead_times()
 
-        all_scores = []
+        # --- discover leads per item and choose final lead list ---
+        per_item_leads = {}
         for item_id in item_ids:
-            scores = []
-            item = self.get_time_series_forecast(item_id)
-            for lt in lead_times:
-                if lt in item.lead_time_forecasts:
-                    crps = item.get_crps(forecast_horizon=lt, mean_time=mean_time)
-                    scores.append(crps)
+            it = self.get_time_series_forecast(item_id)
+            per_item_leads[item_id] = sorted(it.lead_time_forecasts.keys())
 
-            scores = np.vstack(scores).T
+        if lead_times is None:
+            all_leads = sorted({lt for ls in per_item_leads.values() for lt in ls})
+        else:
+            all_leads = [lt for lt in lead_times if any(lt in ls for ls in per_item_leads.values())]
 
-            idx = [item_id] if mean_time else item.to_dataframe(lt).index
-            all_scores.append(pd.DataFrame(scores, index=idx, columns=lead_times))
+        if not all_leads:
+            return pd.DataFrame()
 
-        crps_scores = pd.concat(all_scores)
+        # --- build (I, T_max, L) CRPS array and (I, T_max) timestamp array ---
+        item_mats = []  # list[(T_i, L)]
+        item_ts = []  # list[pd.DatetimeIndex length T_i]
+        valid_items = []
+        T_max = 0
+        for item_id in item_ids:
+            it = self.get_time_series_forecast(item_id)
+            crps_pack = it._load_or_build_pack("crps", it._build_crps_pack)  # (T, H_item)
+            it_leads_sorted = sorted(it.lead_time_forecasts.keys())
+            lead_to_col = {lt: j for j, lt in enumerate(it_leads_sorted)}
 
-        # drop max lead times rows
-        if not mean_time:
-            crps_scores = crps_scores.groupby(ITEMID).head(-max(lead_times))
+            # timestamps aligned to pack (forecast_masked, drop last row)
+            ts = it.data.index.get_level_values("timestamp")[it.forecast_mask][:-1]
+            if len(ts) == 0:
+                continue
 
-        if mean_lead_times:
-            crps_scores = pd.DataFrame(crps_scores.mean(axis=1), columns=["Mean CRPS"])
-        if mean_item_ids:
-            if mean_time:
-                crps_scores = pd.DataFrame(crps_scores.mean(axis=0), columns=["Mean CRPS"]).T
+            # (T_i, L) with NaN for missing leads for this item
+            M = np.full((len(ts), len(all_leads)), np.nan, dtype=float)
+            any_col = False
+
+            for j, lt in enumerate(all_leads):
+                if lt in lead_to_col:
+                    M[:, j] = crps_pack[:, lead_to_col[lt]]
+                    any_col = True
+            if not any_col:
+                continue
+
+            item_mats.append(M)
+            item_ts.append(pd.DatetimeIndex(ts))
+            valid_items.append(item_id)
+            T_max = max(T_max, M.shape[0])
+
+        if not item_mats:
+            return pd.DataFrame()
+
+        I = len(item_mats)
+        L = len(all_leads)
+
+        # pad to common T_max
+        crps_arr = np.full((I, T_max, L), np.nan, dtype=float)
+        ts_arr = np.full((I, T_max), np.datetime64("NaT"), dtype="datetime64[ns]")
+
+        for i, (M, ts) in enumerate(zip(item_mats, item_ts)):
+            Ti = M.shape[0]
+            crps_arr[i, :Ti, :] = M
+            ts_arr[i, :Ti] = ts.values
+
+        # get rid of the latest incomplete entries
+        # crps_arr = crps_arr[:, :-L, :]
+        # ts_arr = ts_arr[:, :-L]
+
+        # Helper to finalize (round)
+        def _done(df: pd.DataFrame) -> pd.DataFrame:
+            if decimal_places is not None:
+                df = df.round(decimal_places)
+            return df
+
+        # --- reduce according to flags ---
+
+        # TODO: for all methods add a "micro" and "macro" average.
+        # If macro we should be able to specify the aggregation scheme
+
+        # Case A: reduce over time & items
+        if mean_time and mean_item_ids:
+            if not mean_lead_times:
+                # per-lead row
+                if weighting == "micro":
+                    vals = np.nanmean(crps_arr, axis=(0, 1))  # (L,)
+                    out = pd.DataFrame([vals], index=["micro"], columns=all_leads)
+                else:
+                    per_item_lead = np.nanmean(crps_arr, axis=1)  # (I, L) mean over T
+                    vals = np.nanmean(per_item_lead, axis=0)  # (L,)
+                    out = pd.DataFrame([vals], index=["macro"], columns=all_leads)
+                return _done(out)
             else:
-                crps_scores = crps_scores.groupby(level=TIMESTAMP).mean()
-        if mean_time:
-            crps_scores.index.name = ITEMID
+                if weighting == "micro":
+                    val = float(np.nanmean(crps_arr))
+                    out = pd.DataFrame({"Mean CRPS": [val]}, index=["micro"])
+                else:
+                    per_item_scalar = np.nanmean(np.nanmean(crps_arr, axis=1), axis=1)  # (I,)
+                    val = float(np.nanmean(per_item_scalar))
+                    out = pd.DataFrame({"Mean CRPS": [val]}, index=["macro"])
+                return _done(out)
 
-        if decimal_places:
-            return crps_scores.round(decimal_places)
-        return crps_scores
+        # Case B: reduce over time only (keep items)
+        if mean_time and not mean_item_ids:
+            per_item_lead = np.nanmean(crps_arr, axis=1)  # (I, L)
+            out = pd.DataFrame(per_item_lead, index=valid_items, columns=all_leads)
+            out.index.name = "item_id"
+            if mean_lead_times:
+                out = pd.DataFrame({"Mean CRPS": np.nanmean(per_item_lead, axis=1)}, index=valid_items)
+                out.index.name = "item_id"
+            return _done(out)
+
+        # Case C: reduce over items only (keep time)
+        if not mean_time and mean_item_ids:
+            # We must aggregate by actual timestamps (inner-join across items by time)
+            # Build long table from arrays and groupby timestamp (per lead).
+            frames = []
+            for j, lt in enumerate(all_leads):
+                vals = crps_arr[:, :, j].ravel()
+                tss = ts_arr.ravel()
+                mask = np.isfinite(vals) & (tss.astype("datetime64[ns]") == tss)  # not NaT
+                if not mask.any():
+                    continue
+                dfj = pd.DataFrame({"timestamp": tss[mask], "crps": vals[mask]})
+                dfj = dfj.groupby("timestamp", as_index=True)["crps"].mean()
+                dfj.name = lt
+                frames.append(dfj)
+            if not frames:
+                return pd.DataFrame()
+            out = pd.concat(frames, axis=1).sort_index()  # index = timestamp, cols = leads
+            if mean_lead_times:
+                out = pd.DataFrame({"Mean CRPS": out.mean(axis=1)})
+            return _done(out)
+
+        # Case D: keep both items and time (no reduction over I nor T)
+        # Return a MultiIndex frame: index=(item_id, timestamp), columns=lead_time
+        rows = []
+        idx_items = []
+        idx_timestamps = []
+        for i, item_id in enumerate(valid_items):
+            Ti = np.count_nonzero(~np.isnat(ts_arr[i]))
+            if Ti == 0:
+                continue
+            df_i = pd.DataFrame(crps_arr[i, :Ti, :], columns=all_leads)
+            rows.append(df_i)
+            idx_items.extend([item_id] * Ti)
+            idx_timestamps.extend(pd.to_datetime(ts_arr[i, :Ti]))
+        if not rows:
+            return pd.DataFrame()
+        out = pd.concat(rows, axis=0)
+        out.index = pd.MultiIndex.from_arrays([idx_items, idx_timestamps], names=["item_id", "timestamp"])
+        out = out.sort_index()
+        if mean_lead_times:
+            out = pd.DataFrame({"Mean CRPS": out.mean(axis=1)}, index=out.index)
+        return _done(out)
 
     def get_empirical_coverage_rates(
-        self, item_ids: Optional[List[int]] = None, lead_times: Optional[List[int]] = None, mean_lead_times: bool = False, decimal_places: Optional[int] = None
+        self,
+        item_ids: Optional[List[int]] = None,
+        lead_times: Optional[List[int]] = None,
+        mean_lead_times: bool = False,
+        decimal_places: Optional[int] = None,
+        average_type: Literal["macro", "micro"] = "micro",
     ) -> pd.DataFrame:
+        """
+        Compute empirical coverage rates for specified item IDs and lead times.
 
+        This method calculates how well the predicted quantile intervals cover the true values
+        across different forecasting horizons and time series items. Coverage rates indicate
+        the percentage of true values that fall within the predicted intervals.
+
+        Two averaging strategies are available:
+        - **Macro averaging**: Individually computes coverage rates for each item-lead time combination,
+          then optionally averages across items and optionally averages across lead times
+        - **Micro averaging**: Directly averages the binary hit/miss indicators across all
+          item-lead time combinations simultaneously.
+
+        Parameters
+        ----------
+        item_ids : Optional[List[int]], default=None
+            List of item IDs to include in the computation. If None, all available item IDs are used.
+        lead_times : Optional[List[int]], default=None
+            List of lead times (forecasting horizons) to include. If None, all available lead times are used.
+        mean_lead_times : bool, default=False
+            If True, averages coverage rates across all lead times, returning a single column.
+            If False, returns separate coverage rates for each lead time.
+        decimal_places : Optional[int], default=None
+            Number of decimal places to round the final coverage rates. If None, no rounding is applied.
+        average_type : Literal["macro", "micro"], default="micro"
+            Averaging strategy:
+            - "macro": First average across items for each lead time, then optionally across lead times
+            - "micro": Average across all item-lead time combinations simultaneously
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with empirical coverage rates:
+            - Rows: quantile levels (e.g., 0.1, 0.5, 0.9)
+            - Columns: lead times (if mean_lead_times=False) or single averaged column
+            - Values: coverage rates between 0 and 1, where 1.0 means perfect coverage
+        """
+        # Use all available item IDs and lead times if none specified
         item_ids = item_ids or self.get_item_ids()
         if lead_times is None:
             lead_times = self.get_lead_times()
 
-        rates = {lt: [] for lt in lead_times}
+        if average_type == "macro":
+            # Macro averaging: compute coverage rates per item-lead time, then average across items
+            # Initialize dictionary to collect coverage rates for each lead time
+            rates = {lt: [] for lt in lead_times}
 
-        for item_id in item_ids:
-            item = self.get_time_series_forecast(item_id)
-            for lt in lead_times:
-                if lt in item.lead_time_forecasts:
-                    val = item.get_empirical_coverage_rates(lt)
-                    rates[lt].append(pd.Series(val))
+            # Iterate through each item and collect coverage rates
+            for item_id in item_ids:
+                item = self.get_time_series_forecast(item_id)
+                for lt in lead_times:
+                    if lt in item.lead_time_forecasts:
+                        # Get coverage rates for this specific item and lead time
+                        val = item.get_empirical_coverage_rates(lt)
+                        rates[lt].append(pd.Series(val))
 
-        coverage_df = pd.DataFrame({lt: pd.concat(rates[lt], axis=1).mean(axis=1) for lt in lead_times if rates[lt]})
+            # Average coverage rates across items for each lead time
+            coverage_df = pd.DataFrame({lt: pd.concat(rates[lt], axis=1).mean(axis=1) for lt in lead_times if rates[lt]})
+            if mean_lead_times:
+                # Average across all lead times to get a single coverage rate per quantile
+                coverage_df = pd.DataFrame(coverage_df.mean(axis=1), columns=["Mean (macro)"])
+            else:
+                # Add a column with the average across lead times while keeping individual lead time columns
+                coverage_df.loc[:, "Mean (macro)"] = coverage_df.mean(axis=1)
 
-        if mean_lead_times:
-            coverage_df = pd.DataFrame(coverage_df.mean(axis=1), columns=["Empirical coverage rates averaged over all lead times"])
         else:
-            coverage_df.loc[:, "Empirical coverage rates averaged over all lead times"] = coverage_df.mean(axis=1)
+            # Micro averaging: directly average binary hit/miss indicators across all combinations
+            # Collect all hit/miss indicators across items and lead times
+            hits_all = []
+            for item_id in item_ids:
+                item = self.get_time_series_forecast(item_id)
+                # Load binary indicators: True if true value falls within predicted interval
+                hits = item._load_or_build_pack("hits", item._build_hits_pack)  # Shape: (T, H, Q) where T=time, H=horizon, Q=quantiles
+                # Select only the specified lead times (convert to 0-based indices)
+                lead_time_indices = np.array(lead_times) - 1
+                hits = hits[:, lead_time_indices, :]
+                hits_all.append(hits)
 
+            # Stack all items together for simultaneous averaging
+            hits_all = np.vstack(hits_all)  # Shape: (N*T, H, Q) where N=number of items
+
+            if mean_lead_times:
+                # Average across both time steps and lead times, keeping quantiles
+                cv = np.nanmean(hits_all, axis=(0, 1))  # Average over time and lead times
+                coverage_df = pd.DataFrame(cv, columns=[f"({min(lead_times)}-{max(lead_times)})"], index=item.quantiles)
+            else:
+                # Average only across time steps, keeping lead times and quantiles separate
+                cv = np.nanmean(hits_all, axis=0).swapaxes(0, 1)  # Average over time only
+                coverage_df = pd.DataFrame(cv, columns=lead_times, index=item.quantiles)
+                coverage_df.loc[:, "Mean (micro)"] = np.nanmean(hits_all, axis=(0, 1))
+
+        # Set index name for clarity
         coverage_df.index.name = "quantile"
 
+        # Apply rounding if requested
         if decimal_places:
             return coverage_df.round(decimal_places)
         return coverage_df
@@ -865,6 +1373,7 @@ class ForecastCollection(BaseModel):
         plt.show()
 
     def save(self, file_path: Path) -> None:
+        self.clear_cache_dir()
         joblib.dump(self, file_path)
         logging.info("Saved prediction collection to %s", file_path)
 
@@ -873,6 +1382,8 @@ class ForecastCollection(BaseModel):
         obj = joblib.load(file_path)
         if not isinstance(obj, cls):
             raise ValueError("Loaded object is not a ForecastCollection")
+        obj.set_cache_dir(CACHE_DIR)
+
         return obj
 
 
@@ -921,7 +1432,7 @@ def get_quantile_scores(
         if isinstance(value, ForecastCollection):
             pred = value
         elif isinstance(value, (str, Path)):
-            pred = joblib.load(value)
+            pred = ForecastCollection.load(value)
         else:
             raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
 
@@ -978,7 +1489,7 @@ def get_empirical_coverage_rates(
         if isinstance(value, ForecastCollection):
             pred = value
         elif isinstance(value, (str, Path)):
-            pred = joblib.load(value)
+            pred = ForecastCollection.load(value)
         else:
             raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
 
@@ -995,6 +1506,34 @@ def get_empirical_coverage_rates(
     return scores
 
 
+def _compute_crps_one(
+    key: str,
+    value: Union["ForecastCollection", str, Path],
+    lead_times: Optional[List[int]],
+    mean_lead_times: bool,
+    item_ids: Optional[List[int]],
+    reference_key: Optional[str],
+) -> Tuple[str, pd.Series, bool]:
+    """
+    Compute CRPS for a single prediction entry (preloaded ForecastCollection or path).
+    Returns (key, series, is_reference).
+    """
+    pred = ForecastCollection.load(value) if isinstance(value, (str, Path)) else value
+
+    crps_df = pred.get_crps(
+        lead_times=lead_times,
+        mean_lead_times=mean_lead_times,
+        mean_time=True,
+        mean_item_ids=True,
+        item_ids=item_ids,
+        decimal_places=None,
+    )
+
+    series = crps_df.squeeze()  # Series indexed by lead times or a scalar if mean_lead_times
+    is_reference = reference_key is not None and key == reference_key
+    return key, series, is_reference
+
+
 def get_crps_scores(
     predictions: Dict[str, Union["ForecastCollection", Path]],
     lead_times: Optional[List[int]] = None,
@@ -1004,86 +1543,60 @@ def get_crps_scores(
     add_mean: Optional[bool] = True,
     decimal_places: Optional[int] = None,
     sort: bool = True,
+    n_jobs: int = -1,  # parallelism: use all cores by default
+    backend: str = "loky",  # processes (safer for CPU-bound work)
+    prefer: Optional[str] = "processes",
 ) -> pd.DataFrame:
     """
-    Computes and returns CRPS (Continuous Ranked Probability Score) values averaged across
-    specified lead times. Supports both eager (preloaded ForecastCollection objects) and lazy
-    (file paths to joblib files) prediction loading.
-
-    Parameters
-    ----------
-    predictions : Dict[str, Union[ForecastCollection, Path]]
-        Dictionary mapping keys to either:
-        - Preloaded ForecastCollection objects, or
-        - File paths (Path or str) to joblib files that contain ForecastCollection objects.
-    lead_times : Optional[List[int]], default=None
-        List of lead times to include in the CRPS computation. If None, all lead times are used.
-    mean_lead_times : bool, default=False
-        If True, CRPS scores are averaged across lead times.
-    item_ids : Optional[List[int]], default=None
-        List of item IDs to include in the CRPS computation. If None, all item IDs are used.
-    reference_predictions : Optional[str], default=None
-        Key of a prediction set to be used as a reference for normalization.
-        If provided, all CRPS values will be divided by the CRPS values from this prediction.
-    add_mean : Optional[bool], default=True
-        Whether to add a "Mean CRPS" row to the output.
-    decimal_places : Optional[int], default=None
-        Number of decimal places to round numerical values to. If None, no rounding is applied.
-    sort : bool, default=True
-        If True and `add_mean` is enabled, columns will be sorted by mean CRPS in ascending order.
-
-    Returns
-    -------
-    pd.DataFrame
-        A DataFrame with CRPS values (or normalized CRPS values). Rows represent lead times
-        (or a single row if `mean_lead_times=True`), and columns represent prediction keys.
-        Includes an optional "Mean CRPS" row for column-wise averages.
+    Parallelized CRPS computation for picklable ForecastCollections (and/or paths to them).
     """
+    keys_in_order = list(predictions.keys())
 
-    scores_dict = {}
-    reference_scores = None
+    tasks = (delayed(_compute_crps_one)(key, predictions[key], lead_times, mean_lead_times, item_ids, reference_predictions) for key in keys_in_order)
 
-    for key, value in tqdm(predictions.items(), desc="Compute CRPS score"):
-        if isinstance(value, ForecastCollection):
-            pred = value
-        elif isinstance(value, (str, Path)):
-            pred = joblib.load(value)
-        else:
-            raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
+    results: List[Tuple[str, pd.Series, bool]] = []
+    with tqdm_joblib(tqdm(total=len(keys_in_order), desc="Compute CRPS (parallel)")):
+        results = Parallel(n_jobs=n_jobs, backend=backend, prefer=prefer)(tasks)
 
-        crps_df = pred.get_crps(
-            lead_times=lead_times,
-            mean_lead_times=mean_lead_times,
-            mean_time=True,
-            mean_item_ids=True,
-            item_ids=item_ids,
-            decimal_places=None,
-        )
+    # Reassemble in original order
+    series_by_key: Dict[str, pd.Series] = {}
+    reference_scores: Optional[pd.Series] = None
+    for key, s, is_ref in results:
+        series_by_key[key] = s
+        if is_ref:
+            reference_scores = s.copy()
 
-        if reference_predictions and key == reference_predictions:
-            reference_scores = crps_df.copy()
+    # Safety for reference
+    if reference_predictions and reference_scores is None:
+        raise ValueError(f"Reference prediction '{reference_predictions}' not found.")
 
-        scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
-
-    # TODO: What's the correct oder (mean crps -> normalization) or (normalization -> mean crps)
+    # Build scores table
     if mean_lead_times:
-        scores = pd.DataFrame(scores_dict, index=["Mean CRPS"])
+        scores = pd.DataFrame(series_by_key, index=["Mean CRPS"])
         add_mean = False
     else:
-        scores = pd.DataFrame(scores_dict)
+        scores = pd.DataFrame(series_by_key)
         scores.index.name = "lead times"
 
-    if reference_predictions:
-        if reference_scores is None:
-            raise ValueError(f"Reference prediction '{reference_predictions}' not found.")
-        scores = scores.div(reference_scores.squeeze(), axis=0)
+    # # Normalize by reference if requested
+    # if reference_predictions:
+    #     scores = scores.div(reference_scores.squeeze(), axis=0)
 
+    # Optional mean row
     if add_mean:
         scores.loc["Mean CRPS", :] = scores.mean(axis=0)
 
+    # Sort columns by mean CRPS if requested
     if sort and "Mean CRPS" in scores.index:
         scores = scores.T.sort_values(by="Mean CRPS", axis=0).T
+    else:
+        # keep original column order
+        scores = scores.reindex(columns=keys_in_order)
 
+    if reference_predictions:
+        scores = scores.div(scores[reference_predictions].squeeze(), axis=0)
+
+    # Rounding
     if decimal_places is not None:
         scores = scores.round(decimal_places)
 
@@ -1132,7 +1645,7 @@ def plot_crps(
         if isinstance(value, ForecastCollection):
             pred = value
         elif isinstance(value, (str, Path)):
-            pred = joblib.load(value)
+            pred = ForecastCollection.load(value)
         else:
             raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
 
@@ -1178,6 +1691,7 @@ def plot_crps_across_lead_times(
     selected_keys: Optional[List] = None,
     item_ids: Optional[List[int]] = None,
     reference_predictions: Optional[str] = None,
+    lead_times: Optional[List[int]] = None,
 ) -> None:
     """Plots the mean CRPS score across various forecast lead times.
 
@@ -1203,11 +1717,11 @@ def plot_crps_across_lead_times(
     if selected_keys:
         predictions = {key: value for key, value in predictions.items() if key in selected_keys}
 
-    df = get_crps_scores(predictions, item_ids=item_ids, reference_predictions=reference_predictions, add_mean=False, decimal_places=None)
-
+    df = get_crps_scores(predictions, item_ids=item_ids, lead_times=lead_times, reference_predictions=reference_predictions, add_mean=False, decimal_places=None)
+    df.rename(columns={reference_predictions: f"{reference_predictions} (Reference)"}, inplace=True)
     ax = df.plot(figsize=(12, 8), legend=True)
-    ax.set_title("CRPS Scores Comparison across Forecasting Lead Times", fontsize=16)
-    ax.set_ylabel("CRPS Score", fontsize=14)
+    # ax.set_title("CRPS Scores Comparison across Forecasting Lead Times", fontsize=16)
+    ax.set_ylabel("Relative Mean CRPS Score", fontsize=14)
     ax.set_xlabel("Lead Times", fontsize=14)
     ax.grid(True, axis="y", linestyle="--", alpha=0.7)
 
@@ -1258,7 +1772,7 @@ def get_crps_by_period(
         if isinstance(value, ForecastCollection):
             pred = value
         elif isinstance(value, (str, Path)):
-            pred = joblib.load(value)
+            pred = ForecastCollection.load(value)
         else:
             raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
 
@@ -1365,6 +1879,7 @@ def get_pairwise_diebold_mariano_test(
     decimal_places: Optional[int] = None,
     reduce_matrix: bool = False,
     sort: bool = True,
+    top_k: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Compute pairwise Diebold-Mariano test statistics between multiple forecast models.
@@ -1393,6 +1908,8 @@ def get_pairwise_diebold_mariano_test(
         Whether to only show non redundant information by only computing the upper diagonal of the matrix.
     sort : bool, default=True,
         Whether to sort the results
+    top_k : int, optional
+        top k results to display. defaults to all ForecastCollections are shown
 
     Returns
     -------
@@ -1417,7 +1934,7 @@ def get_pairwise_diebold_mariano_test(
         if isinstance(value, ForecastCollection):
             pred = value
         elif isinstance(value, (str, Path)):
-            pred = joblib.load(value)
+            pred = ForecastCollection.load(value)
         else:
             raise TypeError(f"Unsupported prediction type for key '{key}': {type(value)}")
 
@@ -1432,10 +1949,13 @@ def get_pairwise_diebold_mariano_test(
 
         scores_dict[key] = crps_df.squeeze()  # Convert single-row DataFrame to Series
 
+    # macro weighting scheme
     if sort:
         keys = sorted(scores_dict, key=lambda k: scores_dict[k].mean())
     else:
         keys = list(scores_dict.keys())
+    if top_k:
+        keys = keys[:top_k] if sort else sorted(scores_dict, key=lambda k: scores_dict[k].mean())[:top_k]
 
     if reduce_matrix:
         dm_tval = pd.DataFrame(index=keys[:-1], columns=keys[1:], dtype=float)
@@ -1470,13 +1990,26 @@ def plot_crps_barh(
     groups: Optional[Dict[str, List[str]]] = None,
     group_colors: Optional[Dict[str, str]] = None,
     default_color: str = "#7f7f7f",
+    # NEW:
+    nrows: Optional[int] = None,
+    ncols: Optional[int] = None,
+    panel_size: Tuple[float, float] = (8.0, 6.0),  # (width, height) per panel
+    title_fontsize: int = 16,
+    xlabel_fontsize: int = 14,
+    tick_fontsize: int = 12,
+    barlabel_fontsize: int = 10,
+    legend_fontsize: int = 12,
 ) -> None:
     """
     Plot one or more horizontal bar charts of Mean (or Relative) CRPS scores
-    for specified lead times, using a *common x-axis range* across subplots.
+    for specified lead times, using a common x-axis range across subplots.
+
+    Grid control:
+      - Pass nrows/ncols to force a layout (e.g., 1x3, 2x2, 3x3).
+      - Leave both None to auto-arrange into a near-square grid.
     """
 
-    # Normalize lead_times arg: if a flat list of ints, wrap into list-of-lists
+    # Normalize lead_times → list of lists
     if isinstance(lead_times[0], int):
         lead_times = [lead_times]
     n_subplots = len(lead_times)
@@ -1487,7 +2020,6 @@ def plot_crps_barh(
     global_max = float("-inf")
 
     for lead_time_set in lead_times:
-
         crps_results_mean = get_crps_scores(
             predictions,
             lead_times=lead_time_set,
@@ -1502,69 +2034,94 @@ def plot_crps_barh(
         df = df.reset_index(drop=True)
         crps_frames.append((lead_time_set, df))
 
-        # track global range
         vmin = df["Mean CRPS"].min()
         vmax = df["Mean CRPS"].max()
-        if vmin < global_min:
-            global_min = vmin
-        if vmax > global_max:
-            global_max = vmax
+        global_min = min(global_min, vmin)
+        global_max = max(global_max, vmax)
 
     # margin
     span = global_max - global_min
-    if span == 0:  # all equal; make a tiny span
+    if span == 0:
         span = abs(global_max) if global_max != 0 else 1.0
-    pad = span * 0.25
-    xlo = global_min - pad
+    pad = span * 0.15
+    xlo = 0 if global_min >= 0 else (global_min - pad)
     xhi = global_max + pad
 
-    # If you *never* want negative on axis when all data >=0, clamp at 0
-    if global_min >= 0:
-        xlo = 0
+    # --- Grid layout (auto or specified) --------------------------------------
+    def _auto_grid(n: int) -> Tuple[int, int]:
+        # near-square grid
+        c = int(math.ceil(math.sqrt(n)))
+        r = int(math.ceil(n / c))
+        return r, c
 
-    # --- Figure & axes --------------------------------------------------------
-    fig_width = 8 * n_subplots
-    fig_height = 8
+    if nrows is None and ncols is None:
+        nrows, ncols = _auto_grid(n_subplots)
+    elif nrows is None:
+        nrows = int(math.ceil(n_subplots / ncols))
+    elif ncols is None:
+        ncols = int(math.ceil(n_subplots / nrows))
+    # If still too few slots, expand rows
+    if nrows * ncols < n_subplots:
+        nrows = int(math.ceil(n_subplots / ncols))
+
+    fig_width = panel_size[0] * ncols
+    fig_height = panel_size[1] * nrows
     fig, axes = plt.subplots(
-        1,
-        n_subplots,
+        nrows,
+        ncols,
         figsize=(fig_width, fig_height),
         squeeze=False,
-        sharex=True,  # <-- share x-axis across panels
+        sharex=True,  # share x across all panels
     )
-    axes = axes.flatten()
+    axes_flat = axes.ravel()
 
     # choose label text depending on relative vs absolute
     x_label = "Relative CRPS" if reference_predictions else "Mean CRPS"
 
+    # Prepare legend colors (even if no bars match, legend still shows all groups)
+    legend_labels = []
+    legend_colors = []
+    if groups is not None:
+        if group_colors is None:
+            # generate a palette if not provided
+            try:
+                palette = sns.color_palette("tab10", n_colors=len(groups))
+                auto_colors = {g: mpl.colors.to_hex(palette[i]) for i, g in enumerate(groups.keys())}
+            except Exception:
+                # fallback if seaborn not available
+                cmap = plt.cm.get_cmap("tab10", len(groups))
+                auto_colors = {g: mpl.colors.to_hex(cmap(i)) for i, g in enumerate(groups.keys())}
+            group_colors = auto_colors
+
+        # keep insertion order from `groups`
+        for g in group_colors.keys():
+            legend_labels.append(g)
+            legend_colors.append(group_colors.get(g, default_color))
+        # Add an "Other" bucket
+        # legend_labels.append("Other")
+        # legend_colors.append(default_color)
+
     # --- Plot loop ------------------------------------------------------------
-    for ax, (lead_time_set, df) in zip(axes, crps_frames):
+    for ax, payload in zip(axes_flat, crps_frames):
+        lead_time_set, df = payload
 
         # Colors
         if groups is not None and group_colors is not None:
             colors: List[str] = []
             for model in df["Model"]:
-                assigned = False
                 for group_name, substrings in groups.items():
                     if any(s.lower() in model.lower() for s in substrings):
-                        colors.append(group_colors.get(group_name, "#1f77b4"))
-                        assigned = True
+                        colors.append(group_colors.get(group_name, default_color))
                         break
-                if not assigned:
+                else:
                     colors.append(default_color)
         else:
             colors = sns.color_palette("deep", n_colors=len(df))
 
-        bars = ax.barh(
-            df["Model"],
-            df["Mean CRPS"],
-            height=0.6,
-            color=colors,
-        )
+        bars = ax.barh(df["Model"], df["Mean CRPS"], height=0.6, color=colors)
 
         # Annotation offset: a small fraction of axis span
-        offset = (xhi - xlo) * 0.005  # 0.5% span; tune if needed
-
+        offset = (xhi - xlo) * 0.005
         for bar in bars:
             width = bar.get_width()
             xpos = width + offset if width >= 0 else width - offset
@@ -1574,23 +2131,39 @@ def plot_crps_barh(
                 f"{width:.2f}",
                 va="center",
                 ha="left" if width >= 0 else "right",
-                fontsize=8,
+                fontsize=barlabel_fontsize,
             )
 
-        # Apply global x limits to every subplot (sharex makes this redundant but explicit is fine)
         ax.set_xlim(xlo, xhi)
-
-        # Axis labels & title
         title = (
             f"Relative Mean CRPS (Lead Times {min(lead_time_set)}–{max(lead_time_set)})"
             if reference_predictions
             else f"Mean CRPS (Lead Times {min(lead_time_set)}–{max(lead_time_set)})"
         )
-        ax.set_xlabel(x_label)
-        ax.set_title(title, fontsize=12)
+        ax.set_xlabel(x_label, fontsize=xlabel_fontsize)
+        ax.set_title(title, fontsize=title_fontsize, pad=20)
+        ax.tick_params(axis="y", labelsize=tick_fontsize)
+        ax.tick_params(axis="x", labelsize=tick_fontsize)
         ax.invert_yaxis()
+        ax.grid(axis="x", linestyle="--", alpha=0.4)
 
-    plt.tight_layout()
+    # --- Figure-level legend at the bottom -----------------------------------
+    if groups is not None:
+        import matplotlib.patches as mpatches
+
+        handles = [mpatches.Patch(color=c, label=l) for l, c in zip(legend_labels, legend_colors)]
+
+        fig.subplots_adjust(bottom=0.2)
+        fig.legend(
+            handles=handles,
+            loc="lower center",
+            ncol=min(len(handles), 6),
+            frameon=False,
+            bbox_to_anchor=(0.5, -0.03),
+            fontsize=legend_fontsize,
+        )
+
+    plt.tight_layout(h_pad=5)
     plt.show()
 
 
@@ -1598,11 +2171,21 @@ def plot_pairwise_diebold_mariano_test(
     predictions: Dict[str, Union["ForecastCollection", Path]],
     lead_times: Optional[Union[List[int], List[List[int]]]] = None,
     item_ids: Optional[List[int]] = None,
-    maxlags: int = 8,
+    maxlags: int = 480,
     decimal_places: Optional[int] = None,
     reduce_matrix: bool = False,
     sort: bool = True,
     figsize_per_panel: float = 5.0,
+    top_k: Optional[int] = None,
+    # -------------------- FONT CONTROLS --------------------
+    fontsize_suptitle: int = 25,
+    fontsize_title: int = 15,
+    fontsize_annot: int = 13,
+    fontsize_cbar_label: int = 15,
+    fontsize_cbar_ticks: int = 15,
+    fontsize_xtick: int = 13,
+    fontsize_ytick: int = 13,
+    font_scale: Optional[float] = None,  # multiply all sizes (e.g., 0.9 to shrink)
 ):
     """
     Plot pairwise Diebold-Mariano t-values across models.
@@ -1621,7 +2204,31 @@ def plot_pairwise_diebold_mariano_test(
     sort : bool
     figsize_per_panel : float
         Size (inches) allocated per panel (square); figure size scales with grid.
+    top_k : int, optional
+        top k results to display. defaults to all ForecastCollections are shown
+
+    Fonts
+    -----
+    fontsize_suptitle : int
+    fontsize_title : int
+    fontsize_annot : int
+    fontsize_cbar_label : int
+    fontsize_cbar_ticks : int
+    fontsize_xtick : int
+    fontsize_ytick : int
+    font_scale : float, optional
+        Multiply all font sizes by this factor.
     """
+
+    # -------------------- apply font_scale if given --------------------
+    if font_scale is not None:
+        fontsize_suptitle = int(round(fontsize_suptitle * font_scale))
+        fontsize_title = int(round(fontsize_title * font_scale))
+        fontsize_annot = int(round(fontsize_annot * font_scale))
+        fontsize_cbar_label = int(round(fontsize_cbar_label * font_scale))
+        fontsize_cbar_ticks = int(round(fontsize_cbar_ticks * font_scale))
+        fontsize_xtick = int(round(fontsize_xtick * font_scale))
+        fontsize_ytick = int(round(fontsize_ytick * font_scale))
 
     # ------------------------------------------------------------------
     # Detect single vs multi-panel input
@@ -1641,7 +2248,7 @@ def plot_pairwise_diebold_mariano_test(
         if isinstance(predictions[first_entry], ForecastCollection):
             pred = first_entry
         elif isinstance(first_entry, (str, Path)):
-            pred = joblib.load(first_entry)
+            pred = ForecastCollection.load(first_entry)
         else:
             raise TypeError(f"Unsupported prediction type for key '{first_entry}': {type(predictions[first_entry])}")
         full_leads = pred.get_lead_times()
@@ -1656,7 +2263,6 @@ def plot_pairwise_diebold_mariano_test(
         """Return nrows, ncols following rule: <=3 -> 1 row; else near-square."""
         if n <= 3:
             return 1, n
-        # near-square: choose cols = ceil(sqrt(n)), then rows accordingly
         ncols = int(np.ceil(np.sqrt(n)))
         nrows = int(np.ceil(n / ncols))
         return nrows, ncols
@@ -1677,7 +2283,6 @@ def plot_pairwise_diebold_mariano_test(
     # Figure + axes layout
     # ------------------------------------------------------------------
     if not reduce_matrix:
-        # add a narrow column for the shared colorbar
         fig_w = figsize_per_panel * ncols + 0.8
         fig_h = figsize_per_panel * nrows
         fig = plt.figure(figsize=(fig_w, fig_h))
@@ -1688,8 +2293,8 @@ def plot_pairwise_diebold_mariano_test(
             ncols=ncols + 1,  # extra column for cbar
             width_ratios=[1] * ncols + [0.04],
             height_ratios=[1] * nrows,
-            wspace=0.05,
-            hspace=0.05,
+            wspace=0.1,
+            hspace=0.1,
         )
         axes = []
         for r in range(nrows):
@@ -1699,7 +2304,6 @@ def plot_pairwise_diebold_mariano_test(
             axes.append(row_axes)
         cbar_ax = fig.add_subplot(gs[:, -1])  # span all rows
     else:
-        # no shared colorbar
         fig_w = figsize_per_panel * ncols
         fig_h = figsize_per_panel * nrows
         fig, ax_grid = plt.subplots(
@@ -1715,7 +2319,6 @@ def plot_pairwise_diebold_mariano_test(
     # Helper: draw one panel
     # ------------------------------------------------------------------
     def _panel(ax, leads, show_cbar=False, cbar_ax=None, show_y=True, show_x=True):
-        # Compute DM stats for this lead-time subset
         tvalues, pvalues = get_pairwise_diebold_mariano_test(
             predictions,
             lead_times=leads,
@@ -1724,19 +2327,18 @@ def plot_pairwise_diebold_mariano_test(
             decimal_places=decimal_places,
             reduce_matrix=reduce_matrix,
             sort=sort,
+            top_k=top_k,
         )
 
         # Truncate long names
-        tvalues = tvalues.rename(columns={n: n[:20] for n in tvalues.columns})
-        pvalues = pvalues.rename(columns={n: n[:20] for n in pvalues.columns})
-        tvalues.index = [i[:20] for i in tvalues.index]
-        pvalues.index = [i[:20] for i in pvalues.index]
+        # tvalues = tvalues.rename(columns={n: n[:20] for n in tvalues.columns})
+        # pvalues = pvalues.rename(columns={n: n[:20] for n in pvalues.columns})
+        # tvalues.index = [i[:20] for i in tvalues.index]
+        # pvalues.index = [i[:20] for i in pvalues.index]
 
-        # Alignment checks
         assert tvalues.shape == pvalues.shape
         assert tvalues.index.equals(pvalues.index) and tvalues.columns.equals(pvalues.columns)
 
-        # Significance annotation (still stars; swap anytime)
         def stars(p):
             if pd.isna(p):
                 return ""
@@ -1748,14 +2350,12 @@ def plot_pairwise_diebold_mariano_test(
                 return "*"
             return ""
 
-        t_str = tvalues.map(lambda x: f"{x}" if pd.notna(x) else "")
-        s_str = pvalues.map(stars)
-        annot = t_str + "\n" + s_str
-        annot = annot.where(~pvalues.isna(), "")
+        t_str = tvalues.applymap(lambda x: f"{x}" if pd.notna(x) else "")
+        s_str = pvalues.applymap(stars)
+        annot = (t_str + "\n" + s_str).where(~pvalues.isna(), "")
 
         mask = pvalues.isna().to_numpy()
 
-        # Draw heatmap
         hm = sns.heatmap(
             tvalues,
             mask=mask,
@@ -1765,7 +2365,7 @@ def plot_pairwise_diebold_mariano_test(
             center=0,
             annot=annot,
             fmt="",
-            annot_kws={"size": 11},
+            annot_kws={"size": fontsize_annot},
             cbar=show_cbar,
             cbar_ax=cbar_ax,
             cbar_kws=(
@@ -1782,24 +2382,36 @@ def plot_pairwise_diebold_mariano_test(
             ax=ax,
         )
 
-        # Relabel cbar extremes
+        # Colorbar styling
         if show_cbar:
             cbar = hm.collections[0].colorbar
             cbar.set_ticklabels(["≤-3", "-2", "-1", "0", "1", "2", "≥3"])
-            cbar.ax.set_ylabel("DM t-value", fontsize=18)
-            cbar.ax.tick_params(labelsize=18)
-        # Panel title
-        ax.set_title(f"Lead Time {min(leads)}–{max(leads)}", pad=10, fontsize=18)
+            cbar.ax.set_ylabel("DM t-value", fontsize=fontsize_cbar_label)
+            cbar.ax.tick_params(labelsize=fontsize_cbar_ticks)
 
-        # Rotate x ticklabels to start at tick
-        labels = ax.get_xticklabels()
+        # Panel title
+        ax.set_title(f"Lead Time {min(leads)}–{max(leads)}", pad=10, fontsize=fontsize_title)
+
+        # Tick labels
+        # X ticks (rotate & size)
+        # Center ticks under cells
+        ax.set_xticks(np.arange(tvalues.shape[1]) + 0.5)
         ax.set_xticklabels(
-            labels,
+            tvalues.columns,
             rotation=45,
             ha="right",
-            va=("bottom"),
+            va="bottom",
             rotation_mode="anchor",
         )
+        # Push tick labels further away
+        ax.tick_params(axis="x", which="major", pad=15)
+
+        for lab in ax.get_xticklabels():
+            lab.set_fontsize(fontsize_xtick)
+
+        # Y ticks (size)
+        for lab in ax.get_yticklabels():
+            lab.set_fontsize(fontsize_ytick)
 
         # Grey the diagonal only for full matrix
         if not reduce_matrix:
@@ -1818,27 +2430,13 @@ def plot_pairwise_diebold_mariano_test(
                     )
                 )
 
-        # Hide y-axis if requested (panels not in first column)
+        # Hide axes if requested
         if not show_y:
             ax.set_ylabel("")
-            ax.tick_params(
-                axis="y",
-                which="both",
-                left=False,
-                right=False,
-                labelleft=False,
-                labelright=False,
-            )
+            ax.tick_params(axis="y", which="both", left=False, right=False, labelleft=False, labelright=False)
         if not show_x:
             ax.set_xlabel("")
-            ax.tick_params(
-                axis="x",
-                which="both",
-                bottom=False,
-                top=False,
-                labelbottom=False,
-                labeltop=False,
-            )
+            ax.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False, labeltop=False)
 
         return hm
 
@@ -1850,7 +2448,6 @@ def plot_pairwise_diebold_mariano_test(
     for r in range(nrows):
         for c in range(ncols):
             if panel_idx >= n_panels:
-                # unused slot: turn off axis
                 axes[r][c].axis("off")
                 continue
             leads = lead_groups[panel_idx]
@@ -1860,41 +2457,47 @@ def plot_pairwise_diebold_mariano_test(
                 leads,
                 show_cbar=show_cbar,
                 cbar_ax=cbar_ax if show_cbar else None,
-                show_y=(c == 0),  # show y only in first column
-                show_x=(r == (nrows - 1)),  # show x only in last row
+                show_y=(c == 0),
+                show_x=(r == (nrows - 1)),
             )
             heatmaps.append(hm)
             panel_idx += 1
 
     # Super-title
     if n_panels > 1:
-        fig.suptitle("Diebold-Mariano t-values by Lead Time Group", y=0.92, fontsize=25)
-    plt.show()
+        fig.suptitle("Diebold-Mariano t-values by Lead Time Group", y=0.95, fontsize=fontsize_suptitle)
 
+    plt.show()
     return fig, axes, heatmaps
 
 
 def plot_reliability_diagram(
     collections: Dict[str, "ForecastCollection"],
     lead_times: Optional[Union[List[int], List[List[int]]]] = None,
-    overlay: bool = True,
     item_ids: Optional[List[int]] = None,
     show_individual_lead_times: bool = False,
     mean_lead_times: bool = True,
+    average_type: Literal["micro", "macro"] = "micro",
+    figsize: Optional[Tuple[float, float]] = None,
+    font_sizes: Optional[Dict[str, int]] = None,
 ) -> None:
     """Plot reliability diagrams (empirical coverage vs nominal quantile) for *multiple* ForecastCollection objects.
 
     Supports three display modes:
 
-    1. **Single-overlay (default)**: If ``overlay=True`` and ``lead_times`` is a *flat* list (or ``None``), all
+    1. **Single-overlay (default)**: If ``lead_times`` is a *flat* list (or ``None``), all
        collections are plotted together in one axis. Optionally show individual lead lines and/or an equal-weight
        macro-mean across the selected lead times.
-    2. **Multi-panel overlay**: If ``overlay=True`` *and* ``lead_times`` is a *list of lead-time groups* (list of lists),
+    2. **Multi-panel overlay**: If ``lead_times`` is a *list of lead-time groups* (list of lists),
        one subplot is created per group; *within* each subplot all collections are overlaid for the group's lead set.
        A single shared legend is placed to the **right** of the grid (as you requested).
-    3. **Faceted by collection**: If ``overlay=False`` (regardless of lead-time grouping), create one subplot per
-       collection (original behavior). Lead-time grouping is ignored in this mode; pass a flat list of leads to control
-       the subset used in each panel.
+
+
+    Two averaging strategies are available:
+        - **Macro averaging**: Individually computes coverage rates for each item-lead time combination,
+          then optionally averages across items and optionally averages across lead times
+        - **Micro averaging**: Directly averages the binary hit/miss indicators across all
+          item-lead time combinations simultaneously.
 
     Parameters
     ----------
@@ -1904,17 +2507,33 @@ def plot_reliability_diagram(
         Flat list → single group.
         List of lists → multi-panel overlay with one subplot per group.
         ``None`` → use the union of *all* available lead times across collections (single group).
-    overlay : bool, default True
-        Overlay across *collections* (single axis or multi-panel grouping). If False, facet by collection.
     item_ids : list[int], optional
         Restrict to these item IDs (applied independently per collection). Missing IDs are ignored.
     show_individual_lead_times : bool, default False
         Plot per-lead curves (within whichever axes the mode dictates).
     mean_lead_times : bool, default True
-        Plot macro-mean curve across the selected lead_times (within panel) using equal-weight mean across leads.
+        Plot mean curve across the selected lead_times (within panel) using equal-weight mean across leads.
+    average_type : Literal["micro", "macro"], default "micro"
+        Average type for the empirical coverage rates.
+    figsize : tuple[float, float], optional
+        Figure size.
+    font_sizes : dict[str, int], optional
+        Font sizes for labels, ticks, titles, legend, and super-title.
     """
     if not collections:
         raise ValueError("No ForecastCollection objects supplied.")
+
+    # Defaults
+    if font_sizes is None:
+        font_sizes = {}
+    label_fs = font_sizes.get("labels", 18)
+    tick_fs = font_sizes.get("ticks", 18)
+    title_fs = font_sizes.get("titles", 18)
+    legend_fs = font_sizes.get("legend", 18)
+    sup_fs = font_sizes.get("suptitle", 24)
+
+    if show_individual_lead_times is False and mean_lead_times is False:
+        raise ValueError("At least one of `show_individual_lead_times` or `mean_lead_times` needs to be true")
 
     # ------------------------------------------------------------------
     # Utilities (DRY helpers)
@@ -1922,46 +2541,10 @@ def plot_reliability_diagram(
     def _get_all_leads() -> List[int]:
         leads = set()
         for fc in collections.values():
+            if isinstance(fc, Path):
+                fc = ForecastCollection.load(fc)
             leads.update(fc.get_lead_times())
         return sorted(leads)
-
-    def _collect_coverages(fc: "ForecastCollection", leads: List[int]):
-        """Return dict: {lead_time: [Series per item]}.
-
-        Each Series indexed by nominal quantile (floats).
-        """
-        out = {lt: [] for lt in leads}
-        for item_id in fc.get_item_ids():
-            if item_ids and item_id not in item_ids:
-                continue
-            item = fc.get_time_series_forecast(item_id)
-            for lt in leads:
-                if lt in item.lead_time_forecasts:
-                    val = item.get_empirical_coverage_rates(lt)  # {alpha: cov}
-                    out[lt].append(pd.Series(val))
-        return out
-
-    def _macro_mean(series_list: List[pd.Series]):
-        if not series_list:
-            return None
-        return pd.concat(series_list, axis=1).mean(axis=1)
-
-    def _aggregate_fc(fc: "ForecastCollection", leads: List[int]):
-        """Gather per-item coverages, per-lead macro means, and optional mean across leads.
-
-        Returns (emp_per_lead: dict[int, Series], emp_avg: Series|None).
-        """
-        per_lead = _collect_coverages(fc, leads)
-        emp_per_lead = {}
-        for lt, ser_list in per_lead.items():
-            if ser_list:
-                emp_per_lead[lt] = _macro_mean(ser_list)
-        emp_avg = None
-        if mean_lead_times:
-            all_ser = [s for s in emp_per_lead.values() if s is not None]
-            if all_ser:
-                emp_avg = pd.concat(all_ser, axis=1).mean(axis=1)
-        return emp_per_lead, emp_avg
 
     def _infer_quantile_levels(emp_per_lead, emp_avg):
         if emp_avg is not None:
@@ -1983,22 +2566,37 @@ def plot_reliability_diagram(
         return f"{len(leads)} Leads"
 
     def _format_ax(ax, quant_levels, *, add_labels=True):
-        """Apply consistent axis formatting."""
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         if quant_levels:
             ax.set_xticks(quant_levels)
-            ax.set_xticklabels([f"{q:.1f}" for q in quant_levels])
+            ax.set_xticklabels([f"{q:.1f}" for q in quant_levels], fontsize=tick_fs)
             ax.set_yticks(quant_levels)
-            ax.set_yticklabels([f"{q:.1f}" for q in quant_levels])
+            ax.set_yticklabels([f"{q:.1f}" for q in quant_levels], fontsize=tick_fs)
         if add_labels:
-            ax.set_xlabel("Nominal Quantile Level")
-            ax.set_ylabel("Empirical Coverage")
-        # 45° perfect line
+            ax.set_xlabel("Nominal Quantile Level", fontsize=label_fs)
+            ax.set_ylabel("Empirical Coverage", fontsize=label_fs)
         ax.plot([0, 1], [0, 1], linestyle="--", color="grey", label="Perfect Calibration")
         ax.grid(True, which="both", linestyle=":", linewidth=0.5)
         ax.set_aspect("equal", adjustable="box")
 
+    def _aggregate_fc(fc: "ForecastCollection", leads: List[int]):
+        """Gather per-item coverages, per-lead macro means, and optional mean across leads.
+
+        Returns (emp_per_lead: dict[int, Series], emp_avg: Series|None).
+        """
+        if isinstance(fc, Union[str, Path]):
+            fc = ForecastCollection.load(fc)
+        cv = fc.get_empirical_coverage_rates(item_ids=item_ids, lead_times=leads, mean_lead_times=False, average_type=average_type)
+        emp_per_lead = {}
+        for lt in leads:
+            emp_per_lead[lt] = cv[lt]
+        mean = cv.iloc[:, -1]
+        return emp_per_lead, mean
+
+    for k, fc in collections.items():
+        if isinstance(fc, str):
+            collections[k] = Path(str)
     # ------------------------------------------------------------------
     # Determine lead_times / lead_time_groups
     # ------------------------------------------------------------------
@@ -2017,26 +2615,16 @@ def plot_reliability_diagram(
     if not any(grp for grp in lead_time_groups):
         raise ValueError("No lead times available across supplied collections.")
 
-    # ------------------------------------------------------------------
-    # Helper to precompute aggregations *for a given lead group*
-    # ------------------------------------------------------------------
-    def _precompute_for_group(leads_for_group: List[int]):
-        agg = {}
-        for name, fc in collections.items():
-            emp_per_lead, emp_avg = _aggregate_fc(fc, leads_for_group)
-            agg[name] = (emp_per_lead, emp_avg)
-        return agg
-
     palette = sns.color_palette("deep", n_colors=len(collections))
     color_by_collection = {name: palette[i] for i, name in enumerate(collections)}
 
     # ------------------------------------------------------------------
     # MULTI-PANEL OVERLAY MODE (list-of-lists)
     # ------------------------------------------------------------------
-    if overlay and len(lead_time_groups) > 1:
+    if len(lead_time_groups) > 1:
         n_panels = len(lead_time_groups)
 
-        # Grid heuristic: 1-row for <=3; 2x2 for 4; otherwise ~square
+        # Grid heuristic
         if n_panels <= 3:
             rows, cols = 1, n_panels
         elif n_panels == 4:
@@ -2045,19 +2633,23 @@ def plot_reliability_diagram(
             cols = math.ceil(np.sqrt(n_panels))
             rows = math.ceil(n_panels / cols)
 
-        # Reserve space on the right for a shared legend; adjust width accordingly.
-        fig_width = cols * 8
-        fig_height = rows * 8
-        fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
+        # Use user-specified figsize if given, otherwise scale
+        if figsize is None:
+            fig_width = cols * 8
+            fig_height = rows * 8
+            figsize = (fig_width, fig_height)
+
+        fig, axes = plt.subplots(rows, cols, figsize=figsize, squeeze=False, constrained_layout=True)
         axes = axes.ravel()
 
-        # We'll collect legend handles/labels across all panels, deduping by label.
         legend_handles = {}
-
         for ax, leads_for_group in zip(axes, lead_time_groups):
-            agg = _precompute_for_group(leads_for_group)
 
-            # Quantile grid for this panel
+            agg = {}
+            for key, fc in collections.items():
+                # only mean lead times
+                agg[key] = _aggregate_fc(fc, leads_for_group)
+
             global_quant_levels = []
             for _, (emp_per_lead, emp_avg) in agg.items():
                 ql = _infer_quantile_levels(emp_per_lead, emp_avg)
@@ -2093,15 +2685,13 @@ def plot_reliability_diagram(
                     legend_handles.setdefault(ln.get_label(), ln)
 
             _format_ax(ax, global_quant_levels, add_labels=False)
-            ax.set_title(_format_lead_title(leads_for_group))
-            # No per-axes legend (we'll do a shared legend outside)
+            ax.set_title(_format_lead_title(leads_for_group), fontsize=title_fs)
 
-        # Hide unused axes if grid > n_panels
         for ax in axes[n_panels:]:
             ax.set_visible(False)
 
-        fig.supxlabel("Nominal Quantile Level")
-        fig.supylabel("Empirical Coverage")
+        fig.supxlabel("Nominal Quantile Level", fontsize=label_fs)
+        fig.supylabel("Empirical Coverage", fontsize=label_fs)
 
         ttl_bits = []
         if show_individual_lead_times:
@@ -2109,26 +2699,21 @@ def plot_reliability_diagram(
         if mean_lead_times:
             ttl_bits.append("Avg")
         suffix = " + ".join(ttl_bits) if ttl_bits else ""
-        if suffix:
-            fig.suptitle(f"Grouped Lead Times ({suffix})")
-        else:
-            fig.suptitle("Grouped Lead Times")
+        fig.suptitle(f"Grouped Lead Times ({suffix})", fontsize=sup_fs)
 
-        # Shared legend to the RIGHT of all subplots.
         handles = list(legend_handles.values())
         labels = [h.get_label() for h in handles]
         fig.legend(
             handles,
             labels,
             loc="center left",
-            bbox_to_anchor=(1.0, 0.5),  # to the right
+            bbox_to_anchor=(1.0, 0.5),
             borderaxespad=0.0,
             frameon=False,
-            fontsize=15,
+            fontsize=legend_fs,
         )
 
-        # Make room on the right for the legend.
-        fig.tight_layout(rect=(0, 0, 1, 1))
+        fig.set_constrained_layout_pads(w_pad=0.1, h_pad=0.1, hspace=0.2, wspace=0.2)
         plt.show()
         return
 
@@ -2151,69 +2736,21 @@ def plot_reliability_diagram(
             global_quant_levels = ql
             break
 
-    if overlay:  # single panel overlay
-        fig, ax = plt.subplots(figsize=(8, 8))
-        for name, (emp_per_lead, emp_avg) in agg.items():
-            base_c = color_by_collection[name]
-            if show_individual_lead_times:
-                for lt, emp in emp_per_lead.items():
-                    if emp is None:
-                        continue
-                    ax.plot(
-                        emp.index,
-                        emp.values,
-                        marker="o",
-                        linestyle="--",
-                        label=f"{name} Lead Time {lt}",
-                        alpha=0.8,
-                    )
-            if mean_lead_times and emp_avg is not None:
-                ax.plot(
-                    emp_avg.index,
-                    emp_avg.values,
-                    marker="s",
-                    linestyle="-",
-                    linewidth=2,
-                    label=f"{name}",
-                    color=base_c,
-                )
-
-        _format_ax(ax, global_quant_levels)
-        ttl_bits = []
-        if show_individual_lead_times:
-            ttl_bits.append("Leads")
-        if mean_lead_times:
-            ttl_bits.append("Avg")
-        lt_title = _format_lead_title(leads_for_overlay)
-        suffix = " + ".join(ttl_bits) if ttl_bits else ""
-        title = lt_title if not suffix else f"{lt_title} ({suffix})"
-        ax.set_title(title)
-        ax.legend()
-        plt.show()
-        return
-
-    # ------------------------------------------------------------------
-    # Faceted mode: one subplot per collection
-    # ------------------------------------------------------------------
-    n = len(collections)
-    cols = math.ceil(np.sqrt(n))
-    rows = (n + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 4))
-    axes = axes.flatten() if n > 1 else [axes]
-
-    for ax, (name, (emp_per_lead, emp_avg)) in zip(axes, agg.items()):
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for name, (emp_per_lead, emp_avg) in agg.items():
         base_c = color_by_collection[name]
         if show_individual_lead_times:
             for lt, emp in emp_per_lead.items():
-                if emp is not None:
-                    ax.plot(
-                        emp.index,
-                        emp.values,
-                        marker="o",
-                        linestyle="--",
-                        label=f"Lead Time {lt}",
-                        alpha=0.8,
-                    )
+                if emp is None:
+                    continue
+                ax.plot(
+                    emp.index,
+                    emp.values,
+                    marker="o",
+                    linestyle="--",
+                    label=f"{name} Lead Time {lt}",
+                    alpha=0.8,
+                )
         if mean_lead_times and emp_avg is not None:
             ax.plot(
                 emp_avg.index,
@@ -2221,35 +2758,23 @@ def plot_reliability_diagram(
                 marker="s",
                 linestyle="-",
                 linewidth=2,
-                label="Avg",
+                label=f"{name}",
                 color=base_c,
             )
 
-        _format_ax(ax, global_quant_levels, add_labels=False)
-        ax.set_title(name)
-        ax.legend(fontsize="small")
-
-    # Hide any unused axes
-    for ax in axes[len(collections) :]:
-        ax.set_visible(False)
-
-    # Set common x/y labels on outer figure
-    fig.supxlabel("Nominal Quantile Level")
-    fig.supylabel("Empirical Coverage")
-
-    # Single suptitle reflecting lead selection & content flags
+    _format_ax(ax, global_quant_levels)
     ttl_bits = []
     if show_individual_lead_times:
         ttl_bits.append("Leads")
     if mean_lead_times:
         ttl_bits.append("Avg")
     lt_title = _format_lead_title(leads_for_overlay)
-    suffix = ' + ".join(ttl_bits) if ttl_bits else "'
-    suptitle = lt_title if not suffix else f"{lt_title} ({suffix})"
-    fig.suptitle(suptitle)
-
-    plt.tight_layout()
+    suffix = " + ".join(ttl_bits) if ttl_bits else ""
+    title = lt_title if not suffix else f"{lt_title} ({suffix})"
+    ax.set_title(title)
+    ax.legend()
     plt.show()
+    return
 
 
 def _coerce_paths(x: Union[List[Union[Path, str]], Path, str, None]) -> Optional[List[Path]]:
@@ -2424,7 +2949,8 @@ def load_predictions(
             strip_tokens={DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS},
         )
         if load:
-            all_predictions[key] = joblib.load(filepath)
+            print(filepath)
+            all_predictions[key] = ForecastCollection.load(filepath)
             logging.info(f"Loaded prediction file: `{filepath}` as key: {key}")
         else:
             all_predictions[key] = filepath  # type: ignore[assignment]
@@ -2501,9 +3027,18 @@ def load_execution_times(
             continue
 
         exec_dict: dict = cfg.get("execution_time")
+
         if exec_dict is None:
             logging.warning(f"`execution_time` missing in `{filepath}`; skipping.")
             continue
+
+        # Optionally. could also be done relative / update total_train_time
+        if "execution_time_predictor" in exec_dict:
+            predictor_results = exec_dict["execution_time_predictor"]
+            exec_dict["predictor_train_time"] = predictor_results["predictor_train_time"]
+            exec_dict["predictor_inference_time"] = predictor_results["predictor_inference_time"]
+            # if predictor_results["predictor_train_time"] is not None:
+            #    exec_dict["total_train_time"] += predictor_results["predictor_train_time"]
 
         exec_dict.pop("execution_time_predictor", None)
         exec_dict.pop("postprocessor_name", None)
@@ -2515,7 +3050,7 @@ def load_execution_times(
 
         exec_dict["__key__"] = key
         records.append(exec_dict)
-        print(key)
+
         logging.info(f"Loaded execution_time from `{filepath}` as key: {key}")
 
     if not records:
@@ -2535,3 +3070,387 @@ def load_execution_times(
         df[num_cols] = df[num_cols].round(round_ndigits)
 
     return df
+
+
+def plot_multiple_forecasts(
+    forecasts_dict: Dict[int, "TimeSeriesForecast"],
+    start: Optional[Union[int, pd.Timestamp]] = None,
+    context_length: int = 100,
+    max_historical_context: int = 1000,
+    max_forecast_steps: Optional[int] = None,
+    complete_data: Optional["TimeSeriesDataFrame"] = None,  # kept for API compatibility
+    figsize: Optional[Tuple[int, int]] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    max_cols: int = 3,
+    sharex: bool = False,
+    sharey: bool = False,
+    show_xy_labels: bool = True,
+    show_legend: bool = True,
+    title_prefix: str = "",
+    legend_position: str = "below",  # "below" or "right"
+    font_sizes: Optional[Dict[str, int]] = None,
+    tight_margins: bool = False,
+    margin_padding: float = 0.05,
+    show_history_overview: bool = False,
+    history_overview_height: float = 0.3,
+    save_path: Optional[str] = None,
+    dpi: int = 300,
+) -> None:
+    """
+    Plot multiple TimeSeriesForecast objects in a grid layout with subplots.
+
+    Parameters
+    ----------
+    forecasts_dict : Dict[int, TimeSeriesForecast]
+        Dictionary mapping item_id to TimeSeriesForecast objects.
+
+    start : Optional[Union[int, pd.Timestamp]]
+        - If int: Index into the time series to start the forecast from.
+        - If pd.Timestamp: Timestamp to start the forecast from. Must exist in the time series index.
+        - If None: Defaults to the last available index for each forecast.
+
+    context_length : int
+        Number of historical data points to include in the plot before the forecast start.
+
+    max_historical_context : int
+        Maximum number of historical data points to show in the history overview subplot.
+        This controls how far back the overview looks from the forecast start point.
+        Default: 1000. Use larger values for longer historical context.
+
+    max_forecast_steps : Optional[int]
+        Maximum number of forecast steps to plot. If None, plots all available forecast steps.
+        If specified, limits the number of future time steps displayed in the forecast plots.
+        Useful for focusing on short-term predictions or reducing visual clutter.
+
+    figsize : Optional[Tuple[int, int]]
+        Figure size as (width, height). If provided, overrides width and height parameters.
+
+    width : Optional[int]
+        Figure width in inches. Used only if figsize is None.
+
+    height : Optional[int]
+        Figure height in inches. Used only if figsize is None.
+
+    max_cols : int
+        Maximum number of columns in the grid layout.
+
+    sharex : bool
+        Whether to share x-axis across subplots.
+
+    sharey : bool
+        Whether to share y-axis across subplots.
+
+    show_xy_labels : bool
+        Whether to show x- and y-labels on subplots.
+
+    show_legend : bool
+        Whether to show legends on subplots.
+
+    title_prefix : str
+        Prefix for subplot titles.
+
+    legend_position : str
+        Position of the legend: "below" (below the plots) or "right" (to the right of the plots).
+
+    font_sizes : Optional[Dict[str, int]]
+        Dictionary controlling font sizes for various text elements. If None, default sizes are used.
+        Available keys: 'title', 'subtitle', 'xlabel', 'ylabel', 'legend', 'tick_labels', 'grid_labels'.
+        Example: {'title': 16, 'subtitle': 14, 'xlabel': 12, 'ylabel': 12, 'legend': 10, 'tick_labels': 10}.
+
+    tight_margins : bool
+        Whether to use tight margins around the data. If True, reduces padding between plot borders and data.
+
+    margin_padding : float
+        Padding factor for margins when tight_margins=True. Smaller values (0.01-0.05) create tighter plots,
+        larger values (0.1-0.2) create more spacious plots. Default: 0.05.
+
+    show_history_overview : bool
+        Whether to add a full-length historical overview subplot at the top showing the complete time series.
+        This provides context for the zoomed-in forecast plots below.
+
+    history_overview_height : float
+        Height ratio for the history overview subplot relative to the total figure height.
+        Range: 0.1 to 0.5. Default: 0.3 (30% of total height).
+
+    save_path : Optional[str]
+        If provided, save the plot to this path.
+
+    dpi : int
+        DPI for saving the plot.
+
+    Returns
+    -------
+    None
+        Displays a matplotlib figure with subplots showing forecasts for each TimeSeriesForecast object.
+    """
+
+    if isinstance(start, int):
+        start: pd.Timestamp = next(iter(forecasts_dict.values())).data.index.get_level_values(TIMESTAMP)[start]
+
+    if not forecasts_dict:
+        raise ValueError("forecasts_dict cannot be empty")
+
+    # ---------- small helpers (reduce repetition) ----------
+
+    def merge_font_sizes(user_fs: Optional[Dict[str, int]]) -> Dict[str, int]:
+        base = {"title": 16, "subtitle": 14, "xlabel": 12, "ylabel": 12, "legend": 10, "tick_labels": 10, "grid_labels": 10}
+        if user_fs:
+            base.update(user_fs)
+        return base
+
+    def grid_dims(n: int, max_cols_: int) -> Tuple[int, int]:
+        cols = min(max_cols_, n)
+        rows = (n + cols - 1) // cols
+        return rows, cols
+
+    def resolve_figsize(n_rows: int, n_cols: int, add_overview: bool) -> Tuple[int, int]:
+        """Return (fig_w, fig_h) applying width/height/figsize rules once."""
+        if figsize is not None:
+            w, h = figsize
+        else:
+            w = width if width is not None else 6 * n_cols
+            h = height if height is not None else 4 * n_rows
+        if add_overview:
+            h = h * (1 + history_overview_height)
+        return (w, h)
+
+    def determine_start_index(start_, data_length: int, timestamps=None) -> int:
+        if isinstance(start_, pd.Timestamp):
+            if timestamps is not None and start_ in timestamps:
+                return timestamps.get_loc(start_)
+            return data_length - 1
+        if isinstance(start_, int):
+            if start_ < 0:
+                return start_ % data_length
+            return min(start_, data_length - 1)
+        return data_length - 1
+
+    def corrected_start(timestamps: pd.Index, forecast_mask) -> Tuple[pd.Timestamp, int]:
+        """Return (corrected_start_date, corrected_start_idx) using global `start`."""
+        start_idx = determine_start_index(start, len(timestamps), timestamps)
+        start_date = timestamps[start_idx]
+        forecasted_ts = timestamps[forecast_mask]
+        start_idx_preds = forecasted_ts.get_indexer([start_date], method="backfill")[0]
+        corr_start_date = forecasted_ts[start_idx_preds]
+        corr_start_idx = timestamps.get_indexer([corr_start_date])[0]
+        return corr_start_date, corr_start_idx
+
+    def format_axes(ax: plt.Axes, fs: Dict[str, int], show_labels: bool, tight: bool):
+        if show_labels:
+            ax.set_xlabel("Date", fontsize=fs["xlabel"])
+            ax.set_ylabel("Value", fontsize=fs["ylabel"])
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right", fontsize=fs["tick_labels"])
+        plt.setp(ax.yaxis.get_majorticklabels(), fontsize=fs["tick_labels"])
+        if tight:
+            ax.margins(y=margin_padding, x=0)
+
+    def add_prediction_intervals(
+        ax: plt.Axes,
+        selected_predictions: pd.DataFrame,
+        intervals: List[Tuple[float, float]],
+        base_color: str = "orange",
+        lw_outer: float = 0.1,
+        lw_inner: float = 0.1,
+    ) -> None:
+        n = len(intervals)
+        for i, (ql, qu) in enumerate(intervals):
+            if ql not in selected_predictions.columns or qu not in selected_predictions.columns:
+                continue
+            alpha = 0.2 + 0.15 * (n - 1 - i)
+            ax.fill_between(
+                selected_predictions.index,
+                selected_predictions[ql],
+                selected_predictions[qu],
+                color=base_color,
+                alpha=alpha,
+                label=f"{int(qu*100)}–{int(ql*100)} % interval",
+            )
+            lw = lw_outer + (lw_inner - lw_outer) * (n - 1 - i) / max(n - 1, 1)
+            ax.plot(selected_predictions.index, selected_predictions[ql], color=base_color, alpha=alpha + 0.1, linewidth=lw)
+            ax.plot(selected_predictions.index, selected_predictions[qu], color=base_color, alpha=alpha + 0.1, linewidth=lw)
+
+    def build_selected_predictions(forecast, corr_start_date: pd.Timestamp, start_idx_preds: int, max_lt: int) -> pd.DataFrame:
+        preds = torch.stack([hf.predictions for hf in forecast.lead_time_forecasts.values()], dim=1)
+        freq_offset = pd.tseries.frequencies.to_offset(forecast.freq)
+        pred_dates = [corr_start_date + freq_offset * lt for lt in range(1, max_lt + 1)]
+        return pd.DataFrame(
+            data=preds[start_idx_preds, :max_lt, :].numpy(),
+            columns=forecast.quantiles,
+            index=pred_dates,
+        )
+
+    def extend_historic_data(forecast, complete_data: Optional["TimeSeriesDataFrame"] = None) -> Tuple[pd.DataFrame, pd.Index, np.ndarray]:
+        """Get the appropriate data for individual subplots, using complete_data if available."""
+        if complete_data is not None:
+            item_id = forecast.data.item_ids[0]
+            id_complete_data = complete_data.loc[[item_id]]
+            full_data = id_complete_data.reset_index(level=0, drop=True)
+            ts = full_data.index
+            forecast_mask = forecast.forecast_mask
+            missing_vals = len(full_data) - len(forecast_mask)
+            mask_pad = np.full(missing_vals, False)
+            forecast_mask = np.concatenate((mask_pad, forecast_mask), axis=0)
+        else:
+            full_data = forecast.data.reset_index(level=0, drop=True)
+            ts = full_data.index
+            forecast_mask = forecast.forecast_mask
+
+        return full_data, ts, forecast_mask
+
+    def history_overview_subplot(fig_, n_rows: int, n_cols: int, first_forecast, fs: Dict[str, int]) -> Tuple[plt.Axes, pd.Index, pd.Timestamp, int]:
+
+        if complete_data is not None:
+            full_data, ts, forecast_mask = extend_historic_data(
+                first_forecast,
+                complete_data,
+            )
+
+        else:
+            full_data = first_forecast.data.reset_index(level=0, drop=True)
+            ts = full_data.index
+            forecast_mask = first_forecast.forecast_mask
+
+        corr_start_date, corr_start_idx = corrected_start(ts, forecast_mask)
+
+        history_start_idx = max(0, corr_start_idx - max_historical_context)
+        history_data = full_data.iloc[history_start_idx : corr_start_idx + 1]
+
+        ax_hist = plt.subplot2grid((n_rows, n_cols), (0, 0), colspan=n_cols, fig=fig_)
+
+        ax_hist.plot(history_data.index, history_data["target"], color="black", linestyle="--", linewidth=1)
+
+        # Highlight area if start specified
+        if start is not None:
+            forecast_start = full_data.index[corr_start_idx]
+            forecast_end = full_data.index[min(corr_start_idx + context_length, len(full_data) - 1)]
+            ax_hist.axvspan(forecast_start, forecast_end, alpha=0.1, color="gray", label="_nolegend_")
+            ax_hist.axvline(forecast_start, color="black", linestyle=":", alpha=0.7, label="Prediction start")
+
+        ax_hist.set_title("Historical Overview", fontsize=fs["subtitle"])
+        # ax_hist.set_xlabel("Time", fontsize=fs["xlabel"])
+        # ax_hist.set_ylabel("Value", fontsize=fs["ylabel"])
+        ax_hist.grid(True, alpha=0.3)
+        if tight_margins:
+            ax_hist.margins(y=margin_padding, x=0)
+
+        return ax_hist, ts, corr_start_date, corr_start_idx
+
+    def gather_legend(fig_, axes_for_legend: List[plt.Axes], fs: Dict[str, int]):
+        handles, labels = [], []
+        for ax_ in axes_for_legend:
+            h, l = ax_.get_legend_handles_labels()
+            for hh, ll in zip(h, l):
+                if ll not in labels:
+                    handles.append(hh)
+                    labels.append(ll)
+        if not handles:
+            return
+        if legend_position == "below":
+            fig_.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.05), ncol=min(4, len(handles)), fontsize=fs["legend"], frameon=True)
+        elif legend_position == "right":
+            fig_.legend(handles, labels, loc="center left", bbox_to_anchor=(1.05, 0.5), ncol=1, fontsize=fs["legend"], frameon=True)
+
+    # ---------- compute layout / sizes once ----------
+
+    font_sizes = merge_font_sizes(font_sizes)
+    num_forecasts = len(forecasts_dict)
+    n_rows, n_cols = grid_dims(num_forecasts, max_cols)
+
+    if show_history_overview:
+        n_rows += 1
+
+    fig_w, fig_h = resolve_figsize(n_rows, n_cols, show_history_overview)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), sharey=sharey, sharex=sharex, squeeze=False, constrained_layout=True)
+
+    axes_flat = axes.flatten()
+
+    # ---------- optional history overview ----------
+
+    if show_history_overview:
+        first_fc = next(iter(forecasts_dict.values()))
+        hist_ax, first_ts, corr_start_date_first, corr_start_idx_first = history_overview_subplot(fig, n_rows, n_cols, first_fc, font_sizes)
+        forecast_axes = axes[1:].flatten() if n_rows > 1 else axes_flat
+
+        for i in range(0, n_cols):
+            axes.flatten()[i].set_visible(False)
+
+    else:
+        hist_ax = None
+        forecast_axes = axes_flat
+
+    # ---------- plot individual forecasts ----------
+
+    for idx, (item_id, forecast) in enumerate(forecasts_dict.items()):
+        if idx >= len(forecast_axes):
+            break
+        ax = forecast_axes[idx]
+
+        # Get the appropriate data (using complete_data if available)
+        # TODO: this is error prone in case provided "complete data" does not cover the period of the forecast
+        full_data, timestamps, forecast_mask = extend_historic_data(forecast, complete_data)
+        corr_start_date, corr_start_idx = corrected_start(timestamps, forecast_mask)
+        corr_start_idx += 1 # since we make prediction 
+
+        # context (past) - now can use extended context if complete_data is available
+        historic_start_idx = max(0, corr_start_idx - context_length)
+        past = full_data.iloc[historic_start_idx:corr_start_idx]
+
+        # horizon (future)
+        max_lt = max(forecast.get_lead_times())
+        if max_forecast_steps is not None:
+            max_lt = min(max_lt, max_forecast_steps)
+        future = full_data.iloc[corr_start_idx : corr_start_idx + max_lt]
+
+        # predictions aligned to dates
+        forecasted_ts = timestamps[forecast_mask]
+        start_idx_preds = forecasted_ts.get_indexer([corr_start_date])[0]
+        selected_predictions = build_selected_predictions(forecast, corr_start_date, start_idx_preds, max_lt)
+
+        # plots
+        ax.plot(past.index, past["target"], label="Past", color="black", linestyle="--", linewidth=1)
+        ax.plot(future.index, future["target"], label="Future (true)", color="blue", linewidth=1.5)
+
+        if 0.5 in selected_predictions.columns:
+            ax.plot(selected_predictions.index, selected_predictions[0.5].values, label="Prediction (median)", color="red", linewidth=1.5)
+
+        ax.axvline(corr_start_date, color="black", linestyle=":", label="Prediction start")
+        forecast_end = selected_predictions.index[-1]
+        ax.axvspan(corr_start_date, forecast_end, alpha=0.1, color="gray", label="_nolegend_")
+
+        add_prediction_intervals(
+            ax,
+            selected_predictions,
+            intervals=[(0.4, 0.6), (0.3, 0.7), (0.2, 0.8), (0.1, 0.9)],
+            base_color="orange",
+        )
+
+        ax.set_title(f"{item_id}", fontsize=font_sizes["subtitle"])
+        format_axes(ax, font_sizes, show_xy_labels, tight_margins)
+
+    # hide unused subplots
+    for idx in range(num_forecasts, len(forecast_axes)):
+        forecast_axes[idx].set_visible(False)
+
+    # unified legend
+    if show_legend:
+        legend_axes = [hist_ax] if (hist_ax is not None) else []
+        # add the first visible forecast axis (enough to capture handles)
+        for ax in forecast_axes[:num_forecasts]:
+            if ax.get_visible():
+                legend_axes.append(ax)
+                break
+        gather_legend(fig, legend_axes, font_sizes)
+
+    # title
+    if title_prefix:
+        fig.suptitle(title_prefix, fontsize=font_sizes["title"], y=0.98)
+
+    if save_path:
+        plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        print(f"Plot saved to: {save_path}")
+
+    plt.show()

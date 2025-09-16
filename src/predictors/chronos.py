@@ -69,6 +69,7 @@ class BaseTimeSeriesDataset(Dataset):
         prediction_length: Optional[int] = None,
         tokenizer: Optional["ChronosTokenizer"] = None,
         rolling: bool = False,
+        index_mask: Optional[np.ndarray] = None,
     ):
         assert context_length > 0, "context_length must be greater than 0"
         assert window_step > 0, "window_step must be greater than 0"
@@ -81,6 +82,7 @@ class BaseTimeSeriesDataset(Dataset):
         self.skip_first_n_samples = skip_first_n_samples
         self.skip_last_n_samples = skip_last_n_samples
         self.rolling = rolling
+        self.index_mask = index_mask
 
         if self.return_target and self.prediction_length is None:
             raise ValueError("prediction_length must be set when return_target=True")
@@ -108,7 +110,9 @@ class BaseTimeSeriesDataset(Dataset):
         np.cumsum(counts_per_item, out=self.indptr[1:])
 
         # Precompute valid indices depending on mode
-        if self.rolling:
+        if self.index_mask is not None:
+            self._compute_indices_from_mask(self.index_mask)
+        elif self.rolling:
             self._compute_valid_indices(self.skip_first_n_samples)
         else:
             # only last observation per series
@@ -134,6 +138,32 @@ class BaseTimeSeriesDataset(Dataset):
             s, e = self._series_bounds(item_id)
             latest[item_id] = e - 1
         return latest
+
+    def _compute_indices_from_mask(self, mask: np.ndarray) -> None:
+        """
+        Build self.valid_idx from a global boolean mask.
+        Mask length must equal len(self.target_array).
+        Skip ranges (first/last) are applied on top of the mask.
+        """
+        mask = np.asarray(mask, dtype=bool)
+        if mask.ndim != 1:
+            raise ValueError("index_mask must be a 1D bool array")
+        if mask.size != self.target_array.size:
+            raise ValueError(f"index_mask length {mask.size} != dataset length {self.target_array.size}")
+
+        # apply skip ranges
+        n_items = len(self.indptr) - 1
+        mask = mask.copy()
+        for item_id in range(n_items):
+            s, e = self._series_bounds(item_id)
+            start_skip = (self.skip_first_n_samples or {}).get(item_id, 0)
+            last_skip = (self.skip_last_n_samples or {}).get(item_id, 0)
+            if start_skip > 0:
+                mask[s : s + start_skip] = False
+            if last_skip > 0:
+                mask[e - last_skip : e] = False
+
+        self.valid_idx = np.flatnonzero(mask).astype(np.int32)
 
     def _compute_valid_indices(self, skip_first_n_samples: Optional[Dict[int, int]]):
         """
@@ -240,74 +270,15 @@ class BaseTimeSeriesDataset(Dataset):
 
     @property
     def valid_timestamps(self):
-        try:
-            return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
-        except (ValueError, TypeError):
-            # Fallback: let pandas infer (e.g., already Timestamps)
-            return pd.to_datetime(self.timestamps[self.valid_idx])
-
-    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: "TimeSeriesDataFrame"):
-        """
-        Assemble a ForecastCollection given model predictions.
-
-        predictions: Tensor [N x num_quantiles x prediction_length]
-        """
-        from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, HorizonForecast  # local import to avoid cycles
-
-        freq = pd.tseries.frequencies.to_offset(output_data.freq)
-
-        preds_df = pd.DataFrame(
-            {
-                "item_id": self.item_ids[self.valid_idx],
-                "timestamp": self.timestamps[self.valid_idx],
-            }
-        )
-
-        assert len(preds_df) == predictions.shape[0], "Row count mismatch between preds and indices."
-
-        forecasts = {}
-        for item_id, group in preds_df.groupby("item_id", sort=False):
-            s, e = group.index.min(), group.index.max() + 1
-            preds = predictions[s:e]
-            timestamps = group["timestamp"]
-
-            mask = output_data.loc[[item_id]].index.get_level_values(TIMESTAMP).isin(timestamps)
-
-            lt_forecasts = {lt: HorizonForecast(lead_time=lt, predictions=preds[..., lt - 1]) for lt in lead_times}
-
-            forecasts[item_id] = TimeSeriesForecast(
-                item_id=item_id,
-                lead_time_forecasts=lt_forecasts,
-                data=output_data.loc[[item_id]],
-                freq=freq,
-                forecast_mask=mask,
-            )
-
-        return ForecastCollection(item_ids=forecasts)
-
-    @property
-    def pred_index(self):
-        return pd.MultiIndex.from_arrays(
-            [self.item_ids[self.valid_idx], self.timestamps[self.valid_idx]],
-            names=[ITEMID, TIMESTAMP],
-        )
-
-    @property
-    def valid_item_ids(self):
-        return self.item_ids[self.valid_idx]
-
-    @property
-    def valid_timestamps(self):
         return pd.to_datetime(self.timestamps[self.valid_idx], unit="s")
 
-    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame) -> ForecastCollection:
+    def to_forecast_collection(self, predictions: torch.Tensor, lead_times: List[int], output_data: TimeSeriesDataFrame, freq: str) -> ForecastCollection:
         """
         Assemble a ForecastCollection given model predictions.
 
         predictions is a tensor [N x num_quantiles x prediction length]
         """
-
-        freq = pd.tseries.frequencies.to_offset(output_data.freq)
+        freq = pd.tseries.frequencies.to_offset(freq)
 
         preds_df = pd.DataFrame(
             {
@@ -580,9 +551,12 @@ class Chronos(AbstractPredictor):
                 p.requires_grad = False
 
             # resize head if requested (only for Bolt)
-            if isinstance(pipe, ChronosBoltPipeline) and self.finetuning_adjust_pretrained_prediction_length:
-                unfreeze_new = mode == "new_neurons"
-                pipe = resize_chronos_bolt_output_layers(pipe, self.prediction_length, unfreeze_new_neurons=unfreeze_new)
+            if self.finetuning_adjust_pretrained_prediction_length:
+                if isinstance(pipe, ChronosBoltPipeline):
+                    unfreeze_new = mode == "new_neurons"
+                    pipe = resize_chronos_bolt_output_layers(pipe, self.prediction_length, unfreeze_new_neurons=unfreeze_new)
+                elif isinstance(pipe, ChronosPipeline):
+                    pipe = resize_chronos_t5_output_layers(pipe, self.prediction_length)
 
             # unfreeze
             if mode == "full":
@@ -636,14 +610,13 @@ class Chronos(AbstractPredictor):
         # update prediction length
         if self.finetuning_adjust_pretrained_prediction_length:
             prediction_length = self.prediction_length
-            self.pipeline.model.config.prediction_length = prediction_length  # TODO: check if I need this
-            self.pipeline.inner_model.config.chronos_config["prediction_length"] = prediction_length
         else:
             prediction_length = self.pipeline.inner_model.config.chronos_config["prediction_length"]  # standard
-
         logging.info("Prediction length will be set to %s during training.", prediction_length)
 
         tokenizer = getattr(self.pipeline, "tokenizer", None)
+        if isinstance(self.pipeline, ChronosPipeline):
+            tokenizer.config.prediction_length = prediction_length
 
         # 1) create datasets
         ds_train, ds_val = self._create_datasets(
@@ -784,6 +757,7 @@ class Chronos(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series.
@@ -806,7 +780,9 @@ class Chronos(AbstractPredictor):
             This controls how densely forecasts are generated across time. A smaller value creates more overlapping
             forecasts, while a larger value skips more observations between windows.
             The rolling procedure is applied independently to each time series in the dataset.
-
+        index_mask: np.ndarray
+            A 1D global boolean mask with selected samples to generate forecasts on. If provided
+            `rolling` and `window_step` will be ignored.
         Returns
         -------
         ForecastCollection
@@ -827,12 +803,13 @@ class Chronos(AbstractPredictor):
             window_step,
             skip_first,
             rolling=rolling,
+            index_mask=index_mask,
         )
 
         if isinstance(self.pipeline, ChronosPipeline):
             batch_size = 128
         elif isinstance(self.pipeline, ChronosBoltPipeline):
-            batch_size = 512
+            batch_size = 128
 
         dl = DataLoader(ds, batch_size=batch_size, num_workers=4)
 
@@ -864,14 +841,16 @@ class Chronos(AbstractPredictor):
         forecasts = torch.vstack(forecasts)
         assert forecasts.shape[0] == len(ds), "row count mismatch"
 
+        freq = data.freq
+
         # If rolling, output data covers all input rows
-        if rolling:
-            output_data = data
+        if rolling or index_mask is not None:
+            output_data = TimeSeriesDataFrame(data)
         else:
             # Only the most recent timestep per series
-            output_data = data.slice_by_timestep(start_index=-1)
+            output_data = data.slice_by_timestep(start_index=-1)  # Since Autogluon 1.4 the freq information gets lost during slicing
 
-        collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data)
+        collection = ds.to_forecast_collection(predictions=forecasts, lead_times=self.lead_times, output_data=output_data, freq=freq)
 
         return collection
 
@@ -904,7 +883,7 @@ class BestCheckpointCallback(TrainerCallback):
         trainer = kwargs.get("trainer")
         if trainer and getattr(trainer, "tokenizer", None):
             trainer.tokenizer.save_pretrained(ckpt_dir)
-        print(f"[Unified] saved initial model to {ckpt_dir}")
+        logging.info("Saved initial model to, %s", ckpt_dir)
 
         # initialize both callback and Trainer.state
         init_best = np.inf if not self.greater_is_better else -np.inf
@@ -936,7 +915,7 @@ class BestCheckpointCallback(TrainerCallback):
             ckpt_dir = os.path.join(args.output_dir, ckpt_name)
             state.best_model_checkpoint = ckpt_dir
 
-            print(f"New best @ step {state.global_step}: " f"{self.metric_name}={current:.4f}, marking {ckpt_dir}")
+            logging.info(f"New best @ step {state.global_step}: " f"{self.metric_name}={current:.4f}, marking {ckpt_dir}")
 
     def get_best_metric(self):
         return self.best_metric
@@ -1214,7 +1193,7 @@ def print_trainable_params(model: PreTrainedModel) -> None:
 
     fraction_trainable_params = np.round(fraction_trainable_params * 100, 2)
 
-    print(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
+    logging.info(f"trainable params: {trainable_params} || all params: {total_params} || trainable%: {fraction_trainable_params}")
 
 
 def _resize_proj(old_linear: nn.Linear, num_quantiles: int, old_H: int, new_H: int, unfreeze_new_neurons: bool) -> nn.Linear:
@@ -1337,5 +1316,42 @@ def resize_chronos_bolt_output_layers(pipeline, new_prediction_length: int, unfr
         new_prediction_length,
         num_quantiles * old_H,
         num_quantiles * new_prediction_length,
+    )
+    return pipeline
+
+
+def resize_chronos_t5_output_layers(pipeline, new_prediction_length: int):
+    """
+    Resize Chronos T5's prediction length configuration.
+
+    For T5, this doesn't involve resizing physical layers like Bolt,
+    but updating the configuration that controls generation length.
+
+    Parameters
+    ----------
+    pipeline : ChronosPipeline
+        The Chronos T5 pipeline to resize
+    new_prediction_length : int
+        Desired forecast horizon (H).
+    """
+    model = pipeline.inner_model
+    old_H = model.config.chronos_config["prediction_length"]
+
+    if new_prediction_length == old_H:
+        logging.info("Prediction length unchanged (%d); nothing to do.", old_H)
+        return pipeline
+
+    # Update the chronos config in multiple places
+    model.config.chronos_config["prediction_length"] = new_prediction_length
+    model.config.prediction_length = new_prediction_length
+
+    # Update the tokenizer config
+    if hasattr(pipeline, "tokenizer") and hasattr(pipeline.tokenizer, "config"):
+        pipeline.tokenizer.config.prediction_length = new_prediction_length
+
+    logging.info(
+        "Resized Chronos T5 prediction length from %d to %d steps.",
+        old_H,
+        new_prediction_length,
     )
     return pipeline

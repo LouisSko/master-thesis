@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import pandas as pd
 from src.core.timeseries_evaluation import ForecastCollection, TimeSeriesForecast, TabularDataFrame
 from autogluon.timeseries import TimeSeriesDataFrame
-from typing import Dict, List, Optional, Type, Union, Literal, Iterable, Any
+from typing import Dict, List, Optional, Tuple, Type, Union, Literal, Iterable, Any
 from pathlib import Path
 import joblib
 import logging
@@ -17,7 +17,6 @@ import importlib
 from multiprocessing.resource_tracker import ResourceTracker
 from pydantic import BaseModel, computed_field
 import torch
-from typing import Optional
 from torch import nn
 from transformers.utils import ModelOutput
 
@@ -164,9 +163,10 @@ class AbstractPredictor(ABC):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         start_time = time.time()
-        forecasts = self._predict(data, previous_context_data, rolling, window_step)
+        forecasts = self._predict(data, previous_context_data, rolling, window_step, index_mask)
         end_time = time.time()
 
         # add execution time
@@ -182,6 +182,7 @@ class AbstractPredictor(ABC):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         pass
 
@@ -196,7 +197,7 @@ class AbstractPredictor(ABC):
         data: TimeSeriesDataFrame,
         previous_context_data: TimeSeriesDataFrame,
         context_length=int,
-    ) -> TimeSeriesDataFrame:
+    ) -> Tuple[TimeSeriesDataFrame, Dict]:
         """
         Merges previous context data with the new prediction data, ensuring time continuity and context length.
 
@@ -792,7 +793,7 @@ class AbstractPytorchCalibrator(nn.Module):
             device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
         self.to(device)
-        x = x.to(device)
+        x = x.to(device, dtype=torch.float32)
         y_true = y_true.to(device, dtype=torch.float32)
         quantiles = quantiles.to(device, dtype=torch.float32)
         mask = ~torch.isnan(y_true)

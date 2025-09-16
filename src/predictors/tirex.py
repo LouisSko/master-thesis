@@ -88,6 +88,7 @@ class TiRex(AbstractPredictor):
         previous_context_data: Optional[TimeSeriesDataFrame] = None,
         rolling: bool = False,
         window_step: int = 1,
+        index_mask: Optional[np.ndarray] = None,
     ) -> ForecastCollection:
         """
         Generates forecasts for each time series by calling the TiRex microservice.
@@ -129,6 +130,7 @@ class TiRex(AbstractPredictor):
             window_step,
             skip_first,
             rolling=rolling,
+            index_mask=index_mask,
         )
 
         dl = DataLoader(ds, batch_size=256)
@@ -172,6 +174,7 @@ class TiRex(AbstractPredictor):
             logging.error(f"Row count mismatch: predictions={forecasts_tensor.shape[0]} vs dataset={len(ds)}")
             raise ValueError("Mismatch between prediction rows and dataset rows.")
 
+        freq = data.freq
         # If rolling, output data covers all input rows
         if rolling:
             output_data = data
@@ -183,6 +186,7 @@ class TiRex(AbstractPredictor):
             predictions=forecasts_tensor,
             lead_times=self.lead_times,
             output_data=output_data,
+            freq=freq,
         )
 
     def construct_prediction(self, response) -> torch.Tensor:
