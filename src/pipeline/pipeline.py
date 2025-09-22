@@ -177,8 +177,9 @@ class ForecastingPipeline(AbstractPipeline):
         test_window_size: Optional[pd.DateOffset] = None,
         test_window_step: int = 1,
         calibration_window_step: int = 1,
+        max_calibration_samples: Optional[int] = None,
         train: bool = False,
-        calibration_based_on: Optional[Union[Literal["val", "train", "train_val", "auto"], pd.DateOffset]] = "auto",
+        calibration_based_on: Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]] = "auto",
         auto_determine_val_set: bool = False,
         save_results: bool = False,
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
@@ -210,6 +211,8 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_window_step : int, Defaults to 1.
             The number of time steps to move the sliding prediction window forward between each prediction on the calibration dataset.
             Smaller values creates more calibration datapoints, while a larger value speeds up calibration process.
+        max_calibration_samples : int, Defaults to None
+            Number of maximum calibration samples to select. Overwrites calibration_window_step
         train : bool, optional
             Whether to train the model during backtesting. Defaults to False.
         calibration_based_on : Optional[Union[Literal["val", "train", "train_val"], pd.DateOffset]], optional
@@ -275,6 +278,7 @@ class ForecastingPipeline(AbstractPipeline):
                 test_window_step=test_window_step,
                 calibration_window_step=calibration_window_step,
                 calibration_based_on=calibration_based_on,
+                max_calibration_samples=max_calibration_samples,
                 auto_determine_val_set=auto_determine_val_set,
             )
 
@@ -547,7 +551,7 @@ class ForecastingPipeline(AbstractPipeline):
         val_window_step : Optional[int], default=None
             The step size for generating rolling windows on the validation set. If None, defaults to
             the model's `prediction_length`.
-        max_val_windows : int, default=1
+        max_val_windows : int, default=None
             The maximum number of forecast windows to include in the automatically generated validation set.
             Only used when `auto_determine_val_set=True`.
             A smaller number might be chosen, if not enough data is available.
@@ -592,7 +596,7 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         data_test: TimeSeriesDataFrame,
         data_previous_context: Optional[TimeSeriesDataFrame] = None,
-        max_calibration_samples: int = 1000,
+        max_calibration_samples: int = 100,
     ) -> Dict[str, ForecastCollection]:
         """
         Convenience function to quickly generate a fixed-size calibration dataset via rolling forecasts.
@@ -634,6 +638,7 @@ class ForecastingPipeline(AbstractPipeline):
         self,
         data_test: "TimeSeriesDataFrame",
         prediction_length: int,
+        data_previous_context: Optional["TimeSeriesDataFrame"] = None,
         max_calibration_samples: int = 500,
         skip_first_n_samples: Optional[Dict[int, int]] = None,
         skip_last_n_samples: Optional[Dict[int, int]] = None,
@@ -650,6 +655,8 @@ class ForecastingPipeline(AbstractPipeline):
             The time series data to generate calibration forecasts on. Must include the target values.
         prediction_length: int
             The forecast horizon of the model.
+        data_previous_context: TimeSeriesDataFrame
+            Previous context data
         max_calibration_samples: int
             The maximum number of calibration samples to generate.
         skip_first_n_samples: Optional[Dict[int, int]], default=None
@@ -771,6 +778,12 @@ class ForecastingPipeline(AbstractPipeline):
 
         logging.info("Calibration samples per time series: %s", vals_per_item)
 
+        # extend mask if previous context is provided
+        # TODO: make this more robut by e.g. moving to generate_forecasts
+        if data_previous_context is not None:
+            context_data_mask = np.full(len(data_previous_context), False)
+            mask = np.concatenate([context_data_mask, mask])
+
         return mask
 
     def generate_forecasts(
@@ -877,6 +890,7 @@ class ForecastingPipeline(AbstractPipeline):
         calibration_based_on: Optional[Union[Literal["val", "train", "train_val", "auto"], pd.DateOffset]] = "auto",
         calibration_window_step: int = 1,
         auto_determine_val_set: bool = False,
+        max_calibration_samples: Optional[int] = None,
     ) -> Tuple[Dict[str, ForecastCollection], Dict]:
         """
         Train, predict, and postprocess wrapper for internal backtesting.
@@ -927,33 +941,32 @@ class ForecastingPipeline(AbstractPipeline):
 
         # ---------- define calibration dataset ----------
         if self.postprocessors is not None:
-            if calibration_based_on == "auto":
-                index_mask = self.auto_generate_calibration_config(
-                    data_train,
-                    prediction_length=self.predictor.prediction_length,
-                    max_calibration_samples=200,
-                    require_full_target=True,
-                )
+            index_mask = None  # set default to None
+            if calibration_based_on == "val":
+                calibration_data = data_val
+                context_data = data_train
+            elif calibration_based_on == "train":
                 calibration_data = data_train
                 context_data = None
-            else:
-                index_mask = None  # set default to None
-                if calibration_based_on == "val":
-                    calibration_data = data_val
-                    context_data = data_train
-                elif calibration_based_on == "train":
-                    calibration_data = data_train
-                    context_data = None
-                elif calibration_based_on == "train_val":
-                    calibration_data = pd.concat([data_train, data_val]).sort_index()
-                    context_data = None
+            elif calibration_based_on == "train_val":
+                calibration_data = pd.concat([data_train, data_val]).sort_index()
+                context_data = None
 
-                logging.info(
-                    "Use calibration data from %s to %s for fitting postprocessors",
-                    calibration_data.index.get_level_values("timestamp").min(),
-                    calibration_data.index.get_level_values("timestamp").max(),
+            logging.info(
+                "Use calibration data from %s to %s for fitting postprocessors",
+                calibration_data.index.get_level_values("timestamp").min(),
+                calibration_data.index.get_level_values("timestamp").max(),
+            )
+            logging.info("Calibration window step: %s", calibration_window_step)
+        
+            if max_calibration_samples:
+                index_mask = self.auto_generate_calibration_config(
+                    data_test=calibration_data,
+                    data_previous_context=context_data,
+                    prediction_length=self.predictor.prediction_length,
+                    max_calibration_samples=max_calibration_samples,
+                    require_full_target=True,
                 )
-                logging.info("Calibration window step: %s", calibration_window_step)
 
             # ---------- generate forecasts on calibration dataset using the predictor ----------
             logging.info("Generating forecasts on calibration data...")
@@ -964,7 +977,7 @@ class ForecastingPipeline(AbstractPipeline):
                 window_step=calibration_window_step,
                 index_mask=index_mask,
             )
-
+ 
             # ---------- train postprocessors ----------
             self.train_postprocessors(predictions_calibration_data[self.predictor.name])
 
