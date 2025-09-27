@@ -778,11 +778,6 @@ class ForecastingPipeline(AbstractPipeline):
 
         logging.info("Calibration samples per time series: %s", vals_per_item)
 
-        # extend mask if previous context is provided
-        # TODO: make this more robut by e.g. moving to generate_forecasts
-        if data_previous_context is not None:
-            context_data_mask = np.full(len(data_previous_context), False)
-            mask = np.concatenate([context_data_mask, mask])
 
         return mask
 
@@ -941,7 +936,6 @@ class ForecastingPipeline(AbstractPipeline):
 
         # ---------- define calibration dataset ----------
         if self.postprocessors is not None:
-            index_mask = None  # set default to None
             if calibration_based_on == "val":
                 calibration_data = data_val
                 context_data = data_train
@@ -957,26 +951,23 @@ class ForecastingPipeline(AbstractPipeline):
                 calibration_data.index.get_level_values("timestamp").min(),
                 calibration_data.index.get_level_values("timestamp").max(),
             )
-            logging.info("Calibration window step: %s", calibration_window_step)
-        
-            if max_calibration_samples:
-                index_mask = self.auto_generate_calibration_config(
-                    data_test=calibration_data,
-                    data_previous_context=context_data,
-                    prediction_length=self.predictor.prediction_length,
-                    max_calibration_samples=max_calibration_samples,
-                    require_full_target=True,
-                )
 
             # ---------- generate forecasts on calibration dataset using the predictor ----------
-            logging.info("Generating forecasts on calibration data...")
-            predictions_calibration_data = self.generate_forecasts(
-                data_test=calibration_data,
-                data_previous_context=context_data,
-                rolling=True,
-                window_step=calibration_window_step,
-                index_mask=index_mask,
-            )
+            if max_calibration_samples:
+                logging.info("Generating forecasts on calibration data...")
+                predictions_calibration_data = self.auto_generate_calibration_forecasts(calibration_data, 
+                                                                                        context_data,
+                                                                                        max_calibration_samples)
+
+            else:
+                logging.info("Calibration window step: %s", calibration_window_step)
+                predictions_calibration_data = self.generate_forecasts(
+                    data_test=calibration_data,
+                    data_previous_context=context_data,
+                    rolling=True,
+                    window_step=calibration_window_step,
+                    index_mask=None,
+                )
  
             # ---------- train postprocessors ----------
             self.train_postprocessors(predictions_calibration_data[self.predictor.name])
