@@ -33,8 +33,8 @@ set_global_seed()
 
 
 LR_WARMUP = 1e-4
-LR_FT = 1e-5
-
+LR_FT_BOLT = 1e-5 # chronos-bolt
+LR_FT_T5 = 1e-4 # chronos-t5
 
 class ChronosLoraConfig(LoraConfig):
     """Chronos t5 lora configuration"""
@@ -582,7 +582,7 @@ class Chronos(AbstractPredictor):
                 # attach lora adapters (all original params stay frozen)
                 if isinstance(pipe, ChronosPipeline):
                     lcfg = ChronosLoraConfig(
-                        prediction_length=self.prediction_length,
+                        prediction_length=pipe.inner_model.config.chronos_config["prediction_length"],
                         r=8,
                         lora_alpha=8,
                         lora_dropout=0.0,
@@ -637,19 +637,27 @@ class Chronos(AbstractPredictor):
             out_dir = self.output_dir / f"stage_{i}_{stage}"
             out_dir.mkdir(parents=True, exist_ok=True)
 
+            if isinstance(self.pipeline, ChronosPipeline):
+                lr = LR_FT_T5
+            elif isinstance(self.pipeline, ChronosBoltPipeline):
+                lr = LR_FT_BOLT
+            else:
+                raise ValueError("Not supported pipeline.")
             # pick LR/epochs
             train_kwargs = {}
             if stage in {"new_neurons"}:
                 train_kwargs.update({"learning_rate": LR_WARMUP, "num_train_epochs": 20})
             elif stage in {"lora"}:
-                train_kwargs.update({"learning_rate": 1e-4, "num_train_epochs": 10})
+                train_kwargs.update({"learning_rate": lr, "num_train_epochs": 20})
             else:  # full / last_layer
-                train_kwargs.update({"learning_rate": LR_FT, "num_train_epochs": 10})
+                train_kwargs.update({"learning_rate": lr, "num_train_epochs": 20})
 
             # add specific train args for chronos bolt
             if tokenizer is None:
                 train_kwargs.update({"label_names": [TARGET]})
-
+            else:
+                train_kwargs.update({"label_names": ["labels"]})
+            
             # model_init = lambda source=model_ckpt, mode=stage: _build_model(source, mode)
             model_init = lambda: _build_model(model_ckpt, stage)
 
@@ -807,7 +815,7 @@ class Chronos(AbstractPredictor):
         )
 
         if isinstance(self.pipeline, ChronosPipeline):
-            batch_size = 128
+            batch_size = 32
         elif isinstance(self.pipeline, ChronosBoltPipeline):
             batch_size = 128
 
@@ -1138,7 +1146,7 @@ def build_train_args(
         per_device_train_batch_size=bs,
         per_device_eval_batch_size=bs,
         auto_find_batch_size=True,
-        learning_rate=LR_FT,
+        learning_rate=1e-5,
         lr_scheduler_type="linear",
         warmup_ratio=0.0,
         weight_decay=0.0,
