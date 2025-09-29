@@ -257,6 +257,7 @@ class ForecastingPipeline(AbstractPipeline):
                     test_window_step=test_window_step,
                     calibration_window_step=calibration_window_step,
                     calibration_based_on=calibration_based_on,
+                    max_calibration_samples=max_calibration_samples,
                     auto_determine_val_set=auto_determine_val_set,
                 )
                 execution_times[f"backtest_{i}"]["start"] = test_start_date
