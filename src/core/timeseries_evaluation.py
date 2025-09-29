@@ -527,7 +527,7 @@ class TimeSeriesForecast(BaseModel):
         plt.grid(True)
         plt.show()
 
-    def plot_forecasts(self, start: Optional[Union[int, pd.Timestamp]] = None, context_length: int = 100) -> None:
+    def plot_forecasts(self, start: Optional[Union[int, pd.Timestamp]] = None, context_length: int = 100, max_forecast_horizon: Optional[int] = None) -> None:
         """
         Plot past data, true future values, and quantile forecasts for a given starting point.
 
@@ -625,7 +625,7 @@ class TimeSeriesForecast(BaseModel):
 
         # Past context
         historic_start_idx = max(0, corrected_start_idx - context_length) if corrected_start_idx >= 0 else corrected_start_idx - context_length
-        past = self.data.iloc[historic_start_idx:corrected_start_idx].reset_index(level=0, drop=True)
+        past = self.data.iloc[historic_start_idx : corrected_start_idx + 1].reset_index(level=0, drop=True)
 
         # Future truth Horizon: up to max lead-time
         max_lt = max(self.get_lead_times())
@@ -635,9 +635,17 @@ class TimeSeriesForecast(BaseModel):
         freq_offset = pd.tseries.frequencies.to_offset(self.freq)
         prediction_dates = [corrected_start_date + freq_offset * lt for lt in self.get_lead_times()]
         selected_predictions = pd.DataFrame(data=preds[start_idx_preds].numpy(), columns=self.quantiles, index=prediction_dates)  # shape: [num_lead_times, num_quantiles]
-
+        if max_forecast_horizon:
+            selected_predictions = selected_predictions.iloc[:max_forecast_horizon].copy()
+            future = future.iloc[:max_forecast_horizon].copy()
         plt.figure(figsize=(12, 6))
 
+        # add real value to selected predictions for plotting
+        row = past.iloc[[-1]]
+        first_row = pd.concat([row] * 9, axis=1)
+        first_row.columns = selected_predictions.columns
+
+        selected_predictions = pd.concat([first_row, selected_predictions])
         plt.plot(past.index, past.values, label="Past", color="black", linestyle="--")
         plt.plot(future.index, future.values, label="Future (true)", color="blue")
 
@@ -868,7 +876,6 @@ class ForecastCollection(BaseModel):
             max_cols=max_cols,
             sharex=sharex,
             sharey=sharey,
-            show_xy_labels=show_xy_labels,
             show_legend=show_legend,
             title_prefix=title_prefix,
             legend_position=legend_position,
@@ -2948,6 +2955,8 @@ def load_predictions(
             common_path=common_path,
             strip_tokens={DIR_BACKTESTS, DIR_MODELS, DIR_POSTPROCESSORS},
         )
+        key = key.replace("-PP_", "+")
+
         if load:
             print(filepath)
             all_predictions[key] = ForecastCollection.load(filepath)
@@ -3085,7 +3094,10 @@ def plot_multiple_forecasts(
     max_cols: int = 3,
     sharex: bool = False,
     sharey: bool = False,
-    show_xy_labels: bool = True,
+    show_x_labels: bool = True,
+    show_y_labels: bool = True,
+    show_x_ticks: bool = True,
+    show_y_ticks: bool = True,
     show_legend: bool = True,
     title_prefix: str = "",
     legend_position: str = "below",  # "below" or "right"
@@ -3094,6 +3106,8 @@ def plot_multiple_forecasts(
     margin_padding: float = 0.05,
     show_history_overview: bool = False,
     history_overview_height: float = 0.3,
+    use_window_labels: bool = False,
+    window_size: int = 64,
     save_path: Optional[str] = None,
     dpi: int = 300,
 ) -> None:
@@ -3141,8 +3155,17 @@ def plot_multiple_forecasts(
     sharey : bool
         Whether to share y-axis across subplots.
 
-    show_xy_labels : bool
-        Whether to show x- and y-labels on subplots.
+    show_x_labels : bool
+        Whether to show x-axis labels on subplots.
+
+    show_y_labels : bool
+        Whether to show y-axis labels on subplots.
+
+    show_x_ticks : bool
+        Whether to show x-axis tick marks on subplots.
+
+    show_y_ticks : bool
+        Whether to show y-axis tick marks on subplots.
 
     show_legend : bool
         Whether to show legends on subplots.
@@ -3172,6 +3195,14 @@ def plot_multiple_forecasts(
     history_overview_height : float
         Height ratio for the history overview subplot relative to the total figure height.
         Range: 0.1 to 0.5. Default: 0.3 (30% of total height).
+
+    use_window_labels : bool
+        If True, display window labels (w1, w2, w3, ...) on the x-axis instead of dates.
+        Window labels are centered in the middle of each window. Default: False.
+
+    window_size : int
+        Size of each window in time steps when using window labels. This determines
+        how many time steps each window represents. Default: 64.
 
     save_path : Optional[str]
         If provided, save the plot to this path.
@@ -3236,15 +3267,60 @@ def plot_multiple_forecasts(
         corr_start_idx = timestamps.get_indexer([corr_start_date])[0]
         return corr_start_date, corr_start_idx
 
-    def format_axes(ax: plt.Axes, fs: Dict[str, int], show_labels: bool, tight: bool):
-        if show_labels:
-            ax.set_xlabel("Date", fontsize=fs["xlabel"])
+    def format_axes(
+        ax: plt.Axes,
+        fs: Dict[str, int],
+        show_x_labels: bool,
+        show_y_labels: bool,
+        show_x_ticks: bool,
+        show_y_ticks: bool,
+        tight: bool,
+        use_window_labels: bool = False,
+        window_size: int = 64,
+        visible_timestamps: Optional[pd.Index] = None,
+    ):
+        if show_x_labels:
+            if use_window_labels:
+                ax.set_xlabel("Forecasting Window", fontsize=fs["xlabel"])
+            else:
+                ax.set_xlabel("Date", fontsize=fs["xlabel"])
+
+        if show_y_labels:
             ax.set_ylabel("Value", fontsize=fs["ylabel"])
-        ax.grid(True, alpha=0.3)
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right", fontsize=fs["tick_labels"])
+        # ax.grid(True, alpha=0.3)
+
+        if use_window_labels and visible_timestamps is not None:
+            # Calculate window positions based on visible timestamps only
+            num_windows = len(visible_timestamps) // window_size
+            window_positions = []
+            window_labels = []
+            for i in range(num_windows):
+                start_idx = i * window_size
+                end_idx = min((i + 1) * window_size, len(visible_timestamps))
+                if start_idx < len(visible_timestamps):
+                    # Use the middle timestamp of the window
+                    middle_idx = start_idx + (end_idx - start_idx) // 2
+                    window_positions.append(visible_timestamps[middle_idx])
+                    window_labels.append(f"{i+1}")
+
+            ax.set_xticks(window_positions)
+            ax.set_xticklabels(window_labels, fontsize=fs["tick_labels"])
+        else:
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right", fontsize=fs["tick_labels"])
+
         plt.setp(ax.yaxis.get_majorticklabels(), fontsize=fs["tick_labels"])
+        # Apply 2 decimal places to y-axis ticks
+        #from matplotlib.ticker import FormatStrFormatter
+        #ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+
+        # Control tick visibility
+        if not show_x_ticks:
+            ax.set_xticks([])
+        if not show_y_ticks:
+            ax.set_yticks([])
+
         if tight:
             ax.margins(y=margin_padding, x=0)
 
@@ -3261,6 +3337,7 @@ def plot_multiple_forecasts(
             if ql not in selected_predictions.columns or qu not in selected_predictions.columns:
                 continue
             alpha = 0.2 + 0.15 * (n - 1 - i)
+            # alpha=0.9
             ax.fill_between(
                 selected_predictions.index,
                 selected_predictions[ql],
@@ -3333,9 +3410,13 @@ def plot_multiple_forecasts(
         ax_hist.set_title("Historical Overview", fontsize=fs["subtitle"])
         # ax_hist.set_xlabel("Time", fontsize=fs["xlabel"])
         # ax_hist.set_ylabel("Value", fontsize=fs["ylabel"])
-        ax_hist.grid(True, alpha=0.3)
+        # ax_hist.grid(True, alpha=0.3)
         if tight_margins:
             ax_hist.margins(y=margin_padding, x=0)
+
+        # Apply window labeling to history overview if requested
+        #if use_window_labels:
+        #    format_axes(ax_hist, fs, show_x_labels, show_y_labels, show_x_ticks, show_y_ticks, tight_margins, use_window_labels, window_size, history_data.index)
 
         return ax_hist, ts, corr_start_date, corr_start_idx
 
@@ -3350,9 +3431,9 @@ def plot_multiple_forecasts(
         if not handles:
             return
         if legend_position == "below":
-            fig_.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.05), ncol=min(4, len(handles)), fontsize=fs["legend"], frameon=True)
+            fig_.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=min(4, len(handles)), fontsize=fs["legend"], frameon=False)
         elif legend_position == "right":
-            fig_.legend(handles, labels, loc="center left", bbox_to_anchor=(1.05, 0.5), ncol=1, fontsize=fs["legend"], frameon=True)
+            fig_.legend(handles, labels, loc="center left", bbox_to_anchor=(1.05, 0.5), ncol=1, fontsize=fs["legend"], frameon=False)
 
     # ---------- compute layout / sizes once ----------
 
@@ -3393,7 +3474,7 @@ def plot_multiple_forecasts(
         # TODO: this is error prone in case provided "complete data" does not cover the period of the forecast
         full_data, timestamps, forecast_mask = extend_historic_data(forecast, complete_data)
         corr_start_date, corr_start_idx = corrected_start(timestamps, forecast_mask)
-        corr_start_idx += 1 # since we make prediction 
+        corr_start_idx += 1  # since we make prediction
 
         # context (past) - now can use extended context if complete_data is available
         historic_start_idx = max(0, corr_start_idx - context_length)
@@ -3403,12 +3484,19 @@ def plot_multiple_forecasts(
         max_lt = max(forecast.get_lead_times())
         if max_forecast_steps is not None:
             max_lt = min(max_lt, max_forecast_steps)
-        future = full_data.iloc[corr_start_idx : corr_start_idx + max_lt]
+        future = full_data.iloc[corr_start_idx - 1 : corr_start_idx + max_lt]
 
         # predictions aligned to dates
         forecasted_ts = timestamps[forecast_mask]
         start_idx_preds = forecasted_ts.get_indexer([corr_start_date])[0]
         selected_predictions = build_selected_predictions(forecast, corr_start_date, start_idx_preds, max_lt)
+
+        # here we need to add it to future and selected predictions
+        # add real value to selected predictions for plotting
+        row = past.iloc[[-1]]
+        first_row = pd.concat([row] * 9, axis=1)
+        first_row.columns = selected_predictions.columns
+        selected_predictions = pd.concat([first_row, selected_predictions])
 
         # plots
         ax.plot(past.index, past["target"], label="Past", color="black", linestyle="--", linewidth=1)
@@ -3416,6 +3504,13 @@ def plot_multiple_forecasts(
 
         if 0.5 in selected_predictions.columns:
             ax.plot(selected_predictions.index, selected_predictions[0.5].values, label="Prediction (median)", color="red", linewidth=1.5)
+
+        # Draw vertical lines at regular intervals
+        idx = selected_predictions.index
+        if window_size:
+            for i in range(0, len(idx), window_size):
+                if i < len(timestamps):
+                    ax.axvline(idx[i], color="grey", alpha=0.4)
 
         ax.axvline(corr_start_date, color="black", linestyle=":", label="Prediction start")
         forecast_end = selected_predictions.index[-1]
@@ -3429,7 +3524,7 @@ def plot_multiple_forecasts(
         )
 
         ax.set_title(f"{item_id}", fontsize=font_sizes["subtitle"])
-        format_axes(ax, font_sizes, show_xy_labels, tight_margins)
+        format_axes(ax, font_sizes, show_x_labels, show_y_labels, show_x_ticks, show_y_ticks, tight_margins, use_window_labels, window_size, selected_predictions.index)
 
     # hide unused subplots
     for idx in range(num_forecasts, len(forecast_axes)):
