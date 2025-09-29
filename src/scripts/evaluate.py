@@ -1,6 +1,6 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
@@ -9,10 +9,12 @@ from src.predictors.chronos import Chronos
 from src.predictors.tirex import TiRex
 from src.predictors.benchmarks import SeasonalNaive, OnlineRandomWalk
 import eval_constants
+from eval_constants import file_clean_up
 from src.predictors.autogluon_wrapper import PatchTST_Ag, TiDE_Ag
 import argparse
 import gc
 from typing import Literal
+import pandas as pd
 
 # 3 dataset to chose from
 DAP = "day_ahead_prices"
@@ -48,8 +50,10 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
     test_start_date = eval_constants.test_start_date
     postprocessors = eval_constants.postprocessors
     postprocessor_kwargs = eval_constants.postprocessor_kwargs
-    auto_calibration = "auto" if eval_constants.auto_calibration else None
+    max_calibration_samples = eval_constants.max_calibration_samples
     auto_determine_val_set = eval_constants.auto_determine_val_set
+    rolling_window_eval = eval_constants.rolling_window_eval
+    test_window_size = eval_constants.test_window_size
 
     # dataset specific:
     freq = dataset_config["freq"]
@@ -59,6 +63,10 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
     output_dir = dataset_config["output_dir"]
     seasonal_period = dataset_config["seasonal_period"]
     data = dataset_config["data"]
+
+    # just to be sure to not accidently shorten it
+    if not rolling_window_eval: 
+        test_window_size = None
 
     if torch.cuda.is_available():
         device_map = "cuda"
@@ -85,40 +93,42 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         # Chronos-Bolt-*-PP_QuantReg
         # Chronos-Bolt-*-PP_Gauss
 
-        # pipeline = ForecastingPipeline(
-        #     model=Chronos,
-        #     model_kwargs={
-        #         "pretrained_model_name_or_path": f"amazon/chronos-bolt-{chronos_variant}",
-        #         "device_map": device_map,
-        #         "lead_times": lead_times,
-        #         "name": f"Chronos-Bolt-{chronos_variant}",
-        #     },
-        #     postprocessors=postprocessors,
-        #     postprocessor_kwargs=postprocessor_kwargs,
-        #     freq=freq,
-        #     output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}",
-        # )
+        pipeline = ForecastingPipeline(
+            model=Chronos,
+            model_kwargs={
+                "pretrained_model_name_or_path": f"amazon/chronos-bolt-{chronos_variant}",
+                "device_map": device_map,
+                "lead_times": lead_times,
+                "name": f"Chronos-Bolt-{chronos_variant}",
+            },
+            postprocessors=postprocessors,
+            postprocessor_kwargs=postprocessor_kwargs,
+            freq=freq,
+            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-3m",
+        )
 
-        # results = pipeline.backtest(
-        #     data=data,
-        #     test_start_date=test_start_date,
-        #     rolling_window_eval=False,
-        #     train=False,
-        #     val_window_size=None,
-        #     train_window_size=None,
-        #     test_window_size=None,
-        #     calibration_based_on=auto_calibration or "train",
-        #     save_results=True,
-        #     test_window_step=test_window_step,
-        #     calibration_window_step=calibration_window_step,
-        #     auto_determine_val_set=auto_determine_val_set,
-        # )
+        results = pipeline.backtest(
+            data=data,
+            test_start_date=test_start_date,
+            rolling_window_eval=rolling_window_eval,
+            train=False,
+            val_window_size=None,
+            train_window_size=None,
+            test_window_size=test_window_size,
+            calibration_based_on="train",
+            save_results=True,
+            test_window_step=test_window_step,
+            calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
+            auto_determine_val_set=auto_determine_val_set,
+        )
 
-        # del pipeline
-        # del results
-        # clear_gpu_memory()
+        del pipeline
+        del results
+        clear_gpu_memory()
+        #file_clean_up(output_dir)
 
-        # # following models are evaluated:
+        # following models are evaluated:
 
         # Chronos-Bolt-*-FT_LongOut
         # Chronos-Bolt-*-FT_LongOut-PP_Offset
@@ -140,27 +150,29 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
             freq=freq,
-            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_LongOut",
+            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_LongOut-3m",
         )
 
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
-            test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            test_window_size=test_window_size,
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
         del pipeline
         del results
         clear_gpu_memory()
+        #file_clean_up(output_dir)
 
         # following models are evaluated:
 
@@ -191,15 +203,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
-            test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            test_window_size=test_window_size,
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
@@ -235,15 +248,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
-            test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            test_window_size=test_window_size,
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
@@ -273,27 +287,29 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
             freq=freq,
-            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_Full",
+            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_Full-3m",
         )
 
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
-            test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            test_window_size=test_window_size,
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
         del pipeline
         del results
         clear_gpu_memory()
+        file_clean_up(output_dir)
 
     if T5:
         # ------------------------ Chronos-T5 ------------------------
@@ -322,21 +338,23 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=False,
             val_window_size=None,  # TODO: rerun results with val_window_size = None
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "train",
+            calibration_based_on="train",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
         del pipeline
         del results
         clear_gpu_memory()
+
 
         # ------- trained on original 64 steps, not extended head ---------
 
@@ -367,15 +385,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
@@ -383,11 +402,11 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del results
         clear_gpu_memory()
 
-        # following models are evaluated:
-        # Chronos-T5-*-FT_Last
-        # Chronos-T5-*-FT_Last-PP_Offset
-        # Chronos-T5-*-FT_Last-PP_QuantReg
-        # Chronos-T5-*-FT_Last-PP_Gauss
+        # # following models are evaluated:
+        # # Chronos-T5-*-FT_Last
+        # # Chronos-T5-*-FT_Last-PP_Offset
+        # # Chronos-T5-*-FT_Last-PP_QuantReg
+        # # Chronos-T5-*-FT_Last-PP_Gauss
 
         pipeline = ForecastingPipeline(
             model=Chronos,
@@ -415,10 +434,11 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
@@ -453,15 +473,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
@@ -483,7 +504,7 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
                 "pretrained_model_name_or_path": f"amazon/chronos-t5-{chronos_variant}",
                 "device_map": device_map,
                 "lead_times": lead_times,
-                "finetuning_schedule": ["full"],
+                "finetuning_schedule": ["last_layer", "full"],
                 "finetuning_hp_search": False,
                 "finetuning_warmup_new_neurons": False,
                 "finetuning_adjust_pretrained_prediction_length": True,
@@ -503,10 +524,11 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=auto_determine_val_set,
         )
 
@@ -539,10 +561,11 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         #     val_window_size=val_window_size,
         #     train_window_size=None,
         #     test_window_size=None,
-        #     calibration_based_on=auto_calibration or "val",
+        #     calibration_based_on="val",
         #     save_results=True,
         #     test_window_step=test_window_step,
         #     calibration_window_step=calibration_window_step,
+        #     max_calibration_samples=max_calibration_samples,
         #     auto_determine_val_set=False,
         # )
 
@@ -569,15 +592,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "train_val",
+            calibration_based_on="train_val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=False,
         )
 
@@ -594,7 +618,7 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         # SeasonalNaive-PP_Gauss
         pipeline = ForecastingPipeline(
             model=SeasonalNaive,
-            model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq, "name": "SeasonalNaive"},
+            model_kwargs={"quantiles": quantiles, "lead_times": lead_times, "freq": freq, "name": "SeasonalNaive", "last_n_samples": 11},
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
             output_dir=output_dir / "SeasonalNaive",
@@ -604,15 +628,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "train_val",
+            calibration_based_on="train_val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=False,
         )
 
@@ -643,10 +668,11 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         #     val_window_size=val_window_size,
         #     train_window_size=None,
         #     test_window_size=None,
-        #     calibration_based_on=auto_calibration or "train_val",
+        #     calibration_based_on="train_val",
         #     save_results=True,
         #     test_window_step=test_window_step,
         #     calibration_window_step=calibration_window_step,
+        #     max_calibration_samples=max_calibration_samples,
         #     auto_determine_val_set=False,
         # )
 
@@ -672,15 +698,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=False,
         )
 
@@ -707,15 +734,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=True,
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "val",
+            calibration_based_on="val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=False,
         )
 
@@ -747,15 +775,16 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         results = pipeline.backtest(
             data=data,
             test_start_date=test_start_date,
-            rolling_window_eval=False,
+            rolling_window_eval=rolling_window_eval,
             train=False,
             val_window_size=val_window_size,
             train_window_size=None,
             test_window_size=None,
-            calibration_based_on=auto_calibration or "train_val",
+            calibration_based_on="train_val",
             save_results=True,
             test_window_step=test_window_step,
             calibration_window_step=calibration_window_step,
+            max_calibration_samples=max_calibration_samples,
             auto_determine_val_set=False,
         )
 
@@ -766,8 +795,5 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
 if __name__ == "__main__":
 
-    chronos_variant = "tiny"
-    # specify chronos variant
-    # evaluate(chronos_variant)
-    for chronos_variant in ["base"]:
-        evaluate(chronos_variant)
+    chronos_variant = "tiny"    # specify chronos variant
+    evaluate(chronos_variant)

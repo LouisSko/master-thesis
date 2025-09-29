@@ -18,8 +18,10 @@ postprocessor_kwargs = [
 ]
 
 # whether to evaluate using auto calibration or not
-max_calibration_samples = 50
+max_calibration_samples = None
 auto_determine_val_set = False  # or False
+test_window_size = None # pd.DateOffset(months=3) 
+rolling_window_eval = False
 
 # Path to this script
 script_dir = Path(__file__).resolve().parent
