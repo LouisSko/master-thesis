@@ -64,6 +64,9 @@ class PostprocessorQR(AbstractPostprocessor):
     ) -> None:
         super().__init__(output_dir, name, n_jobs)
         self.transformer = transformer
+        
+        if self.transformer is not None:
+            raise ValueError("Only transformer=None is supported in the current implementation.")
 
     def _fit(self, data: TimeSeriesForecast) -> Any:
 

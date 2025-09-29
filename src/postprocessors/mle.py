@@ -35,6 +35,9 @@ class PostprocessorMLE(AbstractPostprocessor):
     ) -> None:
         super().__init__(output_dir, name, n_jobs)
         self.transformer = transformer
+
+        if self.transformer is not None:
+            raise ValueError("Only transformer=None is supported in the current implementation.")
         self.epsilon = epsilon  # relevant for log
 
     def extract_m_iqr(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
