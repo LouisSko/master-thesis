@@ -5,19 +5,20 @@ from src.postprocessors.qr import PostprocessorFastQR
 from src.postprocessors.eqc import PostprocessorEQC
 from pathlib import Path
 from src.data.preprocessor import read_smard_data, read_exchange_rates_data
+import os
 
 lead_times = np.arange(1, (64 * 10) + 1).tolist()
 quantiles = np.round(np.arange(0.1, 1, 0.1), 1).tolist()
 test_start_date = pd.Timestamp("2023-01-01")
 postprocessors = [PostprocessorEQC, PostprocessorFastQR, PostprocessorMLE]
 postprocessor_kwargs = [
-    {"n_jobs": 8, "name": "PP_Offset"},
-    {"n_jobs": 4, "name": "PP_QuantReg"},
-    {"n_jobs": 8, "name": "PP_Gauss"},
+    {"n_jobs": 8, "name": "PP_ConQC"},
+    {"n_jobs": 8, "name": "PP_LinQC"},
+    {"n_jobs": 8, "name": "PP_QMOS"},
 ]
 
 # whether to evaluate using auto calibration or not
-auto_calibration = False  # or False
+max_calibration_samples = 50
 auto_determine_val_set = False  # or False
 
 # Path to this script
@@ -87,3 +88,52 @@ def get_exchange_rate_config():
         "seasonal_period": 1,  # no reasonable setting
         "data": read_exchange_rates_data(files_dir=project_root / "data/exchange_rates/")[0],
     }
+
+import os
+from pathlib import Path
+
+def file_clean_up(output_dir: Path):
+    allowed_dirs = {"backtest", "models", "postprocessors"}
+    output_dir = Path(output_dir)
+
+    def in_allowed_tree(p: Path) -> bool:
+        """
+        True if p is inside output_dir and at least one part 
+        (below output_dir) is in allowed_dirs.
+        """
+        try:
+            rel_parts = p.relative_to(output_dir).parts
+        except ValueError:
+            # p is not inside output_dir
+            return False
+        return any(part in allowed_dirs for part in rel_parts)
+
+    # Delete files (except eval_config.json) under any allowed tree
+    for root, dirs, files in os.walk(output_dir):
+        print(root)
+        root_p = Path(root)
+        if not in_allowed_tree(root_p):
+            continue
+
+        for name in files:
+            if name != "eval_config.json":
+                fp = root_p / name
+                try:
+                    fp.unlink()
+                    print(f"Deleted: {fp}")
+                except Exception as e:
+                    print(f"Error deleting {fp}: {e}")
+
+    # Remove empty directories bottom-up, but only within allowed trees
+    for root, dirs, files in os.walk(output_dir, topdown=False):
+        root_p = Path(root)
+        if not in_allowed_tree(root_p):
+            continue
+
+        # If directory is empty after deletions, remove it
+        try:
+            if not any(root_p.iterdir()):
+                root_p.rmdir()
+                print(f"Removed empty dir: {root_p}")
+        except Exception as e:
+            print(f"Error removing {root_p}: {e}")
