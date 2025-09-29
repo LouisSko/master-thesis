@@ -102,11 +102,11 @@ class PostprocessorMLE(AbstractPostprocessor):
             params_array[h] = result.x
             params[h + 1] = result.x
 
-            if not result.success:
-                logging.warning("success=false for forecast horizon=%s, item=%s.", h, data.item_id)
-                logging.warning(result.message)
-                logging.info(f"Init params: {init_params}")
-                logging.info(f"found params: {result.x}")
+            # if not result.success:
+            #     logging.warning("success=false for forecast horizon=%s, item=%s.", h, data.item_id)
+            #     logging.warning(result.message)
+            #     logging.info(f"Init params: {init_params}")
+            #     logging.info(f"found params: {result.x}")
 
         params["params"] = params_array
         params["transformer"] = transformer
