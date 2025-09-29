@@ -98,6 +98,15 @@ def read_exchange_rates_data(files_dir: Union[str, Path] = Path("data/exchange_r
     """
     Reads and processes exchange rate data from FRED into a unified long-format TimeSeriesDataFrame.
 
+    # 0: US/AUD https://fred.stlouisfed.org/series/DEXUSAL 
+    # 1: US/UK  https://fred.stlouisfed.org/series/DEXUSUK
+    # 2: US/CA  https://fred.stlouisfed.org/series/DEXCAUS (flipped)
+    # 3: US/SZ  https://fred.stlouisfed.org/series/DEXSZUS (flipped)
+    # 4: US/CH  https://fred.stlouisfed.org/series/DEXCHUS (flipped)
+    # 5: US/JP  https://fred.stlouisfed.org/series/DEXJPUS (flipped)
+    # 6: US/NZ  https://fred.stlouisfed.org/series/DEXUSNZ 
+    # 7: US/SI  https://fred.stlouisfed.org/series/DEXSIUS (flipped)
+
     Parameters
     ----------
     files_dir : Union[str, Path]
