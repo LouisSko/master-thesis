@@ -997,9 +997,13 @@ class ForecastingPipeline(AbstractPipeline):
         for bt in all_backtest_keys:
             all_methods.update(execution_times[bt].keys())
 
+        # Filter out non-execution-time keys "start" and "end"
+        execution_time_keys = {name for name in all_methods 
+                            if name not in ["start", "end"]}
+
         merged = {}
         # merge values
-        for name in all_methods:
+        for name in execution_time_keys:
             all_obj = []
             for bt in all_backtest_keys:
                 all_obj.append(execution_times[bt][name])
