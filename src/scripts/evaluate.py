@@ -104,7 +104,7 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
             freq=freq,
-            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-3m",
+            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}",
         )
 
         results = pipeline.backtest(
@@ -126,7 +126,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-        #file_clean_up(output_dir)
+        if clean_up:
+            file_clean_up(output_dir)
 
         # following models are evaluated:
 
@@ -150,7 +151,7 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
             freq=freq,
-            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_LongOut-3m",
+            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_LongOut",
         )
 
         results = pipeline.backtest(
@@ -172,7 +173,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-        #file_clean_up(output_dir)
+        if clean_up:
+            file_clean_up(output_dir)
 
         # following models are evaluated:
 
@@ -219,7 +221,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-
+        if clean_up:
+            file_clean_up(output_dir)
         # following models are evaluated:
 
         # Chronos-Bolt-*-FT_LoRA
@@ -264,7 +267,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-
+        if clean_up:
+            file_clean_up(output_dir)
         # following models are evaluated:
 
         # Chronos-Bolt-*-FT_Full
@@ -287,7 +291,7 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
             postprocessors=postprocessors,
             postprocessor_kwargs=postprocessor_kwargs,
             freq=freq,
-            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_Full-3m",
+            output_dir=output_dir / f"Chronos-Bolt-{chronos_variant}-FT_Full",
         )
 
         results = pipeline.backtest(
@@ -309,7 +313,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-        file_clean_up(output_dir)
+        if clean_up:
+            file_clean_up(output_dir)
 
     if T5:
         # ------------------------ Chronos-T5 ------------------------
@@ -353,7 +358,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
         del pipeline
         del results
-        clear_gpu_memory()
+        if clean_up:
+            file_clean_up(output_dir)
 
 
         # ------- trained on original 64 steps, not extended head ---------
@@ -400,7 +406,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
         del pipeline
         del results
-        clear_gpu_memory()
+        if clean_up:
+            file_clean_up(output_dir)
 
         # # following models are evaluated:
         # # Chronos-T5-*-FT_Last
@@ -444,7 +451,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
         del pipeline
         del results
-        clear_gpu_memory()
+        if clean_up:
+            file_clean_up(output_dir)
 
         # following models are evaluated:
         # Chronos-T5-*-FT_LoRA
@@ -488,7 +496,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
         del pipeline
         del results
-        clear_gpu_memory()
+        if clean_up:
+            file_clean_up(output_dir)
 
         # ------- trained on adjusted prediction length ---------
 
@@ -534,7 +543,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
         del pipeline
         del results
-        clear_gpu_memory()
+        if clean_up:
+            file_clean_up(output_dir)
 
     if BENCHMARKS:
         # # ------------------------ RandomWalk ------------------------
@@ -608,6 +618,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
+        if clean_up:
+            file_clean_up(output_dir)
 
         # ------------------------ SeasonalNaive ------------------------
 
@@ -643,6 +655,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
 
         del pipeline
         del results
+        if clean_up:
+            file_clean_up(output_dir)
 
         # ------------------------ SeasonalNaiveAg ------------------------
 
@@ -714,7 +728,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-
+        if clean_up:
+            file_clean_up(output_dir)
         # ------------------------ TiDE ------------------------
 
         # following models are evaluated:
@@ -750,7 +765,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-
+        if clean_up:
+            file_clean_up(output_dir)
         # ------------------------ TiRex ------------------------
 
         # following models are evaluated:
@@ -791,7 +807,8 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         del pipeline
         del results
         clear_gpu_memory()
-
+        if clean_up:
+            file_clean_up(output_dir)
 
 if __name__ == "__main__":
 
