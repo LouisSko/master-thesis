@@ -128,7 +128,13 @@ cd gift-eval
 pip install -e .
 ```
 
-### 3) Download the GIFT-Eval Dataset and Create a `.env` File
+### 3) Install Huggingface tools
+
+```bash
+pip install huggingface_hub
+```
+
+### 4) Download the GIFT-Eval Dataset and Create a `.env` File
 
 ```bash
 # Set the path where you want to store the dataset
@@ -144,7 +150,7 @@ echo "GIFT_EVAL=$PATH_TO_SAVE" > .env
 # export $(cat .env | xargs)
 ```
 
-### 4) Run the Benchmark
+### 5) Run the Benchmark
 
 ```bash
 cd /path/to/mt-probabilistic-foreacsting-framework/gift-eval
