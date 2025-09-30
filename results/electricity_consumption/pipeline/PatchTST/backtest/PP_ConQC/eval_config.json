@@ -1,0 +1,44 @@
+{
+    "method": "PP_ConQC",
+    "Mean CRPS": {
+        "micro": 1496.364051356094
+    },
+    "(1-640)": {
+        "0.1": 0.11983872706704364,
+        "0.2": 0.22867703735410688,
+        "0.3": 0.3332775481107315,
+        "0.4": 0.4431063142971625,
+        "0.5": 0.5378312314641529,
+        "0.6": 0.6284454750406723,
+        "0.7": 0.7200155769506188,
+        "0.8": 0.8145650925042361,
+        "0.9": 0.9090100107654752
+    },
+    "QS averaged over all lead times": {
+        "0.1": 448.34422631905124,
+        "0.2": 707.6392769892633,
+        "0.3": 866.7360103973831,
+        "0.4": 942.0144237080091,
+        "0.5": 955.7757364072056,
+        "0.6": 915.9718317786253,
+        "0.7": 821.4569301739253,
+        "0.8": 661.0486584110996,
+        "0.9": 414.84213419235783,
+        "Mean (CRPS/2)": 748.2032475974355
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_ConQC",
+        "execution_time_predictor": {
+            "predictor_name": "PatchTST",
+            "predictor_train_time": 177.97,
+            "predictor_inference_time": 26.86,
+            "total_train_time": 177.97,
+            "total_inference_time": 26.86
+        },
+        "calibration_inference_time": 9.9,
+        "postprocessor_train_time": 2.37,
+        "postprocessor_inference_time": 0.14,
+        "total_train_time": 190.24,
+        "total_inference_time": 27.0
+    }
+}

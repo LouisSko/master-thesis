@@ -1,0 +1,44 @@
+{
+    "method": "PP_QMOS",
+    "Mean CRPS": {
+        "micro": 0.023648477689603827
+    },
+    "(1-640)": {
+        "0.1": 0.07489307889366506,
+        "0.2": 0.1672853979419044,
+        "0.3": 0.3023093873474882,
+        "0.4": 0.45910457644044983,
+        "0.5": 0.5893529373453171,
+        "0.6": 0.7049992401545743,
+        "0.7": 0.7857007945812167,
+        "0.8": 0.8490729885806088,
+        "0.9": 0.9036277191611306
+    },
+    "QS averaged over all lead times": {
+        "0.1": 0.006940164653168305,
+        "0.2": 0.009791724432582855,
+        "0.3": 0.012321831504838957,
+        "0.4": 0.0158209607559885,
+        "0.5": 0.01913013429791093,
+        "0.6": 0.020744806351613805,
+        "0.7": 0.02023233700426137,
+        "0.8": 0.017274851775179546,
+        "0.9": 0.011219903281328927,
+        "Mean (CRPS/2)": 0.014830746006319244
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_QMOS",
+        "execution_time_predictor": {
+            "predictor_name": "Chronos-Bolt-mini",
+            "predictor_train_time": null,
+            "predictor_inference_time": 37.23,
+            "total_train_time": null,
+            "total_inference_time": 37.23
+        },
+        "calibration_inference_time": 447.97,
+        "postprocessor_train_time": 1574.47,
+        "postprocessor_inference_time": 2.49,
+        "total_train_time": 2022.44,
+        "total_inference_time": 39.72
+    }
+}

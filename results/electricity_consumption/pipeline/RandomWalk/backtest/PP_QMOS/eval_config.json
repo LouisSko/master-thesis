@@ -1,0 +1,44 @@
+{
+    "method": "PP_QMOS",
+    "Mean CRPS": {
+        "micro": 1762.5531807260913
+    },
+    "(1-640)": {
+        "0.1": 0.2407057259776226,
+        "0.2": 0.35467895872590843,
+        "0.3": 0.45736212065378135,
+        "0.4": 0.5636265329537793,
+        "0.5": 0.6695127858121014,
+        "0.6": 0.7635900043609025,
+        "0.7": 0.840296026429322,
+        "0.8": 0.9089633442811833,
+        "0.9": 0.9689587420003186
+    },
+    "QS averaged over all lead times": {
+        "0.1": 588.682463711648,
+        "0.2": 871.9908269613659,
+        "0.3": 1017.0299236978383,
+        "0.4": 1077.335760297198,
+        "0.5": 1087.1207183631573,
+        "0.6": 1057.5513653019934,
+        "0.7": 962.7530089298955,
+        "0.8": 779.8705899563535,
+        "0.9": 490.09729806986843,
+        "Mean (CRPS/2)": 881.3813283654797
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_QMOS",
+        "execution_time_predictor": {
+            "predictor_name": "RandomWalk",
+            "predictor_train_time": 0.0,
+            "predictor_inference_time": 0.53,
+            "total_train_time": 0.0,
+            "total_inference_time": 0.53
+        },
+        "calibration_inference_time": 0.65,
+        "postprocessor_train_time": 110.03,
+        "postprocessor_inference_time": 0.92,
+        "total_train_time": 110.68,
+        "total_inference_time": 1.45
+    }
+}

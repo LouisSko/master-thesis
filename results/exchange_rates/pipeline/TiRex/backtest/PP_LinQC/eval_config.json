@@ -1,0 +1,44 @@
+{
+    "method": "PP_LinQC",
+    "Mean CRPS": {
+        "micro": 0.0213489488645373
+    },
+    "(1-640)": {
+        "0.1": 0.21433665494333723,
+        "0.2": 0.33663431896139984,
+        "0.3": 0.45011397681385956,
+        "0.4": 0.5331281750683861,
+        "0.5": 0.5986545308497243,
+        "0.6": 0.661498089531501,
+        "0.7": 0.7286700534062784,
+        "0.8": 0.7899168512005558,
+        "0.9": 0.8509449220615692
+    },
+    "QS averaged over all lead times": {
+        "0.1": 0.006116017480723427,
+        "0.2": 0.011036101473492611,
+        "0.3": 0.014344865413092175,
+        "0.4": 0.016262179487031687,
+        "0.5": 0.017104812220359738,
+        "0.6": 0.01699422732381,
+        "0.7": 0.015979757831875625,
+        "0.8": 0.013533410085787359,
+        "0.9": 0.00995196943302611,
+        "Mean (CRPS/2)": 0.013480371194355413
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_LinQC",
+        "execution_time_predictor": {
+            "predictor_name": "TiRex",
+            "predictor_train_time": null,
+            "predictor_inference_time": 61.8,
+            "total_train_time": null,
+            "total_inference_time": 61.8
+        },
+        "calibration_inference_time": 776.74,
+        "postprocessor_train_time": 2.48,
+        "postprocessor_inference_time": 0.65,
+        "total_train_time": 779.22,
+        "total_inference_time": 62.45
+    }
+}

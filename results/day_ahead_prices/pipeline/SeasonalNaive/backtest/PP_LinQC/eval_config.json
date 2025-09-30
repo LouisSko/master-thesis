@@ -1,0 +1,44 @@
+{
+    "method": "PP_LinQC",
+    "Mean CRPS": {
+        "micro": 24.699196480073887
+    },
+    "(1-640)": {
+        "0.1": 0.12184228867740801,
+        "0.2": 0.21484708706499364,
+        "0.3": 0.3301856636231833,
+        "0.4": 0.45161603673352435,
+        "0.5": 0.5737340693206883,
+        "0.6": 0.6898467987536671,
+        "0.7": 0.7907099289393899,
+        "0.8": 0.8769330535185662,
+        "0.9": 0.9397628927650417
+    },
+    "QS averaged over all lead times": {
+        "0.1": 6.718510653764126,
+        "0.2": 10.350775608556733,
+        "0.3": 12.703854723621669,
+        "0.4": 14.231838022244625,
+        "0.5": 15.106810921660928,
+        "0.6": 15.320205615177034,
+        "0.7": 14.801112717285852,
+        "0.8": 13.088812869129399,
+        "0.9": 8.84653068881933,
+        "Mean (CRPS/2)": 12.352050202251077
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_LinQC",
+        "execution_time_predictor": {
+            "predictor_name": "SeasonalNaive",
+            "predictor_train_time": 0.0,
+            "predictor_inference_time": 63.52,
+            "total_train_time": 0.0,
+            "total_inference_time": 63.52
+        },
+        "calibration_inference_time": 197.7,
+        "postprocessor_train_time": 27.21,
+        "postprocessor_inference_time": 0.9,
+        "total_train_time": 224.91,
+        "total_inference_time": 64.42
+    }
+}

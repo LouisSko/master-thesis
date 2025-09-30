@@ -1,0 +1,44 @@
+{
+    "method": "PP_ConQC",
+    "Mean CRPS": {
+        "micro": 0.018807803420796482
+    },
+    "(1-640)": {
+        "0.1": 0.016827862446268074,
+        "0.2": 0.08657353132734141,
+        "0.3": 0.22744833051105032,
+        "0.4": 0.380983782727628,
+        "0.5": 0.5648213277756068,
+        "0.6": 0.7005302635578133,
+        "0.7": 0.8174992401545743,
+        "0.8": 0.9132343363292953,
+        "0.9": 0.9713641396378794
+    },
+    "QS averaged over all lead times": {
+        "0.1": 0.008964792357474076,
+        "0.2": 0.012014210522944834,
+        "0.3": 0.012632974099902067,
+        "0.4": 0.012149301569838063,
+        "0.5": 0.012470099069415704,
+        "0.6": 0.013030064250488957,
+        "0.7": 0.011987324145181515,
+        "0.8": 0.010024304847719035,
+        "0.9": 0.007278938336420243,
+        "Mean (CRPS/2)": 0.011172445466598275
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_ConQC",
+        "execution_time_predictor": {
+            "predictor_name": "SeasonalNaive",
+            "predictor_train_time": 0.0,
+            "predictor_inference_time": 47.13,
+            "total_train_time": 0.0,
+            "total_inference_time": 47.13
+        },
+        "calibration_inference_time": 581.6,
+        "postprocessor_train_time": 16.06,
+        "postprocessor_inference_time": 0.35,
+        "total_train_time": 597.66,
+        "total_inference_time": 47.48
+    }
+}

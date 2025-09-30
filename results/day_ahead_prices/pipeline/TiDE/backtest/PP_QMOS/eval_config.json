@@ -1,0 +1,44 @@
+{
+    "method": "PP_QMOS",
+    "Mean CRPS": {
+        "micro": 72.74564259368512
+    },
+    "(1-640)": {
+        "0.1": 0.45070275516217734,
+        "0.2": 0.6852030643206306,
+        "0.3": 0.8325072351357768,
+        "0.4": 0.9131445125779143,
+        "0.5": 0.9547297990603121,
+        "0.6": 0.9758251691943931,
+        "0.7": 0.9865045164338935,
+        "0.8": 0.9920983475768985,
+        "0.9": 0.9954751385446813
+    },
+    "QS averaged over all lead times": {
+        "0.1": 22.825411851652934,
+        "0.2": 33.65198383857273,
+        "0.3": 41.52018604838384,
+        "0.4": 46.131383134608136,
+        "0.5": 47.3883129620847,
+        "0.6": 45.39043757246047,
+        "0.7": 40.198467723392525,
+        "0.8": 31.693271091291713,
+        "0.9": 19.33340817929453,
+        "Mean (CRPS/2)": 36.459206933526836
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_QMOS",
+        "execution_time_predictor": {
+            "predictor_name": "TiDE",
+            "predictor_train_time": 141.44,
+            "predictor_inference_time": 164.09,
+            "total_train_time": 141.44,
+            "total_inference_time": 164.09
+        },
+        "calibration_inference_time": 64.37,
+        "postprocessor_train_time": 1145.77,
+        "postprocessor_inference_time": 4.19,
+        "total_train_time": 1351.58,
+        "total_inference_time": 168.28
+    }
+}

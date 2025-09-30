@@ -1,0 +1,44 @@
+{
+    "method": "PP_LinQC",
+    "Mean CRPS": {
+        "micro": 1203.96008035695
+    },
+    "(1-640)": {
+        "0.1": 0.14285817733585868,
+        "0.2": 0.2489399466714728,
+        "0.3": 0.3390159164895218,
+        "0.4": 0.4208351369661314,
+        "0.5": 0.4979756400951996,
+        "0.6": 0.5736702868057757,
+        "0.7": 0.6514383736891143,
+        "0.8": 0.7369297637227624,
+        "0.9": 0.8365401790383807
+    },
+    "QS averaged over all lead times": {
+        "0.1": 342.4860994920839,
+        "0.2": 527.417859187381,
+        "0.3": 646.0005793200908,
+        "0.4": 716.7058863675751,
+        "0.5": 747.3668542217166,
+        "0.6": 739.4995918691574,
+        "0.7": 690.1026513125832,
+        "0.8": 591.4952560622281,
+        "0.9": 417.8939758499582,
+        "Mean (CRPS/2)": 602.107639298086
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_LinQC",
+        "execution_time_predictor": {
+            "predictor_name": "Chronos-Bolt-mini",
+            "predictor_train_time": null,
+            "predictor_inference_time": 7.21,
+            "total_train_time": null,
+            "total_inference_time": 7.21
+        },
+        "calibration_inference_time": 19.07,
+        "postprocessor_train_time": 7.52,
+        "postprocessor_inference_time": 0.21,
+        "total_train_time": 26.59,
+        "total_inference_time": 7.42
+    }
+}

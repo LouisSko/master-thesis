@@ -1,0 +1,44 @@
+{
+    "method": "PP_QMOS",
+    "Mean CRPS": {
+        "micro": 21.95957357599167
+    },
+    "(1-640)": {
+        "0.1": 0.08151596165429786,
+        "0.2": 0.16054801034135766,
+        "0.3": 0.2624715348009513,
+        "0.4": 0.3870647570895755,
+        "0.5": 0.5215596252958148,
+        "0.6": 0.6535473677767294,
+        "0.7": 0.7730481249266284,
+        "0.8": 0.8723091312484826,
+        "0.9": 0.9446881373343652
+    },
+    "QS averaged over all lead times": {
+        "0.1": 6.8448787031025535,
+        "0.2": 10.177311561714653,
+        "0.3": 12.09113342385833,
+        "0.4": 13.123416844360307,
+        "0.5": 13.508314969379182,
+        "0.6": 13.266764013702147,
+        "0.7": 12.30857851318552,
+        "0.8": 10.42362324357715,
+        "0.9": 7.138625989171977,
+        "Mean (CRPS/2)": 10.986960806894647
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_QMOS",
+        "execution_time_predictor": {
+            "predictor_name": "TiRex",
+            "predictor_train_time": null,
+            "predictor_inference_time": 119.72,
+            "total_train_time": null,
+            "total_inference_time": 119.72
+        },
+        "calibration_inference_time": 363.29,
+        "postprocessor_train_time": 1443.37,
+        "postprocessor_inference_time": 4.12,
+        "total_train_time": 1806.66,
+        "total_inference_time": 123.84
+    }
+}

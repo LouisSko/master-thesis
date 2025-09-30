@@ -1,0 +1,44 @@
+{
+    "method": "PP_QMOS",
+    "Mean CRPS": {
+        "micro": 26.625670202314698
+    },
+    "(1-640)": {
+        "0.1": 0.11182842312038017,
+        "0.2": 0.20927277238101688,
+        "0.3": 0.32454570266792954,
+        "0.4": 0.4650986571789077,
+        "0.5": 0.615121529877481,
+        "0.6": 0.736223671631437,
+        "0.7": 0.8279776424176635,
+        "0.8": 0.8993833390354907,
+        "0.9": 0.95237983997095
+    },
+    "QS averaged over all lead times": {
+        "0.1": 8.220222798658039,
+        "0.2": 11.84026379860654,
+        "0.3": 13.739778147934251,
+        "0.4": 14.869533735023811,
+        "0.5": 15.92412447527667,
+        "0.6": 16.47934173255621,
+        "0.7": 15.844041578014645,
+        "0.8": 13.63238388225021,
+        "0.9": 9.302374906713567,
+        "Mean (CRPS/2)": 13.316896117225992
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_QMOS",
+        "execution_time_predictor": {
+            "predictor_name": "SeasonalNaive",
+            "predictor_train_time": 0.0,
+            "predictor_inference_time": 63.52,
+            "total_train_time": 0.0,
+            "total_inference_time": 63.52
+        },
+        "calibration_inference_time": 197.7,
+        "postprocessor_train_time": 1363.1,
+        "postprocessor_inference_time": 4.33,
+        "total_train_time": 1560.8,
+        "total_inference_time": 67.85
+    }
+}

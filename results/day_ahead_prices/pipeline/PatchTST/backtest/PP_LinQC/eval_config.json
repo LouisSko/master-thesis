@@ -1,0 +1,44 @@
+{
+    "method": "PP_LinQC",
+    "Mean CRPS": {
+        "micro": 24.210351775657678
+    },
+    "(1-640)": {
+        "0.1": 0.13994129094279578,
+        "0.2": 0.21686807553815896,
+        "0.3": 0.28972582627808413,
+        "0.4": 0.37463277268854894,
+        "0.5": 0.47555090380426057,
+        "0.6": 0.5907509430737418,
+        "0.7": 0.7118264714744773,
+        "0.8": 0.824636188068879,
+        "0.9": 0.919935205356026
+    },
+    "QS averaged over all lead times": {
+        "0.1": 7.39334204184445,
+        "0.2": 10.990704632788496,
+        "0.3": 13.261272883964736,
+        "0.4": 14.490873143998215,
+        "0.5": 14.87086723981245,
+        "0.6": 14.528344891843261,
+        "0.7": 13.505612428982536,
+        "0.8": 11.627275136177342,
+        "0.9": 8.326881044933419,
+        "Mean (CRPS/2)": 12.110574827149433
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_LinQC",
+        "execution_time_predictor": {
+            "predictor_name": "PatchTST",
+            "predictor_train_time": 89.57,
+            "predictor_inference_time": 143.88,
+            "total_train_time": 89.57,
+            "total_inference_time": 143.88
+        },
+        "calibration_inference_time": 56.18,
+        "postprocessor_train_time": 9.39,
+        "postprocessor_inference_time": 0.79,
+        "total_train_time": 155.14,
+        "total_inference_time": 144.67
+    }
+}

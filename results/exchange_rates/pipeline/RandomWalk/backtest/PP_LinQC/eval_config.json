@@ -1,0 +1,44 @@
+{
+    "method": "PP_LinQC",
+    "Mean CRPS": {
+        "micro": 0.019266750870289194
+    },
+    "(1-640)": {
+        "0.1": 0.11165874256436976,
+        "0.2": 0.16470843645521255,
+        "0.3": 0.2556684468759498,
+        "0.4": 0.39766238982241325,
+        "0.5": 0.5615491077243715,
+        "0.6": 0.5852123225218184,
+        "0.7": 0.7158932525726195,
+        "0.8": 0.8210922235248144,
+        "0.9": 0.8838201771525336
+    },
+    "QS averaged over all lead times": {
+        "0.1": 0.00860371511851651,
+        "0.2": 0.012183135333397148,
+        "0.3": 0.013156807070950748,
+        "0.4": 0.012936453105120291,
+        "0.5": 0.012991776646256118,
+        "0.6": 0.012776417217659866,
+        "0.7": 0.011656542855210287,
+        "0.8": 0.010559486413513692,
+        "0.9": 0.008378211943937338,
+        "Mean (CRPS/2)": 0.011471393967173555
+    },
+    "execution_time": {
+        "postprocessor_name": "PP_LinQC",
+        "execution_time_predictor": {
+            "predictor_name": "RandomWalk",
+            "predictor_train_time": 0.0,
+            "predictor_inference_time": 0.72,
+            "total_train_time": 0.0,
+            "total_inference_time": 0.72
+        },
+        "calibration_inference_time": 5.82,
+        "postprocessor_train_time": 3.13,
+        "postprocessor_inference_time": 0.51,
+        "total_train_time": 8.95,
+        "total_inference_time": 1.23
+    }
+}
