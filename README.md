@@ -1,127 +1,158 @@
-# Quantile Forecasting with Pretrained Time Series Transformers
+# Postprocessing and Fine-Tuning Methods for Improving Long-Term Probabilistic Forecasts of Time Series Foundation Models  
+**(Master's Thesis Project)**
 
-This project provides a flexible pipeline for univariate time series **quantile forecasting**.
+This repository provides a flexible framework for **univariate time series quantile forecasting**.  
+It focuses on improving the performance of large time series foundation models (like **Chronos Bolt**) through **fine-tuning** and **postprocessing** techniques.
 
-It supports:
-- Fine-tuning of the **Chronos Bolt** model (including full fine-tuning, last-layer fine-tuning, and LoRA).
-- Integration of other time series models and custom postprocessors.
-- End-to-end (E2E) testing of forecasting pipelines.
-- Comprehensive evaluation with metrics such as **CRPS scores**, **quantile scores**, **reliability diagrams**, **PIT histograms**, and more.
+---
 
+## 📦 Related Repositories
 
-## Setup
+- [chronos-forecasting](https://github.com/LouisSko/chronos-forecasting/tree/feature/sampling) – Chronos usage and fine-tuning (branch: `feature/sampling`)
+- [tirex-microservice](https://github.com/LouisSko/tirex-microservice) – Optional TiRex microservice integration
+- [gift-eval](https://github.com/LouisSko/gift-eval) – Benchmarking and evaluation framework for GIFT-Eval (branch: `chronos`)
 
-### 1. Clone repository
+---
+
+## 🚀 Features
+
+- Fine-tuning of **Chronos Bolt** (full, last-layer, and LoRA) for any forecast horizon  
+- Integration of external models and custom postprocessors (e.g., **AutoGluon**)  
+- End-to-end (E2E) testing of forecasting pipelines  
+- Comprehensive evaluation metrics:
+  - Continuous Ranked Probability Score (**CRPS**)
+  - Quantile scores
+  - Reliability diagrams
+  - Probability Integral Transform (**PIT**) histograms
+  - And more
+
+---
+
+## ⚙️ Setup
+
+### 1) Clone the Repository
+
 ```bash
 git clone git@github.com:LouisSko/master-thesis.git
 cd master-thesis
 ```
 
-### 2. Create and Activate Virtual Environment
+### 2) Create and Activate a Virtual Environment
+
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Upgrade pip (optional but recommended)
+### 3) Upgrade pip (recommended)
+
 ```bash
 pip install --upgrade pip
 ```
 
-### 4. Install Requirements
+### 4) Install Requirements
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5. Clone Chronos-bolt on the `feature/sampling` branch
+---
+
+## 📈 Chronos Bolt Fine-Tuning & Evaluation
+
+### 5) Clone the Chronos Forecasting Repository (branch: `feature/sampling`)
+
 ```bash
-git clone --branch feature/sampling \
-  git@github.com:LouisSko/chronos-forecasting.git
+git clone --branch feature/sampling git@github.com:LouisSko/chronos-forecasting.git
 ```
 
-### 6. Install in editable mode with extra training dependencies
+### 6) Install Chronos in Editable Mode with Training Dependencies
+
 ```bash
-cd chronos-forecasting && pip install --editable ".[training]"
+cd chronos-forecasting
+pip install --editable ".[training]"
+cd ..
+```
+
+### 7) Run Example Evaluation
+
+```bash
+cd /path/to/master-thesis
+export PYTHONPATH=$(pwd)  # Set repo root as Python path
+
+python src/scripts/evaluate.py --dataset exchange_rates
+python src/scripts/evaluate.py --dataset electricity_consumption
+python src/scripts/evaluate.py --dataset day_ahead_prices
+```
+
+---
+
+## 🔌 Optional: TiRex Integration
+
+If you want to integrate **TiRex** with the forecasting framework, follow the instructions here:  
+👉 [tirex-microservice](https://github.com/LouisSko/tirex-microservice)
+
+---
+
+## 📊 Results
+
+- Results are stored in the `/results` directory.
+- During evaluation, large `predictions.joblib` files were created (~100 GB).  
+  Only high-level `.json` result summaries are uploaded to GitHub.
+- Many evaluation plots depend on the full `joblib` prediction files.
+- Model-specific settings (e.g., `max_calibration_samples`) can be configured in `src/scripts/eval_constants.py`.
+
+---
+
+# 📉 GIFT-Eval Benchmarking
+
+### 1) Clone the `gift-eval` Repository (branch: `chronos`)
+
+```bash
+cd /path/to/master-thesis
+git clone --branch chronos git@github.com:LouisSko/gift-eval.git
+```
+
+### 2) Install Required Dependencies
+
+```bash
+cd gift-eval
+pip install -e .
+```
+
+### 3) Download the GIFT-Eval Dataset and Create a `.env` File
+
+```bash
+# Set the path where you want to store the dataset
+PATH_TO_SAVE="/absolute/path/to/save"
+
+# Download dataset
+huggingface-cli download Salesforce/GiftEval --repo-type=dataset --local-dir "$PATH_TO_SAVE"
+
+# Create a .env file for environment variable loading
+echo "GIFT_EVAL=$PATH_TO_SAVE" > .env
+
+# If your environment doesn't auto-load .env, export it manually:
+# export $(cat .env | xargs)
+```
+
+### 4) Run the Benchmark
+
+```bash
+cd /path/to/master-thesis/gift-eval
+python notebooks/chronos-custom_ft_ensemble.py
+```
+
+---
+
+## 📁 Project Structure
+
+```
+master-thesis/
+├─ src/                     # Core framework code
+├─ results/                 # Evaluation results on core datasets
+├─ GIFT-Eval-results/       # Benchmark results
+└─ notebooks/               # Analysis notebooks
 ```
 
 
-## Basic Usage
-
-### Create a pipeline consisting of models and postprocessors
-```python
-from autogluon.timeseries import TimeSeriesDataFrame
-from src.data.preprocessor import read_smard_data
-from autogluon.timeseries import TimeSeriesDataFrame
-
-df, mapping = read_smard_data(file_paths=["data/Realisierter_Stromverbrauch_201501010000_202101010000_Stunde.csv",
-                                          "data/Realisierter_Stromverbrauch_202101010000_202504240000_Stunde.csv"],
-                              selected_time_series=["Netzlast [MWh] Berechnete Auflösungen", 
-                                                    "Residuallast [MWh] Berechnete Auflösungen"])
-
-
-data = TimeSeriesDataFrame(df)
-
-from src.predictors.chronos import Chronos
-from src.postprocessors.mle import PostprocessorMLE
-from src.postprocessors.qr import PostprocessorQR
-from src.pipeline.pipeline import ForecastingPipeline
-import pandas as pd
-
-pipeline = ForecastingPipeline(model=Chronos, 
-                               model_kwargs={"pretrained_model_name_or_path": "amazon/chronos-bolt-tiny", "device_map": "mps", "lead_times": [1,4,8,16,32,64], "freq": pd.Timedelta("1h"), "finetuning_type": "full"}, 
-                               postprocessors=[PostprocessorMLE, PostprocessorQR],
-                               output_dir=Path("./results/pipeline/chronos"))
-```
-
-### Train, Predict, Postprocess 
-
-```python
-
-data_train, data_val, data_test = pipeline.split_data(data=data, 
-                                                      test_start_date=pd.Timestamp("01-01-2022"), 
-                                                      train_window_size=None,
-                                                      test_window_size=None,
-                                                      val_window_size=pd.DateOffset(years=1))
-
-pipeline.train(data_train)
-pipeline.train_postprocessors(calibration_data=data_val)
-
-predictions = pipeline.predict(data_test=data_test, data_previous_context=data_val)
-predictions = pipeline.apply_postprocessing(predictions)
-
-# save and reload pipeline
-pipeline.save()
-pipeline = ForecastingPipeline.from_pretrained(path="./results/pipeline/chronos")
-```
-
-### Evaluation of Predictions on Test Dataset
-
-Predictions are stored as `PredictionLeadTimes` instances, allowing you to easily compute various evaluation metrics:
-
-- `get_crps()`
-- `get_quantile_scores()`
-- `get_empirical_coverage_rates()`
-- `get_pit_histogram()`
-- `get_reliability_diagram()`
-
-```python
-# The raw, non-postprocessed predictions
-predictions["Chronos"].get_crps(mean_lead_times=True, mean_time=True)
-
-# Postprocessed predictions
-predictions["PostprocessorMLE"].get_crps(mean_lead_times=True, mean_time=True)
-predictions["PostprocessorQR"].get_crps(mean_lead_times=True, mean_time=True)
-```
-
-### Or Backtest Performance End-to-End
-```python
-predictions = pipeline.backtest(data=data,
-                                test_start_date=pd.Timestamp("01-01-2022"),
-                                rolling_window_eval=False,
-                                train=True,
-                                val_window_size=None,
-                                train_window_size=None,
-                                test_window_size=None,
-                                calibration_based_on="train",
-                                save_results=True)                              
-```
