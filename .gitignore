@@ -137,7 +137,9 @@ chronos-forecasting
 models/
 data/predictions/
 data/gift-eval/
-results/
 lightning_logs/
 gift-eval/
 tirex-service/
+predictions.joblib
+crps_item*.npz
+*.safetensors
