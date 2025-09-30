@@ -6,7 +6,7 @@ It focuses on improving the performance of large time series foundation models (
 
 ---
 
-## 📦 Related Repositories
+## 📦 Relevant Repositories
 
 - [chronos-forecasting](https://github.com/LouisSko/chronos-forecasting/tree/feature/sampling) – Chronos usage and fine-tuning (branch: `feature/sampling`)
 - [tirex-microservice](https://github.com/LouisSko/tirex-microservice) – Optional TiRex microservice integration
@@ -16,8 +16,9 @@ It focuses on improving the performance of large time series foundation models (
 
 ## 🚀 Features
 
-- Fine-tuning of **Chronos Bolt** (full, last-layer, and LoRA) for any forecast horizon  
-- Integration of external models and custom postprocessors (e.g., **AutoGluon**)  
+- Fine-tuning of **Chronos and Chronos Bolt** for any forecast horizon  
+- Integration of external models (e.g., **AutoGluon**)
+- Easy to use post-hoc calibration techniques
 - End-to-end (E2E) testing of forecasting pipelines  
 - Comprehensive evaluation metrics:
   - Continuous Ranked Probability Score (**CRPS**)
@@ -33,8 +34,8 @@ It focuses on improving the performance of large time series foundation models (
 ### 1) Clone the Repository
 
 ```bash
-git clone git@github.com:LouisSko/master-thesis.git
-cd master-thesis
+git clone git@github.com:LouisSko/mt-probabilistic-forecasting-framework.git
+cd mt-probabilistic-forecasting-framework
 ```
 
 ### 2) Create and Activate a Virtual Environment
@@ -71,19 +72,24 @@ git clone --branch feature/sampling git@github.com:LouisSko/chronos-forecasting.
 ```bash
 cd chronos-forecasting
 pip install --editable ".[training]"
-cd ..
 ```
+
+### Getting Started
+use the minium_working_example.ipynb to get started.
+
 
 ### 7) Run Example Evaluation
 
 ```bash
-cd /path/to/master-thesis
+cd /path/to/mt-probabilistic-forecasting-framework
 export PYTHONPATH=$(pwd)  # Set repo root as Python path
 
 python src/scripts/evaluate.py --dataset exchange_rates
 python src/scripts/evaluate.py --dataset electricity_consumption
 python src/scripts/evaluate.py --dataset day_ahead_prices
 ```
+
+All individual predictions and models are saved. If you want to run this make sure, to have 100 Gb of available storage. 
 
 ---
 
@@ -106,14 +112,16 @@ If you want to integrate **TiRex** with the forecasting framework, follow the in
 
 # 📉 GIFT-Eval Benchmarking
 
+Run models on GIFT-Eval benchmark
+
 ### 1) Clone the `gift-eval` Repository (branch: `chronos`)
 
 ```bash
-cd /path/to/master-thesis
+cd /path/to/mt-probabilistic-forecasting-framework
 git clone --branch chronos git@github.com:LouisSko/gift-eval.git
 ```
 
-### 2) Install Required Dependencies
+### 2) Install Required Dependencies inside the existing environmen
 
 ```bash
 cd gift-eval
@@ -139,7 +147,7 @@ echo "GIFT_EVAL=$PATH_TO_SAVE" > .env
 ### 4) Run the Benchmark
 
 ```bash
-cd /path/to/master-thesis/gift-eval
+cd /path/to/mt-probabilistic-foreacsting-framework/gift-eval
 python notebooks/chronos-custom_ft_ensemble.py
 ```
 
@@ -148,11 +156,13 @@ python notebooks/chronos-custom_ft_ensemble.py
 ## 📁 Project Structure
 
 ```
-master-thesis/
+mt-probabilistic-forecasting-framework/
 ├─ src/                     # Core framework code
 ├─ results/                 # Evaluation results on core datasets
 ├─ GIFT-Eval-results/       # Benchmark results
 └─ notebooks/               # Analysis notebooks
+└─ data/                    # Contains data for the core datasets
+└─ archive/                 # Archive
 ```
 
 
