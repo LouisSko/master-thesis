@@ -166,8 +166,8 @@ mt-probabilistic-forecasting-framework/
 ├─ src/                     # Core framework code
 ├─ results/                 # Evaluation results on core datasets
 ├─ GIFT-Eval-results/       # Benchmark results
-└─ notebooks/               # Analysis notebooks
-└─ data/                    # Contains data for the core datasets
+├─ notebooks/               # Analysis notebooks
+├─ data/                    # Contains data for the core datasets
 └─ archive/                 # Archive
 ```
 
