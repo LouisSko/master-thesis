@@ -1,0 +1,6 @@
+{
+    "model": "Chronos-Bolt-tiny+ConQC",
+    "model_type": "fine-tuned",
+    "model_dtype": "float32",
+    "testdata_leakage": "Yes"
+}

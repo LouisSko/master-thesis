@@ -1,0 +1,6 @@
+{
+    "model": "Chronos-Bolt-tiny-FT_Full+LinQC",
+    "model_type": "fine-tuned",
+    "model_dtype": "float32",
+    "testdata_leakage": "Yes"
+}
