@@ -54,7 +54,7 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
     auto_determine_val_set = eval_constants.auto_determine_val_set
     rolling_window_eval = eval_constants.rolling_window_eval
     test_window_size = eval_constants.test_window_size
-
+    clean_up = eval_constants.clean_up
     # dataset specific:
     freq = dataset_config["freq"]
     val_window_size = dataset_config["val_window_size"]
@@ -81,9 +81,10 @@ def evaluate(chronos_variant: Literal["tiny", "mini", "small", "base"] = "tiny")
         device_map = "cpu"
 
     # torch.cuda.set_device(1)
+    # decice which results to run
     BOLT = True
-    T5 = False
-    BENCHMARKS = False
+    T5 = True
+    BENCHMARKS = True
     # ------------------------ Chronos-Bolt ------------------------
     if BOLT:
         # following models are evaluated:
